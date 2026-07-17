@@ -50,7 +50,30 @@ def test_resample_preserves_transition_flags():
     assert out[0][2] == 1 and out[-1][2] == 0  # starts visible, ends obstructed
 
 
-def test_resample_respects_cap():
+def test_resample_caps_uniform_fill():
+    # sparse transitions: uniform fill stays within cap
     clipped = [(round(0.1 + 0.01 * i, 3), round(0.9 - 0.01 * i, 3), False) for i in range(60)]
     out = resample_with_transitions(clipped, target=10, cap=12)
     assert len(out) <= 12
+    assert all(v == 1 for _, _, v in out)
+
+
+def test_resample_thins_uniform_not_transitions_under_cap():
+    # one transition at index 20; dense uniform fill must be thinned to the cap,
+    # but the endpoints and the transition are preserved
+    clipped = [(round(0.1 + 0.02 * i, 3), 0.5, i >= 20) for i in range(30)]
+    out = resample_with_transitions(clipped, target=10, cap=8)
+    assert len(out) <= 8
+    flags = [v for _, _, v in out]
+    assert flags[0] == 1 and flags[-1] == 0
+    assert 1 in flags and 0 in flags
+
+
+def test_resample_preserves_all_transitions_even_beyond_cap():
+    # visibility flips every point -> every point is a transition boundary,
+    # so cap is soft and all labels are preserved (no silent drop)
+    clipped = [(round(0.1 + 0.01 * i, 3), 0.5, bool(i % 2)) for i in range(20)]
+    out = resample_with_transitions(clipped, target=10, cap=12)
+    assert len(out) == 20
+    flags = [v for _, _, v in out]
+    assert flags == [1 if i % 2 == 0 else 0 for i in range(20)]

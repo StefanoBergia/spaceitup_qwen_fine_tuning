@@ -85,11 +85,14 @@ def clip_polyline_unit(points):
 
 
 def resample_with_transitions(clipped, target=MAX_WAYPOINTS, cap=HARD_CAP):
-    """Reduce a clipped (x,y,hidden) polyline to <= cap [x,y,v] waypoints.
+    """Reduce a clipped (x,y,hidden) polyline to [x,y,v] waypoints, arc-length
+    uniform-sampled toward `target`.
 
-    Arc-length uniform sampling toward `target`, but always keep the first and last
-    point and both sides of every visible<->obstructed transition. Transitions take
-    priority over uniform fill when the cap is tight. v = 1 visible, 0 obstructed.
+    `cap` bounds the uniform-fill budget. The first and last point and both sides
+    of every visible<->obstructed transition are always kept, so a path with more
+    transition points than `cap` keeps all of them -- `cap` is a soft upper bound
+    that protects visibility structure and never drops a transition label.
+    v = 1 visible, 0 obstructed.
     """
     n = len(clipped)
     if n == 0:
