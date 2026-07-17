@@ -16,6 +16,18 @@ def test_parse_garbage_returns_none():
     assert parse_path_answer("no coordinates here") is None
 
 
+def test_parse_ignores_distractor_braces_and_prose_triples():
+    text = ('Reasoning: the map {rock: [0.9,0.9,1]} suggests going left. '
+            '{"path":[[0.1,0.2,1],[0.3,0.4,1]],"goal":[0.5,0.6,1]}')
+    assert parse_path_answer(text) == {"path": [[0.1, 0.2, 1], [0.3, 0.4, 1]], "goal": [0.5, 0.6, 1]}
+
+
+def test_parse_regex_fallback_when_no_valid_object():
+    # no JSON object with path/goal keys, but bracketed triples present -> fallback
+    text = "coords (0.1,0.2,1) then (0.3,0.4,0) then (0.5,0.6,0)"
+    assert parse_path_answer(text) == {"path": [[0.1, 0.2, 1], [0.3, 0.4, 0]], "goal": [0.5, 0.6, 0]}
+
+
 def test_habitat_metrics_perfect_match():
     gt = {"path": [[0.5, 0.9, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.3, 0]}
     m = habitat_metrics(gt, gt)

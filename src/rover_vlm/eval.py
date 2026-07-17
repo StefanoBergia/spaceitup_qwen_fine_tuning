@@ -135,25 +135,34 @@ def aggregate_metrics(records: list[dict]) -> dict:
 
 import json as _json
 
-_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+# non-nested brace group: our answer object has no nested {} so this isolates it
+# even amid surrounding prose or distractor brace groups
+_OBJ_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
 def parse_path_answer(text):
     """Parse a {"path":[[x,y,v],...],"goal":[x,y,v]} answer; None if unusable.
 
-    Tries strict JSON on the first {...} block, then a regex fallback that scrapes
-    [x, y, v] triples (path = all but the last, goal = the last)."""
-    match = _OBJ_RE.search(text)
-    if match:
+    Scans brace groups and accepts the first that JSON-parses and has both "path"
+    and "goal" keys (so triples in surrounding reasoning text are ignored). Only if
+    no such object exists does it fall back to scraping [x, y, v] triples from the
+    whole text (path = all but the last, goal = the last) — a best-effort net for
+    genuinely malformed output."""
+    for match in _OBJ_RE.finditer(text):
         try:
             obj = _json.loads(match.group(0))
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or "path" not in obj or "goal" not in obj:
+            continue
+        try:
             path = [[float(a), float(b), int(round(float(c)))] for a, b, c in obj["path"]]
             g = obj["goal"]
             goal = [float(g[0]), float(g[1]), int(round(float(g[2])))]
-            if len(path) >= 1:
-                return {"path": path, "goal": goal}
         except (ValueError, KeyError, TypeError, IndexError):
-            pass
+            continue
+        if len(path) >= 1:
+            return {"path": path, "goal": goal}
     triples = re.findall(r"[\[(]\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)\s*[\])]", text)
     if len(triples) >= 2:
         pts = [[float(a), float(b), int(round(float(c)))] for a, b, c in triples]
