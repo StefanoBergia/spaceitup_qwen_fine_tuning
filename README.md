@@ -109,3 +109,43 @@ it reads the same `predictions.json` files and writes a single self-contained
 ground truth) on the source image, side by side, for a set of eval samples spread across
 difficulty (ranked by base-model error). Open it in a browser or publish it as an
 artifact. Tune with `--per-bucket` / `--max-image-px`.
+
+## Habitat phase
+
+A second, closer-to-target open dataset: Facebook Habitat–generated rover frames with
+an A*-computed traversable path and per-waypoint visibility (`v` = 1 visible / 0
+obstructed by the frame edge or an obstacle). Same conversation format and training/eval
+code as the ShareRobot phase — only the data source and task prompt differ; the goal is
+to sanity-check the pipeline on data that's structurally closer to the real rover task.
+
+```bash
+uv run scripts/prepare_habitat.py        # scans the mounted dataset -> data/prepared_habitat/
+uv run scripts/inspect_habitat.py --num 16  # overlay path + visibility -> outputs/inspection_habitat/
+```
+
+`prepare_habitat.py` reads every sample dir under the mounted dataset, keeps
+correct-path-in-FOV samples, and writes fixed-seed nested splits (`eval`, `train_500`,
+`train_1000`, `train_2000`, `train_full`) plus `meta.json` to `data/prepared_habitat/`.
+Images are referenced by their absolute NFS path (never copied).
+
+Train (GPU) — same `scripts/train.py`, just pointed at the habitat splits:
+
+```bash
+sbatch slurm/train_habitat.sbatch                                   # train_full (default)
+for f in train_500 train_1000 train_2000; do
+  sbatch slurm/train_habitat.sbatch data/prepared_habitat/$f.json
+done
+```
+
+Adapters land in `outputs/runs/habitat_<name>/adapter`.
+
+Evaluate (GPU) and compare (CPU):
+
+```bash
+sbatch slurm/eval_habitat.sbatch habitat_base                                            # zero-shot baseline
+sbatch slurm/eval_habitat.sbatch habitat_train_full outputs/runs/habitat_train_full/adapter  # per adapter, tag habitat_train_<size>
+uv run scripts/compare_evals.py --eval-dir outputs/eval_habitat --meta data/prepared_habitat/meta.json
+```
+
+Results go to `outputs/eval_habitat/<tag>/{predictions,metrics}.json`, separate from the
+ShareRobot `outputs/eval/` tree so the two phases' comparisons don't collide.
