@@ -136,7 +136,7 @@ def select_correct_path(fpv_paths, meta):
     (u, v, hidden) points. None if the label is missing/misaligned."""
     label = meta.get("label")
     cands = fpv_paths.get("candidates", [])
-    if label is None or label >= len(cands) or len(cands) != len(meta.get("candidates", [])):
+    if label is None or not (0 <= label < len(cands)) or len(cands) != len(meta.get("candidates", [])):
         return None
     runs = cands[label].get("runs", [])
     return [(float(u), float(v), bool(run["hidden"])) for run in runs for (u, v) in run["uv"]]

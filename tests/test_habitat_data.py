@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -107,6 +108,18 @@ def test_select_correct_path_bad_label_returns_none():
     assert select_correct_path(fpv, meta) is None
 
 
+def test_select_correct_path_negative_label_returns_none():
+    fpv = {"candidates": [{"runs": []}, {"runs": []}]}
+    meta = {"label": -1, "candidates": [{}, {}]}
+    assert select_correct_path(fpv, meta) is None
+
+
+def test_select_correct_path_count_mismatch_returns_none():
+    fpv = {"candidates": [{"runs": []}]}       # 1 candidate
+    meta = {"label": 0, "candidates": [{}, {}]}  # meta claims 2
+    assert select_correct_path(fpv, meta) is None
+
+
 def test_format_answer_is_parseable_json():
     s = format_answer([(0.4, 0.8, 1), (0.4, 0.5, 0)], (0.5, 0.58, 0))
     obj = json.loads(s)
@@ -120,6 +133,7 @@ def test_build_record_on_live_sample():
     rec = build_record(sample)
     if rec is None:
         pytest.skip("first sample filtered out; covered by unit tests")
+    assert Path(rec["image"][0]).is_absolute()
     assert rec["image"][0].endswith("fpv_enhanced.png")
     obj = json.loads(rec["conversations"][1]["value"])
     assert "path" in obj and "goal" in obj
