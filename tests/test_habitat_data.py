@@ -1,4 +1,4 @@
-from rover_vlm.habitat_data import normalize_points, clip_polyline_unit
+from rover_vlm.habitat_data import normalize_points, clip_polyline_unit, resample_with_transitions
 
 
 def test_normalize_divides_by_size():
@@ -34,3 +34,23 @@ def test_clip_preserves_coincident_transition():
     flags = [h for _, _, h in clip_polyline_unit(pts)]
     assert flags[0] is False and flags[-1] is True
     assert any(flags[i] != flags[i - 1] for i in range(1, len(flags)))
+
+
+def test_resample_short_all_visible():
+    clipped = [(0.5, 0.9, False), (0.5, 0.6, False), (0.5, 0.3, False)]
+    out = resample_with_transitions(clipped, target=10, cap=12)
+    assert out == [(0.5, 0.9, 1), (0.5, 0.6, 1), (0.5, 0.3, 1)]
+
+
+def test_resample_preserves_transition_flags():
+    clipped = [(0.5, 0.9, False), (0.5, 0.6, False), (0.5, 0.6, True), (0.5, 0.3, True)]
+    out = resample_with_transitions(clipped, target=4, cap=12)
+    flags = [v for _, _, v in out]
+    assert 1 in flags and 0 in flags
+    assert out[0][2] == 1 and out[-1][2] == 0  # starts visible, ends obstructed
+
+
+def test_resample_respects_cap():
+    clipped = [(round(0.1 + 0.01 * i, 3), round(0.9 - 0.01 * i, 3), False) for i in range(60)]
+    out = resample_with_transitions(clipped, target=10, cap=12)
+    assert len(out) <= 12

@@ -82,3 +82,47 @@ def clip_polyline_unit(points):
         push(a)
         push(b)
     return out
+
+
+def resample_with_transitions(clipped, target=MAX_WAYPOINTS, cap=HARD_CAP):
+    """Reduce a clipped (x,y,hidden) polyline to <= cap [x,y,v] waypoints.
+
+    Arc-length uniform sampling toward `target`, but always keep the first and last
+    point and both sides of every visible<->obstructed transition. Transitions take
+    priority over uniform fill when the cap is tight. v = 1 visible, 0 obstructed.
+    """
+    n = len(clipped)
+    if n == 0:
+        return []
+    xy = np.array([(x, y) for x, y, _ in clipped], dtype=float)
+    hid = [h for _, _, h in clipped]
+    if n == 1:
+        return [(round(xy[0, 0], 3), round(xy[0, 1], 3), 0 if hid[0] else 1)]
+
+    seg = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    total = cum[-1]
+
+    forced = {0, n - 1}
+    for i in range(1, n):
+        if hid[i] != hid[i - 1]:
+            forced.add(i - 1)
+            forced.add(i)
+
+    if total > 0:
+        targets = np.linspace(0.0, total, target)
+        uni = {int(np.argmin(np.abs(cum - t))) for t in targets}
+    else:
+        uni = set(forced)
+
+    keep = set(forced) | uni
+    if len(keep) > cap:
+        extra = sorted(keep - forced)
+        while len(forced) + len(extra) > cap and extra:
+            extra.pop(len(extra) // 2)  # thin the uniformly-spaced extras from the middle
+        keep = forced | set(extra)
+
+    return [
+        (round(float(xy[i, 0]), 3), round(float(xy[i, 1]), 3), 0 if hid[i] else 1)
+        for i in sorted(keep)
+    ]
