@@ -20,11 +20,17 @@ def test_clip_inserts_bottom_boundary():
     assert out[-1] == (0.5, 0.4, False)
 
 
-def test_clip_preserves_visibility_transition():
-    # visible run then hidden run, all in-frame
+def test_clip_preserves_visibility_transition_no_phantom():
+    # non-coincident transition (distinct coords, differing flags) — must NOT inject
+    # a phantom mis-flagged vertex; every point keeps its own visibility flag
+    pts = [(0.1, 0.1, False), (0.5, 0.5, True), (0.9, 0.9, True)]
+    assert clip_polyline_unit(pts) == [(0.1, 0.1, False), (0.5, 0.5, True), (0.9, 0.9, True)]
+
+
+def test_clip_preserves_coincident_transition():
+    # run boundary shared as a coincident duplicate vertex (as in the real dataset):
+    # both sides of the transition are represented
     pts = [(0.5, 0.9, False), (0.5, 0.6, False), (0.5, 0.6, True), (0.5, 0.3, True)]
-    out = clip_polyline_unit(pts)
-    flags = [h for _, _, h in out]
-    assert False in flags and True in flags
-    # transition index exists
+    flags = [h for _, _, h in clip_polyline_unit(pts)]
+    assert flags[0] is False and flags[-1] is True
     assert any(flags[i] != flags[i - 1] for i in range(1, len(flags)))

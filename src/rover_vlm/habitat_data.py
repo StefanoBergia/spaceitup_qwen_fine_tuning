@@ -74,8 +74,11 @@ def clip_polyline_unit(points):
         if seg is None:
             continue
         t0, t1 = seg
+        # exit point keeps points[i]'s flag only if it's a boundary crossing (t1<1);
+        # if the segment reaches points[i+1], b is that vertex and takes its own flag
+        h_b = points[i + 1][2] if t1 >= 1.0 - 1e-9 else h
         a = (round(x0 + t0 * (x1 - x0), 6), round(y0 + t0 * (y1 - y0), 6), h)
-        b = (round(x0 + t1 * (x1 - x0), 6), round(y0 + t1 * (y1 - y0), 6), h)
+        b = (round(x0 + t1 * (x1 - x0), 6), round(y0 + t1 * (y1 - y0), 6), h_b)
         push(a)
         push(b)
     return out
