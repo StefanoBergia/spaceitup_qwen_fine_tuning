@@ -128,7 +128,15 @@ correct-path-in-FOV samples, and writes fixed-seed nested splits (`eval`, `train
 `train_1000`, `train_2000`, `train_full`) plus `meta.json` to `data/prepared_habitat/`.
 Images are referenced by their absolute NFS path (never copied).
 
-Train (GPU) — same `scripts/train.py`, just pointed at the habitat splits:
+**One-command option** — the entire habitat experiment (all trainings + all evals +
+comparison) as a single resumable job on one 3g.40gb slice (~2-3 h; resubmit to continue
+after a failure or time limit — finished stages are skipped):
+
+```bash
+sbatch slurm/run_all_habitat.sbatch
+```
+
+Or run the stages individually. Train (GPU) — same `scripts/train.py`, just pointed at the habitat splits:
 
 ```bash
 sbatch slurm/train_habitat.sbatch                                   # train_full (default)
