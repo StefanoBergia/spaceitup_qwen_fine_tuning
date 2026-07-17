@@ -1,4 +1,16 @@
-from rover_vlm.habitat_data import normalize_points, clip_polyline_unit, resample_with_transitions
+import json
+
+import pytest
+
+from rover_vlm.habitat_data import (
+    normalize_points,
+    clip_polyline_unit,
+    resample_with_transitions,
+    select_correct_path,
+    format_answer,
+    build_record,
+    DATASET_ROOT,
+)
 
 
 def test_normalize_divides_by_size():
@@ -78,3 +90,38 @@ def test_resample_preserves_all_transitions_even_beyond_cap():
     assert len(out) == 20
     flags = [v for _, _, v in out]
     assert flags == [1 if i % 2 == 0 else 0 for i in range(20)]
+
+
+def test_select_correct_path_uses_label_and_concats_runs():
+    fpv = {"candidates": [
+        {"runs": [{"hidden": False, "uv": [[1.0, 2.0], [3.0, 4.0]]}]},
+        {"runs": [{"hidden": False, "uv": [[10.0, 20.0]]}, {"hidden": True, "uv": [[30.0, 40.0]]}]},
+    ]}
+    meta = {"label": 1, "candidates": [{}, {}]}
+    assert select_correct_path(fpv, meta) == [(10.0, 20.0, False), (30.0, 40.0, True)]
+
+
+def test_select_correct_path_bad_label_returns_none():
+    fpv = {"candidates": [{"runs": []}]}
+    meta = {"label": 5, "candidates": [{}]}
+    assert select_correct_path(fpv, meta) is None
+
+
+def test_format_answer_is_parseable_json():
+    s = format_answer([(0.4, 0.8, 1), (0.4, 0.5, 0)], (0.5, 0.58, 0))
+    obj = json.loads(s)
+    assert obj == {"path": [[0.4, 0.8, 1], [0.4, 0.5, 0]], "goal": [0.5, 0.58, 0]}
+
+
+def test_build_record_on_live_sample():
+    if not DATASET_ROOT.exists():
+        pytest.skip("dataset not mounted")
+    sample = next(DATASET_ROOT.glob("*/samples/*/"))
+    rec = build_record(sample)
+    if rec is None:
+        pytest.skip("first sample filtered out; covered by unit tests")
+    assert rec["image"][0].endswith("fpv_enhanced.png")
+    obj = json.loads(rec["conversations"][1]["value"])
+    assert "path" in obj and "goal" in obj
+    for x, y, v in obj["path"] + [obj["goal"]]:
+        assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and v in (0, 1)

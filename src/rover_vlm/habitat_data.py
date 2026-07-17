@@ -129,3 +129,55 @@ def resample_with_transitions(clipped, target=MAX_WAYPOINTS, cap=HARD_CAP):
         (round(float(xy[i, 0]), 3), round(float(xy[i, 1]), 3), 0 if hid[i] else 1)
         for i in sorted(keep)
     ]
+
+
+def select_correct_path(fpv_paths, meta):
+    """Concatenate the runs of the correct candidate (meta['label']) into
+    (u, v, hidden) points. None if the label is missing/misaligned."""
+    label = meta.get("label")
+    cands = fpv_paths.get("candidates", [])
+    if label is None or label >= len(cands) or len(cands) != len(meta.get("candidates", [])):
+        return None
+    runs = cands[label].get("runs", [])
+    return [(float(u), float(v), bool(run["hidden"])) for run in runs for (u, v) in run["uv"]]
+
+
+def _clamp01(v):
+    return round(min(max(v, 0.0), 1.0), 3)
+
+
+def format_answer(path_wps, goal_wp):
+    obj = {
+        "path": [[x, y, v] for x, y, v in path_wps],
+        "goal": [goal_wp[0], goal_wp[1], goal_wp[2]],
+    }
+    return json.dumps(obj, separators=(",", ":"))
+
+
+def build_record(sample_dir):
+    """Habitat sample dir -> conversation record, or None if filtered/invalid."""
+    sample_dir = Path(sample_dir)
+    fpv = json.loads((sample_dir / "fpv_paths.json").read_text())
+    meta = json.loads((sample_dir / "meta.json").read_text())
+    if not meta.get("correct_path_in_fov"):
+        return None
+    raw = select_correct_path(fpv, meta)
+    if not raw or len(raw) < 2:
+        return None
+    w, h = fpv["image_size"]
+    clipped = clip_polyline_unit(normalize_points(raw, w, h))
+    if len(clipped) < 2:
+        return None
+    path_wps = resample_with_transitions(clipped)
+    g = fpv["goal"]
+    goal_wp = (_clamp01(g["uv"][0] / w), _clamp01(g["uv"][1] / h), 0 if g["hidden"] else 1)
+    answer = format_answer(path_wps, goal_wp)
+    image_abs = str(sample_dir / IMAGE_NAME)
+    return {
+        "id": sample_dir.name,
+        "image": [image_abs],
+        "conversations": [
+            {"from": "human", "value": HABITAT_PROMPT},
+            {"from": "gpt", "value": answer},
+        ],
+    }
