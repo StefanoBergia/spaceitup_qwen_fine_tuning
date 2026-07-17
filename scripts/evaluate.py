@@ -26,7 +26,10 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from rover_vlm.eval import (
     aggregate_metrics,
+    aggregate_habitat_metrics,
+    habitat_metrics,
     normalize_prediction,
+    parse_path_answer,
     parse_waypoints,
     trajectory_metrics,
 )
@@ -40,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--adapter", type=Path, default=None, help="LoRA adapter dir; omit for base model")
     p.add_argument("--tag", required=True, help="name for outputs/eval/<tag>/")
+    p.add_argument("--task", choices=["sharerobot", "habitat"], default="sharerobot")
+    p.add_argument("--out-dir", type=Path, default=REPO_ROOT / "outputs" / "eval")
     p.add_argument("--eval-file", type=Path, default=REPO_ROOT / "data/prepared/eval.json")
     p.add_argument("--batch-size", type=int, default=8)
     # base model tends to answer in verbose grounding-JSON (~20 tokens/point), so
@@ -105,14 +110,19 @@ def main() -> None:
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)
 
         for rec, gt, text in zip(chunk, gts, decoded):
-            parsed = parse_waypoints(text)
-            if parsed:
-                # score per-mille-style outputs (base model habit) charitably;
-                # in_range_rate still records raw convention adherence
-                scored, rescaled = normalize_prediction(parsed)
-                metrics = trajectory_metrics(scored, gt)
+            if args.task == "habitat":
+                parsed = parse_path_answer(text)
+                metrics = habitat_metrics(parsed, gt) if parsed else None
+                rescaled = False
             else:
-                metrics, rescaled = None, False
+                parsed = parse_waypoints(text)
+                if parsed:
+                    # score per-mille-style outputs (base model habit) charitably;
+                    # in_range_rate still records raw convention adherence
+                    scored, rescaled = normalize_prediction(parsed)
+                    metrics = trajectory_metrics(scored, gt)
+                else:
+                    metrics, rescaled = None, False
             results.append(
                 {
                     "id": rec["id"],
@@ -126,11 +136,11 @@ def main() -> None:
         done = start + len(chunk)
         print(f"  {done}/{len(records_in)} ({(time.time() - t0) / done:.2f}s/sample)", flush=True)
 
-    summary = aggregate_metrics(results)
+    summary = aggregate_habitat_metrics(results) if args.task == "habitat" else aggregate_metrics(results)
     summary["tag"] = args.tag
     summary["adapter"] = str(args.adapter) if args.adapter else None
 
-    out_dir = REPO_ROOT / "outputs" / "eval" / args.tag
+    out_dir = args.out_dir / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "predictions.json").write_text(json.dumps(results, indent=1))
     (out_dir / "metrics.json").write_text(json.dumps(summary, indent=2))
