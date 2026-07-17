@@ -1,0 +1,111 @@
+# SPACEITUP — Rover Path VLM (Qwen3.5-2B fine-tuning)
+
+Fine-tune Qwen3.5-2B (vision-language) to output a traversable path as waypoints from a
+single forward-facing RGB image. **Current phase:** feasibility check on the open
+[BAAI/ShareRobot](https://huggingface.co/datasets/BAAI/ShareRobot) `trajectory` subset
+(6,870 samples: image + instruction → normalized `[[x,y],...]` waypoints) before building
+the Habitat + Cosmos Reason 3 pipeline. See `CLAUDE.md` for full project context.
+
+## Setup
+
+Requires [uv](https://docs.astral.sh/uv/). Everything lives on NFS, shared between the
+login node and the GPU node (`thor`, SLURM `A100` partition).
+
+```bash
+uv sync            # creates .venv with Python 3.12 + all deps
+```
+
+## Repo layout
+
+```
+configs/          # YAML run configs (dataset size, LoRA rank, lr, per-GPU batch settings)
+src/rover_vlm/    # importable package — shared data/model logic
+scripts/          # thin CLI entrypoints (each has a docstring with usage)
+slurm/            # sbatch files for GPU jobs on thor
+data/             # (gitignored) downloaded dataset + prepared splits
+outputs/          # (gitignored) checkpoints, logs, eval results, inspection reports
+```
+
+## Workflow
+
+All CPU-only steps run on the login node; GPU steps are launched manually via
+`sbatch slurm/<job>.sbatch`.
+
+### 1. Download dataset + model (login node)
+
+```bash
+uv run scripts/download.py               # both dataset and model
+uv run scripts/download.py --dataset-only
+uv run scripts/download.py --model-only
+```
+
+Dataset lands in `data/sharerobot/trajectory/`; model weights go to the default
+Hugging Face cache (`~/.cache/huggingface`, on NFS → visible from thor).
+
+### 2. Inspect the dataset
+
+```bash
+uv run scripts/inspect_dataset.py        # report + overlay images → outputs/inspection/
+```
+
+### 3. Prepare splits
+
+```bash
+uv run scripts/prepare_data.py           # normalized conversations + nested subsets → data/prepared/
+```
+
+Held-out eval split is fixed across all runs; training subsets (500/1K/2K/5K/full) are
+nested so scaling comparisons aren't confounded by subset composition.
+
+### 4. Train (GPU)
+
+Always validate the pipeline before submitting long jobs:
+
+```bash
+uv run scripts/train.py --smoke        # CPU, ~10 min: full pipeline on 4 samples
+sbatch slurm/train_smoke.sbatch        # GPU, ~5 min: 20 steps on a 1g.20gb slice
+```
+
+**One-command option** — the entire experiment (all trainings + all evals + comparison)
+as a single resumable job on one 3g.40gb slice (~4-6 h; resubmit to continue after a
+failure or time limit — finished stages are skipped):
+
+```bash
+sbatch slurm/run_all.sbatch
+```
+
+Or run the stages individually — scaling runs (3g.40gb slice each; output dir derived
+from the file name):
+
+```bash
+sbatch slurm/train.sbatch                                  # train_500 (default)
+for f in train_1000 train_2000 train_5000 train_full; do
+  sbatch slurm/train.sbatch data/prepared/$f.json
+done
+```
+
+Adapters land in `outputs/runs/lora_<name>/adapter`. Logs: `outputs/slurm/`.
+
+### 5. Evaluate (GPU) and compare (CPU)
+
+```bash
+sbatch slurm/eval.sbatch               # base model zero-shot only
+sbatch slurm/eval.sbatch all           # base + every adapter under outputs/runs/
+uv run scripts/compare_evals.py        # login node: table + scaling plot -> outputs/eval/
+uv run scripts/visualize_predictions.py  # login node: interactive prediction explorer (HTML)
+```
+
+Every eval uses the same fixed split (`data/prepared/eval.json`). Per-model results go
+to `outputs/eval/<tag>/{predictions,metrics}.json`; the comparison lands in
+`outputs/eval/comparison.md` and `outputs/eval/scaling_curve.png`.
+
+Metrics: parse rate, in-range rate, and — over parseable predictions — mean/median
+resampled point error, endpoint error, and discrete Fréchet distance (all in
+normalized [0,1] image coordinates).
+
+`scripts/visualize_predictions.py` is the *qualitative* companion to the scaling plot:
+it reads the same `predictions.json` files and writes a single self-contained
+`outputs/eval/prediction_explorer.html` that overlays each model's predicted path (and
+ground truth) on the source image, side by side, for a set of eval samples spread across
+difficulty (ranked by base-model error). Open it in a browser or publish it as an
+artifact. Tune with `--per-bucket` / `--max-image-px`.
