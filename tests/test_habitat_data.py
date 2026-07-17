@@ -58,15 +58,16 @@ def test_resample_caps_uniform_fill():
     assert all(v == 1 for _, _, v in out)
 
 
-def test_resample_thins_uniform_not_transitions_under_cap():
-    # one transition at index 20; dense uniform fill must be thinned to the cap,
-    # but the endpoints and the transition are preserved
-    clipped = [(round(0.1 + 0.02 * i, 3), 0.5, i >= 20) for i in range(30)]
+def test_resample_thins_uniform_but_keeps_isolated_transition():
+    # both endpoints visible; a short obstructed stretch (i=15,16) is the ONLY source
+    # of v==0. Uniform fill (target=10) would skip it, so a v==0 in the output proves
+    # the transition boundary was force-kept while uniform extras were thinned to the cap.
+    clipped = [(round(0.05 + 0.02 * i, 3), 0.5, i in (15, 16)) for i in range(40)]
     out = resample_with_transitions(clipped, target=10, cap=8)
     assert len(out) <= 8
     flags = [v for _, _, v in out]
-    assert flags[0] == 1 and flags[-1] == 0
-    assert 1 in flags and 0 in flags
+    assert flags[0] == 1 and flags[-1] == 1     # endpoints visible
+    assert 0 in flags                            # obstructed transition survived thinning
 
 
 def test_resample_preserves_all_transitions_even_beyond_cap():
