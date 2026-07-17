@@ -149,3 +149,8 @@ uv run scripts/compare_evals.py --eval-dir outputs/eval_habitat --meta data/prep
 
 Results go to `outputs/eval_habitat/<tag>/{predictions,metrics}.json`, separate from the
 ShareRobot `outputs/eval/` tree so the two phases' comparisons don't collide.
+
+> **Note:** the interactive `scripts/visualize_predictions.py` explorer is ShareRobot-only
+> — it expects 2-element `[x,y]` predictions and does not yet understand the habitat
+> `{"path","goal"}` format. For qualitative habitat inspection use
+> `scripts/inspect_habitat.py`; a habitat explorer is a deferred follow-up.
