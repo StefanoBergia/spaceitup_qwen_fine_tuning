@@ -37,28 +37,31 @@ TABLE_COLUMNS = [
     ("mean_point_error_median", "Median point err"),
     ("endpoint_error_mean", "Endpoint err"),
     ("frechet_mean", "Fréchet"),
+    ("path_visibility_acc_mean", "Vis. acc"),
+    ("goal_point_error_mean", "Goal err"),
+    ("goal_visibility_accuracy", "Goal vis. acc"),
 ]
 
 
-def train_size(tag: str) -> int | None:
-    """lora_train_500 -> 500; lora_train_full -> actual full-split size; else None."""
-    if not tag.startswith("lora_train_"):
-        return None
-    suffix = tag.removeprefix("lora_train_")
-    if suffix == "full":
-        meta = json.loads((REPO_ROOT / "data/prepared/meta.json").read_text())
-        return meta["splits"]["train_full"]
-    return int(suffix) if suffix.isdigit() else None
+def train_size(tag: str, meta_path: Path) -> int | None:
+    """lora_train_500 / habitat_train_500 -> 500; *_train_full -> actual full-split size; else None."""
+    for prefix in ("lora_train_", "habitat_train_"):
+        if tag.startswith(prefix):
+            suffix = tag.removeprefix(prefix)
+            if suffix == "full":
+                return json.loads(meta_path.read_text())["splits"]["train_full"]
+            return int(suffix) if suffix.isdigit() else None
+    return None
 
 
-def load_runs(eval_dir: Path) -> tuple[dict | None, list[tuple[int, dict]]]:
+def load_runs(eval_dir: Path, meta_path: Path) -> tuple[dict | None, list[tuple[int, dict]]]:
     base, scaling = None, []
     for metrics_file in sorted(eval_dir.glob("*/metrics.json")):
         m = json.loads(metrics_file.read_text())
-        if m["tag"] == "base":
+        if m["tag"].endswith("base"):
             base = m
         else:
-            size = train_size(m["tag"])
+            size = train_size(m["tag"], meta_path)
             if size is not None:
                 scaling.append((size, m))
             else:
@@ -138,9 +141,10 @@ def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path) -> 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval-dir", type=Path, default=DEFAULT_EVAL_DIR)
+    parser.add_argument("--meta", type=Path, default=REPO_ROOT / "data/prepared/meta.json")
     args = parser.parse_args()
 
-    base, scaling = load_runs(args.eval_dir)
+    base, scaling = load_runs(args.eval_dir, args.meta)
     if not scaling and not base:
         raise SystemExit(f"no metrics found under {args.eval_dir}/<tag>/metrics.json — run evals first")
 
