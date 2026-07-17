@@ -131,3 +131,82 @@ def aggregate_metrics(records: list[dict]) -> dict:
             summary[f"{key}_mean"] = float(np.mean(values))
             summary[f"{key}_median"] = float(np.median(values))
     return summary
+
+
+import json as _json
+
+_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def parse_path_answer(text):
+    """Parse a {"path":[[x,y,v],...],"goal":[x,y,v]} answer; None if unusable.
+
+    Tries strict JSON on the first {...} block, then a regex fallback that scrapes
+    [x, y, v] triples (path = all but the last, goal = the last)."""
+    match = _OBJ_RE.search(text)
+    if match:
+        try:
+            obj = _json.loads(match.group(0))
+            path = [[float(a), float(b), int(round(float(c)))] for a, b, c in obj["path"]]
+            g = obj["goal"]
+            goal = [float(g[0]), float(g[1]), int(round(float(g[2])))]
+            if len(path) >= 1:
+                return {"path": path, "goal": goal}
+        except (ValueError, KeyError, TypeError, IndexError):
+            pass
+    triples = re.findall(r"[\[(]\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)\s*,\s*([0-9.eE+-]+)\s*[\])]", text)
+    if len(triples) >= 2:
+        pts = [[float(a), float(b), int(round(float(c)))] for a, b, c in triples]
+        return {"path": pts[:-1], "goal": pts[-1]}
+    return None
+
+
+def _resample_flags(wps, n):
+    """Resample [x,y,v] waypoints to n points by arc length; each resampled point's
+    visibility is that of the nearest original waypoint. Returns (xy[n,2], v[n])."""
+    xy = np.array([[x, y] for x, y, _ in wps], dtype=float)
+    vis = np.array([v for _, _, v in wps], dtype=int)
+    rs = resample_polyline(xy, n)
+    # nearest original waypoint per resampled point
+    d = np.linalg.norm(rs[:, None, :] - xy[None, :, :], axis=2)
+    nearest = d.argmin(axis=1)
+    return rs, vis[nearest]
+
+
+def habitat_metrics(pred, gt, n_resample=10):
+    """Per-sample position + visibility metrics for the path and goal."""
+    pred_pts = pred["path"] if pred["path"] else [pred["goal"]]
+    gt_pts = gt["path"] if gt["path"] else [gt["goal"]]
+    pred_xy, pred_v = _resample_flags(pred_pts, n_resample)
+    gt_xy, gt_v = _resample_flags(gt_pts, n_resample)
+    pointwise = np.linalg.norm(pred_xy - gt_xy, axis=1)
+    pg, gg = np.array(pred["goal"][:2], dtype=float), np.array(gt["goal"][:2], dtype=float)
+    return {
+        "mean_point_error": float(pointwise.mean()),
+        "frechet": frechet_distance(
+            np.array([p[:2] for p in pred_pts], dtype=float),
+            np.array([p[:2] for p in gt_pts], dtype=float),
+        ),
+        "path_visibility_acc": float((pred_v == gt_v).mean()),
+        "goal_point_error": float(np.linalg.norm(pg - gg)),
+        "goal_visibility_correct": int(pred["goal"][2] == gt["goal"][2]),
+    }
+
+
+def aggregate_habitat_metrics(records):
+    """Aggregate per-sample habitat eval records (as written by scripts/evaluate.py)."""
+    n = len(records)
+    parsed = [r for r in records if r.get("parsed") is not None]
+    summary = {
+        "num_samples": n,
+        "parse_rate": len(parsed) / n if n else 0.0,
+    }
+    for key in ("mean_point_error", "frechet", "path_visibility_acc", "goal_point_error"):
+        vals = [r["metrics"][key] for r in parsed if r.get("metrics")]
+        if vals:
+            summary[f"{key}_mean"] = float(np.mean(vals))
+            summary[f"{key}_median"] = float(np.median(vals))
+    goal_v = [r["metrics"]["goal_visibility_correct"] for r in parsed if r.get("metrics")]
+    if goal_v:
+        summary["goal_visibility_accuracy"] = float(np.mean(goal_v))
+    return summary
