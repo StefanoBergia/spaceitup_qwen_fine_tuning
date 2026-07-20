@@ -11,9 +11,8 @@ opening locally or publishing as an artifact.
 
 Sections: headline tiles, a worked example of the task (the verbatim prompt, a real
 frame, the expected answer), accuracy vs training-set size against both chance baselines,
-the chosen-index distribution (base vs LoRA vs ground truth), a metrics table, error
-breakdown by decision margin, and a qualitative gallery of real eval frames grouped by
-how ambiguous the decision was.
+the chosen-index distribution (base vs LoRA vs ground truth), a metrics table, and a
+qualitative gallery of real eval frames grouped by how ambiguous the decision was.
 
 The prompt is imported from rover_vlm.habitat_choice rather than copied, so the page
 cannot drift out of sync with what the model is actually asked.
@@ -49,10 +48,8 @@ ORDER = [
     ("habitat_choice_train_full", "full", None),  # filled from meta.json
 ]
 
-# Margin bins for the error analysis. `margin` is the score gap between the correct
-# candidate and the best distractor: small margin = the candidates are nearly equally
-# good = a genuinely ambiguous decision.
-MARGIN_BINS = [(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 1.0), (1.0, float("inf"))]
+# `margin` (metres the runner-up candidate strays from the ideal route) is still used to
+# order and bucket the gallery: small margin = candidates nearly tied = hardest frames.
 
 
 def load(eval_dir: Path, data_dir: Path):
@@ -83,39 +80,6 @@ def pick_distribution(preds, key):
         if isinstance(v, int) and 0 <= v < 5:
             counts[v] += 1
     return counts
-
-
-def margin_breakdown(preds):
-    """Accuracy per decision-margin bin, both scorings plus the tie rate.
-
-    `multi` (share of frames with more than one acceptable candidate) is what explains
-    the shape: near-ties are usually acceptable *both* ways, so accepted accuracy is
-    flattered exactly where the decision is hardest. Strict accuracy is the clean signal.
-    """
-    out = []
-    for lo, hi in MARGIN_BINS:
-        sel = [r for r in preds if r["gt"].get("margin") is not None and lo <= r["gt"]["margin"] < hi]
-        if not sel:
-            continue
-        hi_txt = "+" if hi == float("inf") else f"–{hi:g}"
-        out.append({
-            "label": f"{lo:g}{hi_txt}",
-            "n": len(sel),
-            "acc": sum(r["metrics"]["accepted_correct"] for r in sel) / len(sel),
-            "strict": sum(r["metrics"]["strict_correct"] for r in sel) / len(sel),
-            "multi": sum(1 for r in sel if len(r["gt"]["accepted"]) > 1) / len(sel),
-        })
-    return out
-
-
-def by_candidate_count(preds):
-    groups = {}
-    for r in preds:
-        groups.setdefault(r["gt"]["n_candidates"], []).append(r["metrics"]["accepted_correct"])
-    # only report counts with a meaningful sample size; 2- and 4-candidate samples are
-    # single-digit rarities and would read as spurious 100%s
-    return [{"n_cand": k, "n": len(v), "acc": sum(v) / len(v)}
-            for k, v in sorted(groups.items()) if len(v) >= 20]
 
 
 def embed_image(path: Path, max_px: int) -> str:
@@ -254,8 +218,6 @@ def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, t
                  "accepted_accuracy", "picked_direct_rate")}}
             for r in runs
         ],
-        "margins": margin_breakdown(full["preds"]),
-        "byCand": by_candidate_count(full["preds"]),
         "gallery": build_gallery(full, eval_records, per_bucket, max_px,
                                  dataset_root, dashed, tmp_dir),
         "dashed": dashed,
