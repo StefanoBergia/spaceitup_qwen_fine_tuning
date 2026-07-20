@@ -75,14 +75,25 @@ def pick_distribution(preds, key):
 
 
 def margin_breakdown(preds):
+    """Accuracy per decision-margin bin, both scorings plus the tie rate.
+
+    `multi` (share of frames with more than one acceptable candidate) is what explains
+    the shape: near-ties are usually acceptable *both* ways, so accepted accuracy is
+    flattered exactly where the decision is hardest. Strict accuracy is the clean signal.
+    """
     out = []
     for lo, hi in MARGIN_BINS:
         sel = [r for r in preds if r["gt"].get("margin") is not None and lo <= r["gt"]["margin"] < hi]
         if not sel:
             continue
-        acc = sum(r["metrics"]["accepted_correct"] for r in sel) / len(sel)
         hi_txt = "+" if hi == float("inf") else f"–{hi:g}"
-        out.append({"label": f"{lo:g}{hi_txt}", "n": len(sel), "acc": acc})
+        out.append({
+            "label": f"{lo:g}{hi_txt}",
+            "n": len(sel),
+            "acc": sum(r["metrics"]["accepted_correct"] for r in sel) / len(sel),
+            "strict": sum(r["metrics"]["strict_correct"] for r in sel) / len(sel),
+            "multi": sum(1 for r in sel if len(r["gt"]["accepted"]) > 1) / len(sel),
+        })
     return out
 
 

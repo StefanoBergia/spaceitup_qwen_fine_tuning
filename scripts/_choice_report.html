@@ -110,10 +110,15 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
   <div class="card scroll"><table id="tbl"></table></div>
 
   <h2>Where the errors are</h2>
-  <p class="note">Each frame has a <b>decision margin</b>: how much better the correct path is than the best alternative. A small margin means the candidates are nearly tied — genuinely ambiguous from a single image.</p>
+  <p class="note">The dataset scores every candidate by how far it strays from the ideal route. The <b>decision margin</b> is the runner-up’s score — <b>how many metres worse the second-best path is than the correct one</b>. A margin of 0.05&nbsp;m means two paths are all but identical and the choice is nearly arbitrary; 1&nbsp;m means one path is obviously better.</p>
+  <p class="note">So margin is a difficulty axis: <b>left = hardest</b>. If the model understands the scene, accuracy should fall as the margin shrinks.</p>
   <div class="card">
+    <div class="legend">
+      <span><i style="background:var(--s1)"></i>accepted accuracy</span>
+      <span><i style="background:var(--s2)"></i>strict accuracy</span>
+    </div>
     <figure><div id="chart-margin"></div>
-      <figcaption>Accepted accuracy by decision margin, with sample counts. Accuracy climbs as the decision gets less ambiguous. The leftmost bin is the smallest and noisiest — read it with its <i>n</i>.</figcaption>
+      <figcaption>It does — <b>strict accuracy falls from 100% to 78%</b> as the decision gets tighter. Accepted accuracy (blue) flattens out at the hard end for a specific reason, not noise: when two paths are nearly tied, the runner-up is usually <i>also</i> traversable, so the model is scored correct either way. In the tightest bin <span id="tiemulti"></span> of frames have more than one acceptable answer, against <span id="tiemid"></span> in the middle. Hover any bar for its counts.</figcaption>
     </figure>
   </div>
   <p class="note" id="cand"></p>
@@ -261,20 +266,28 @@ $('tiles').innerHTML = [
     const lb=el('text',{x:P.l-10,y:y(t)+4,'text-anchor':'end',class:'ax'}); lb.textContent=pct0(t); svg.appendChild(lb);
   }
   m.forEach((d,i)=>{
-    const bx=P.l+i*bw+14, w=bw-28;
-    const r=el('rect',{x:bx,y:y(d.acc),width:w,height:P.t+ih-y(d.acc),fill:'var(--s1)',rx:4});
-    bindTip(r,`<b>margin ${d.label}</b><br>accuracy ${pct(d.acc)}<br>${d.n} frames`);
-    svg.appendChild(r);
-    const t=el('text',{x:bx+w/2,y:y(d.acc)-7,'text-anchor':'middle',class:'vlab'});
-    t.textContent=pct(d.acc); svg.appendChild(t);
-    const l1=el('text',{x:bx+w/2,y:H-32,'text-anchor':'middle',class:'ax'}); l1.textContent=d.label;
-    const l2=el('text',{x:bx+w/2,y:H-18,'text-anchor':'middle',class:'ax'}); l2.textContent='n='+d.n;
+    const gx=P.l+i*bw+16, gw2=bw-32, w=(gw2-4)/2;
+    [['acc','var(--s1)','accepted'],['strict','var(--s2)','strict']].forEach(([k,col,name],si)=>{
+      const bx=gx+si*(w+4);
+      const r=el('rect',{x:bx,y:y(d[k]),width:w,height:P.t+ih-y(d[k]),fill:col,rx:4});
+      bindTip(r,`<b>margin ${d.label} m</b><br>${name} accuracy ${pct(d[k])}<br>`+
+        `${d.n} frames · ${pct0(d.multi)} have &gt;1 acceptable path`);
+      svg.appendChild(r);
+      const t=el('text',{x:bx+w/2,y:y(d[k])-7,'text-anchor':'middle',class:'vlab'});
+      t.textContent=Math.round(d[k]*100); svg.appendChild(t);
+    });
+    const l1=el('text',{x:gx+gw2/2,y:H-32,'text-anchor':'middle',class:'ax'}); l1.textContent=d.label;
+    const l2=el('text',{x:gx+gw2/2,y:H-18,'text-anchor':'middle',class:'ax'}); l2.textContent='n='+d.n;
     svg.appendChild(l1); svg.appendChild(l2);
   });
   const xl=el('text',{x:P.l+iw/2,y:H-2,'text-anchor':'middle',class:'ax'});
-  xl.textContent='decision margin (larger = correct path is more clearly better)'; svg.appendChild(xl);
+  xl.textContent='← harder    decision margin: how many metres worse the runner-up is    easier →';
+  svg.appendChild(xl);
   $('chart-margin').appendChild(svg);
 })();
+
+$('tiemulti').textContent = pct0(D.margins[0].multi);
+$('tiemid').textContent = pct0(D.margins[2].multi);
 
 /* ---- candidate-count sentence ---- */
 $('cand').innerHTML = 'Candidate count matters too: ' + D.byCand.map(c=>
