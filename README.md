@@ -193,6 +193,20 @@ and **accepted accuracy** (vs. the full `accepted` set — the headline number, 
 samples have several valid answers). Accuracies count an unparseable answer as wrong, so
 they can't be inflated by dropping failures.
 
+Build the results report (login node, after the evals):
+
+```bash
+uv run scripts/visualize_choice_results.py           # -> outputs/eval_habitat_choice/choice_results.html
+uv run scripts/visualize_choice_results.py --per-bucket 6
+```
+
+Emits a single self-contained page (inline CSS/JS, base64 images — no external requests,
+so it can be published as an artifact directly): headline tiles, accuracy vs. training-set
+size against both chance baselines, the chosen-index distribution for base vs. LoRA vs.
+ground truth, the metrics table, an error breakdown by decision margin, and a gallery of
+real eval frames grouped by how ambiguous the decision was (mistakes included). The page
+template lives in `scripts/_choice_report.html`.
+
 > **Read accuracy against the right baseline.** Every sample contains a straight-line
 > `direct` candidate that is correct in only 11 of 4,398 samples. A model that learns
 > nothing but "never pick the straight line" scores ~0.49 accepted accuracy, versus ~0.36

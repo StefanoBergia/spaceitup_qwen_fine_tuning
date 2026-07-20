@@ -1,0 +1,322 @@
+<title>Habitat path classification — Qwen3.5-2B LoRA</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#008300; --s3:#e87ba4; --good:#0ca30c; --crit:#d03b3b;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --s3:#d55181; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --s3:#d55181; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:26px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--ink2);margin:0 0 32px;font-size:15px}
+h2{font-size:18px;margin:44px 0 4px;letter-spacing:-.005em}
+.note{color:var(--ink2);font-size:14px;margin:0 0 18px;max-width:72ch}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:24px 0 8px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:16px 18px}
+.tile .k{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.tile .v{font-size:32px;font-weight:640;margin:6px 0 2px;letter-spacing:-.02em}
+.tile .d{font-size:13px;color:var(--ink2)}
+.up{color:var(--good);font-weight:600}
+.dn{color:var(--crit);font-weight:600}
+figure{margin:0}
+figcaption{color:var(--ink2);font-size:13.5px;margin-top:10px;max-width:76ch}
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin:0 0 10px;font-size:13px;color:var(--ink2)}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:-1px}
+.legend .dash{width:16px;height:0;border-top:2px dashed var(--muted);border-radius:0;margin-right:6px;
+  display:inline-block;vertical-align:3px}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--grid)}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tr.best td{font-weight:640}
+.scroll{overflow-x:auto}
+.callout{border-left:3px solid var(--s1);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:18px 0;font-size:14.5px;color:var(--ink2)}
+.callout b{color:var(--ink)}
+.callout.warn{border-left-color:#fab219}
+.gal{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:14px}
+.gcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden}
+.gcard img{width:100%;display:block}
+.gmeta{padding:12px 14px;font-size:13px;color:var(--ink2)}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;
+  border:1px solid var(--ring);font-size:12px;margin-right:5px;font-weight:600;color:var(--ink)}
+.chip i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.verdict{font-weight:650;font-size:13px}
+.bucket{margin-top:26px}
+.bucket h3{font-size:15px;margin:0 0 2px;display:flex;align-items:center;gap:8px}
+.bucket .bh{font-size:13px;color:var(--muted);margin:0 0 4px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);
+  border:1px solid var(--ring);border-radius:8px;padding:7px 10px;font-size:12.5px;
+  box-shadow:0 6px 20px rgba(0,0,0,.13);opacity:0;transition:opacity .1s;z-index:9;
+  font-variant-numeric:tabular-nums}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.ax{font-size:11px;fill:var(--muted)}
+.vlab{font-size:11px;fill:var(--ink2);font-variant-numeric:tabular-nums}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
+  color:var(--muted);font-size:13px}
+</style>
+
+<div class="wrap">
+  <h1>Can a 2B vision model pick the traversable path?</h1>
+  <p class="sub">Qwen3.5-2B + LoRA on Habitat rover frames — candidates drawn on the image, model answers with an index. <span id="nEval"></span> held-out frames.</p>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>Accuracy vs. training-set size</h2>
+  <p class="note">Two baselines matter. Uniform guessing scores <b id="c1"></b>. But every frame contains a straight-line <i>direct</i> candidate that is almost never correct — a model that learns only <i>“never pick the straight line”</i> reaches <b id="c2"></b> without understanding anything about the scene. <b>That upper dashed line is the real bar.</b></p>
+  <div class="card">
+    <div class="legend">
+      <span><i style="background:var(--s1)"></i>accepted accuracy</span>
+      <span><i style="background:var(--s2)"></i>strict accuracy</span>
+      <span><span class="dash"></span>chance baselines</span>
+    </div>
+    <figure><div id="chart-scaling"></div>
+      <figcaption><b>Accepted</b> counts any candidate the dataset marks feasible; <b>strict</b> requires the single canonical one. They differ because <span id="multi"></span> of frames have more than one acceptable path.</figcaption>
+    </figure>
+  </div>
+
+  <h2>What the base model is actually doing</h2>
+  <p class="note">The base model produced perfectly-formed JSON on 100% of frames — and still scored below random guessing. This chart shows why.</p>
+  <div class="card">
+    <div class="legend">
+      <span><i style="background:var(--s1)"></i>base (zero-shot)</span>
+      <span><i style="background:var(--s2)"></i>LoRA, full data</span>
+      <span><i style="background:var(--s3)"></i>ground truth</span>
+    </div>
+    <figure><div id="chart-picks"></div>
+      <figcaption>How often each candidate index was chosen. The base model answers “0” on most frames — positional bias, not scene understanding. The fine-tuned model’s distribution tracks the ground truth almost exactly.</figcaption>
+    </figure>
+  </div>
+
+  <div class="callout"><b>The shortcut was cleared, not exploited.</b> Base picks the <i>direct</i> candidate on <span id="bd"></span> of frames; after fine-tuning that falls to <span id="fd"></span>. Every training size beats the <span id="c2b"></span> shortcut bar — even 500 samples. The remaining errors are left-vs-right confusions, never a fallback to the straight line.</div>
+
+  <h2>Full results</h2>
+  <div class="card scroll"><table id="tbl"></table></div>
+
+  <h2>Where the errors are</h2>
+  <p class="note">Each frame has a <b>decision margin</b>: how much better the correct path is than the best alternative. A small margin means the candidates are nearly tied — genuinely ambiguous from a single image.</p>
+  <div class="card">
+    <figure><div id="chart-margin"></div>
+      <figcaption>Accepted accuracy by decision margin, with sample counts. Accuracy climbs as the decision gets less ambiguous. The leftmost bin is the smallest and noisiest — read it with its <i>n</i>.</figcaption>
+    </figure>
+  </div>
+  <p class="note" id="cand"></p>
+
+  <h2>Real frames, hardest first</h2>
+  <p class="note">Exactly what the model saw, grouped by decision margin. Mistakes are included on purpose — roughly half of each group. Badge colours below match the numbered badges in the image.</p>
+  <div id="gallery"></div>
+
+  <footer>
+    Held-out split shared with the path-regression phase — identical frames, so the two tasks are directly comparable.
+    Generated by <code>scripts/visualize_choice_results.py</code>.
+  </footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+const D = /*__DATA__*/null;
+const pct = v => (v*100).toFixed(1)+'%';
+const pct0 = v => Math.round(v*100)+'%';
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const el = (t,a={}) => { const n=document.createElementNS(NS,t);
+  for(const k in a) n.setAttribute(k,a[k]); return n; };
+
+/* ---- tooltip ---- */
+const tip=$('tip');
+function bindTip(node, html){
+  node.addEventListener('mousemove', e=>{
+    tip.innerHTML=html; tip.style.opacity=1;
+    const r=tip.getBoundingClientRect();
+    tip.style.left=Math.min(e.clientX+14, innerWidth-r.width-10)+'px';
+    tip.style.top=Math.max(e.clientY-r.height-12, 8)+'px';
+  });
+  node.addEventListener('mouseleave', ()=> tip.style.opacity=0);
+}
+
+/* ---- header numbers ---- */
+$('nEval').textContent = D.nEval;
+$('c1').textContent = pct(D.chance);
+$('c2').textContent = pct(D.chanceNoDirect);
+$('c2b').textContent = pct(D.chanceNoDirect);
+$('bd').textContent = pct(D.baseDirect);
+$('fd').textContent = pct(D.fullDirect);
+$('multi').textContent = pct0(D.multiAcceptedShare);
+
+$('tiles').innerHTML = [
+  ['Accepted accuracy', pct(D.fullAccepted), 'LoRA on '+D.trainFull.toLocaleString()+' samples'],
+  ['Base model', pct(D.baseAccepted),
+   '<span class="dn">below</span> uniform chance ('+pct(D.chance)+')'],
+  ['Shortcut bar', pct(D.chanceNoDirect), '“never pick the straight line” alone'],
+  ['Errors', D.nWrong, 'of '+D.nEval+' frames, all left/right mix-ups'],
+].map(([k,v,d])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+
+/* ---- chart 1: scaling ---- */
+(function(){
+  const W=940,H=340,P={t:18,r:96,b:46,l:52};
+  const s=D.scaling, iw=W-P.l-P.r, ih=H-P.t-P.b;
+  const x=i=> P.l + (s.length===1?iw/2:i*iw/(s.length-1));
+  const lo=0.2, hi=1.0, y=v=> P.t + ih - (v-lo)/(hi-lo)*ih;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img',
+    'aria-label':'Accepted and strict accuracy versus training set size'});
+
+  for(let t=0.2;t<=1.001;t+=0.2){
+    svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(t),y2:y(t),stroke:'var(--grid)','stroke-width':1}));
+    const lb=el('text',{x:P.l-10,y:y(t)+4,'text-anchor':'end',class:'ax'}); lb.textContent=pct0(t);
+    svg.appendChild(lb);
+  }
+  // chance reference lines
+  [[D.chance,'chance '+pct(D.chance),4],[D.chanceNoDirect,'no-direct '+pct(D.chanceNoDirect),6]]
+  .forEach(([v,txt,dash])=>{
+    svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(v),y2:y(v),stroke:'var(--muted)',
+      'stroke-width':2,'stroke-dasharray':dash+' 4'}));
+    const t=el('text',{x:P.l+iw+8,y:y(v)+4,class:'ax'}); t.textContent=txt; svg.appendChild(t);
+  });
+  // series
+  [['accepted','var(--s1)'],['strict','var(--s2)']].forEach(([key,col])=>{
+    const pts=s.map((d,i)=>[x(i),y(d[key])]);
+    svg.appendChild(el('polyline',{points:pts.map(p=>p.join(',')).join(' '),
+      fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'}));
+    s.forEach((d,i)=>{
+      const c=el('circle',{cx:x(i),cy:y(d[key]),r:5,fill:col,stroke:'var(--surface)','stroke-width':2});
+      bindTip(c,`<b>${d.label}</b><br>${key} accuracy: ${pct(d[key])}`);
+      svg.appendChild(c);
+    });
+    // direct-label the endpoint
+    const last=s[s.length-1];
+    const t=el('text',{x:x(s.length-1)+10,y:y(last[key])+4,class:'vlab'});
+    t.textContent=pct(last[key]); svg.appendChild(t);
+  });
+  s.forEach((d,i)=>{
+    const t=el('text',{x:x(i),y:H-18,'text-anchor':'middle',class:'ax'});
+    t.textContent=d.label==='base'?'0 (base)':d.label; svg.appendChild(t);
+  });
+  const xl=el('text',{x:P.l+iw/2,y:H-2,'text-anchor':'middle',class:'ax'});
+  xl.textContent='training samples'; svg.appendChild(xl);
+  $('chart-scaling').appendChild(svg);
+})();
+
+/* ---- chart 2: pick distribution ---- */
+(function(){
+  const W=940,H=300,P={t:16,r:16,b:52,l:52};
+  const groups=[0,1,2,3,4], series=[['base','var(--s1)','base'],
+    ['full','var(--s2)','LoRA full'],['truth','var(--s3)','ground truth']];
+  const iw=W-P.l-P.r, ih=H-P.t-P.b;
+  const max=Math.max(...series.flatMap(([k])=>D.picks[k]));
+  const gw=iw/groups.length, bw=(gw-22)/series.length;
+  const y=v=> P.t+ih - v/max*ih;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img',
+    'aria-label':'Distribution of chosen candidate index for base, fine-tuned, and ground truth'});
+  for(let t=0;t<=max;t+=100){
+    svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(t),y2:y(t),stroke:'var(--grid)','stroke-width':1}));
+    const lb=el('text',{x:P.l-10,y:y(t)+4,'text-anchor':'end',class:'ax'}); lb.textContent=t; svg.appendChild(lb);
+  }
+  groups.forEach((g,gi)=>{
+    series.forEach(([k,col,name],si)=>{
+      const v=D.picks[k][g], h=Math.max(0,P.t+ih-y(v));
+      const bx=P.l+gi*gw+11+si*bw;
+      // 2px surface gap between adjacent bars
+      const r=el('rect',{x:bx,y:y(v),width:bw-2,height:h,fill:col,rx:4});
+      bindTip(r,`<b>${name}</b><br>chose index ${g}: ${v} frames`);
+      svg.appendChild(r);
+      // relief for the sub-3:1 magenta in light mode: every bar is direct-labelled
+      const t=el('text',{x:bx+(bw-2)/2,y:y(v)-6,'text-anchor':'middle',class:'vlab'});
+      t.textContent=v; svg.appendChild(t);
+    });
+    const lb=el('text',{x:P.l+gi*gw+gw/2,y:H-26,'text-anchor':'middle',class:'ax'});
+    lb.textContent='index '+g; svg.appendChild(lb);
+  });
+  const xl=el('text',{x:P.l+iw/2,y:H-6,'text-anchor':'middle',class:'ax'});
+  xl.textContent='indices 3–4 exist only on 5-candidate frames'; svg.appendChild(xl);
+  $('chart-picks').appendChild(svg);
+})();
+
+/* ---- chart 3: accuracy by margin ---- */
+(function(){
+  const W=940,H=280,P={t:18,r:16,b:56,l:52};
+  const m=D.margins, iw=W-P.l-P.r, ih=H-P.t-P.b;
+  const bw=iw/m.length, y=v=> P.t+ih - v*ih;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img',
+    'aria-label':'Accepted accuracy by decision margin'});
+  for(let t=0;t<=1.001;t+=0.25){
+    svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(t),y2:y(t),stroke:'var(--grid)','stroke-width':1}));
+    const lb=el('text',{x:P.l-10,y:y(t)+4,'text-anchor':'end',class:'ax'}); lb.textContent=pct0(t); svg.appendChild(lb);
+  }
+  m.forEach((d,i)=>{
+    const bx=P.l+i*bw+14, w=bw-28;
+    const r=el('rect',{x:bx,y:y(d.acc),width:w,height:P.t+ih-y(d.acc),fill:'var(--s1)',rx:4});
+    bindTip(r,`<b>margin ${d.label}</b><br>accuracy ${pct(d.acc)}<br>${d.n} frames`);
+    svg.appendChild(r);
+    const t=el('text',{x:bx+w/2,y:y(d.acc)-7,'text-anchor':'middle',class:'vlab'});
+    t.textContent=pct(d.acc); svg.appendChild(t);
+    const l1=el('text',{x:bx+w/2,y:H-32,'text-anchor':'middle',class:'ax'}); l1.textContent=d.label;
+    const l2=el('text',{x:bx+w/2,y:H-18,'text-anchor':'middle',class:'ax'}); l2.textContent='n='+d.n;
+    svg.appendChild(l1); svg.appendChild(l2);
+  });
+  const xl=el('text',{x:P.l+iw/2,y:H-2,'text-anchor':'middle',class:'ax'});
+  xl.textContent='decision margin (larger = correct path is more clearly better)'; svg.appendChild(xl);
+  $('chart-margin').appendChild(svg);
+})();
+
+/* ---- candidate-count sentence ---- */
+$('cand').innerHTML = 'Candidate count matters too: ' + D.byCand.map(c=>
+  `<b>${pct(c.acc)}</b> on ${c.n_cand}-candidate frames (n=${c.n})`).join(', ') +
+  '. More options, more room to confuse two similar detours.';
+
+/* ---- table ---- */
+(function(){
+  const cols=[['label','Model'],['size','Train size'],['parse_rate','Parse'],
+    ['valid_choice_rate','Valid index'],['strict_accuracy','Strict acc'],
+    ['accepted_accuracy','Accepted acc'],['picked_direct_rate','Picked direct']];
+  const best=Math.max(...D.table.map(r=>r.accepted_accuracy));
+  $('tbl').innerHTML =
+    '<thead><tr>'+cols.map(c=>`<th>${c[1]}</th>`).join('')+'</tr></thead><tbody>'+
+    D.table.map(r=>`<tr class="${r.accepted_accuracy===best?'best':''}">`+
+      cols.map(([k])=>`<td>${typeof r[k]==='number'?r[k].toFixed(3):
+        (k==='label'&&r[k]==='base'?'base (zero-shot)':r[k])}</td>`).join('')+'</tr>').join('')+
+    '</tbody>';
+})();
+
+/* ---- gallery ---- */
+(function(){
+  const order=['ambiguous','moderate','clear'];
+  const tone={ambiguous:'var(--crit)',moderate:'#fab219',clear:'var(--good)'};
+  const g={}; D.gallery.forEach(o=>(g[o.bucket]=g[o.bucket]||[]).push(o));
+  $('gallery').innerHTML = order.filter(k=>g[k]).map(k=>{
+    const items=g[k];
+    const acc=items.filter(o=>o.correct).length;
+    const ms=items.map(o=>o.margin);
+    return `<div class="bucket"><h3><span class="dot" style="background:${tone[k]}"></span>${items[0].bucketTitle}</h3>
+      <p class="bh">margin ${Math.min(...ms)}–${Math.max(...ms)} · ${acc}/${items.length} shown are correct</p>
+      <div class="gal">`+items.map(o=>{
+      const chip=(i)=> i==null ? '<span class="chip">no answer</span>'
+        : `<span class="chip"><i style="background:${D.colors[i%D.colors.length]}"></i>${i}</span>`;
+      return `<div class="gcard"><img src="${o.img}" alt="Rover frame with ${o.nCand} candidate paths drawn and numbered">
+        <div class="gmeta">
+          <div style="margin-bottom:6px">model chose ${chip(o.pick)} · acceptable ${o.accepted.map(chip).join('')}</div>
+          <div class="verdict" style="color:${o.correct?'var(--good)':'var(--crit)'}">
+            ${o.correct?'✓ correct':'✗ wrong'}</div>
+          <div style="margin-top:4px;color:var(--muted)">margin ${o.margin} · ${o.nCand} candidates${
+            o.pick!=null&&o.kinds[o.pick]?' · picked a “'+o.kinds[o.pick]+'” path':''}</div>
+        </div></div>`;
+    }).join('')+`</div></div>`;
+  }).join('');
+})();
+</script>
