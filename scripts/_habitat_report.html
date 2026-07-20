@@ -1,0 +1,257 @@
+<title>Habitat rover path + visibility — LoRA scaling</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#008300; --base:#d55e00; --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --base:#eb6834; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --base:#eb6834; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:26px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--ink2);margin:0 0 26px;font-size:15px;max-width:76ch}
+h2{font-size:18px;margin:44px 0 4px;letter-spacing:-.005em}
+.note{color:var(--ink2);font-size:14px;margin:0 0 18px;max-width:74ch}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:22px 0 8px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:16px 18px}
+.tile .k{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.tile .v{font-size:30px;font-weight:640;margin:6px 0 2px;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums}
+.tile .d{font-size:13px;color:var(--ink2)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px}
+figure{margin:0}
+figcaption{color:var(--ink2);font-size:13px;margin-top:8px}
+h3.ct{font-size:14px;margin:0 0 8px;color:var(--ink)}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--grid)}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tr.base td{color:var(--ink2)}
+.scroll{overflow-x:auto}
+.callout{border-left:3px solid var(--warn);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:16px 0;font-size:14.5px;color:var(--ink2)}
+.callout b{color:var(--ink)}
+.bars{display:flex;flex-direction:column;gap:9px;margin-top:14px}
+.bar{display:grid;grid-template-columns:64px 1fr 108px;align-items:center;gap:10px;font-size:12.5px}
+.bar .track{height:14px;background:var(--grid);border-radius:7px;overflow:hidden}
+.bar .fill{height:100%;border-radius:7px}
+.bar .n{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.gal{display:grid;grid-template-columns:1fr;gap:16px;margin-top:12px}
+.gcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden}
+.gcard img{width:100%;display:block}
+.gmeta{padding:11px 14px;font-size:12.5px;color:var(--ink2);display:flex;
+  justify-content:space-between;gap:12px;flex-wrap:wrap}
+.gsec{margin-top:24px}
+.gsec h3{font-size:15px;margin:0 0 2px;display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin:0 0 10px;font-size:13px;color:var(--ink2)}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:-1px}
+.legend .ring{width:11px;height:11px;border-radius:50%;background:transparent;
+  border:2.5px solid var(--ink2);display:inline-block;margin-right:6px;vertical-align:-1px}
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);
+  border:1px solid var(--ring);border-radius:8px;padding:7px 10px;font-size:12.5px;
+  box-shadow:0 6px 20px rgba(0,0,0,.13);opacity:0;transition:opacity .1s;z-index:9;
+  font-variant-numeric:tabular-nums}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.ax{font-size:11px;fill:var(--muted)}
+.vlab{font-size:11px;fill:var(--ink2);font-variant-numeric:tabular-nums}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
+  color:var(--muted);font-size:13px}
+</style>
+
+<div class="wrap">
+  <h1>Tracing a traversable path — and knowing what’s hidden</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>Scaling — every metric vs. training-set size</h2>
+  <p class="note">The dashed line is the zero-shot base model. Each curve is the LoRA fine-tune at four training-set sizes on one fixed held-out split.</p>
+  <div class="card"><div class="grid2" id="charts"></div></div>
+
+  <h2>All metrics</h2>
+  <div class="card scroll"><table id="tbl"></table></div>
+
+  <h2>The catch: raw goal-visibility accuracy is inflated</h2>
+  <p class="note" id="imbalance"></p>
+  <div class="callout" id="callout"></div>
+  <div class="card"><h3 class="ct">Per-class recall on the goal-visibility call</h3>
+    <div class="bars" id="recalls"></div></div>
+
+  <h2>Base vs. fine-tuned, by difficulty</h2>
+  <p class="note" id="ghint"></p>
+  <div class="legend">
+    <span><i style="background:var(--base)"></i>base prediction (left panel)</span>
+    <span><i style="background:var(--s1)"></i>fine-tuned prediction (right panel)</span>
+    <span><i style="background:#696969"></i>ground truth</span>
+    <span><span class="ring"></span>hollow waypoint = model called it obstructed</span>
+  </div>
+  <div id="gallery"></div>
+
+  <footer id="foot"></footer>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const NS='http://www.w3.org/2000/svg';
+const el=(t,a={})=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);return n;};
+const pct=v=>v==null?'—':(v*100).toFixed(1)+'%';
+const pct0=v=>Math.round(v*100)+'%';
+const num=(v,d=3)=>v==null?'—':v.toFixed(d);
+
+const tip=$('tip');
+function bindTip(node,html){
+  node.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.opacity=1;
+    const r=tip.getBoundingClientRect();
+    tip.style.left=Math.min(e.clientX+14,innerWidth-r.width-10)+'px';
+    tip.style.top=Math.max(e.clientY-r.height-12,8)+'px';});
+  node.addEventListener('mouseleave',()=>tip.style.opacity=0);
+}
+
+$('sub').textContent = `${D.label} + LoRA on Habitat rover frames: predict the path to the goal `
+  + `as [x, y, visibility] waypoints. ${D.nEval} held-out frames, training subsets up to `
+  + `${D.trainFull.toLocaleString()}.`;
+$('foot').textContent = `One fixed held-out split shared by every run, and by the path-classification `
+  + `experiment on the same frames. Generated by scripts/visualize_habitat_results.py.`;
+
+/* ---- tiles ---- */
+(function(){
+  const b=D.baseMetrics, f=D.fullMetrics;
+  const t=[
+    ['Waypoint error', num(f.mean_point_error_median), b?`base ${num(b.mean_point_error_median)} · median normalized distance`:'median normalized distance'],
+    ['Trajectory shape', num(f.frechet_median), b?`base ${num(b.frechet_median)} · Fréchet`:'Fréchet'],
+    ['Waypoint visibility', pct(f.path_visibility_acc_mean), b?`base ${pct(b.path_visibility_acc_mean)}`:''],
+    ['Output validity', pct(f.parse_rate), b?`base ${pct(b.parse_rate)}`:''],
+  ];
+  $('tiles').innerHTML=t.map(([k,v,d])=>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+})();
+
+/* ---- scaling charts ---- */
+(function(){
+  const rows=D.scaling.filter(r=>r.label!=='base');
+  const base=D.scaling.find(r=>r.label==='base');
+  D.metrics.forEach(m=>{
+    const W=440,H=250,P={t:20,r:22,b:44,l:56};
+    const iw=W-P.l-P.r, ih=H-P.t-P.b;
+    const vals=rows.map(r=>r[m.key]).filter(v=>v!=null);
+    if(base && base[m.key]!=null) vals.push(base[m.key]);
+    if(!vals.length) return;
+    let lo=Math.min(...vals), hi=Math.max(...vals);
+    const pad=(hi-lo)*0.15||0.05; lo=Math.max(0,lo-pad); hi=hi+pad;
+    const x=i=>P.l+(rows.length===1?iw/2:i*iw/(rows.length-1));
+    const y=v=>P.t+ih-(v-lo)/(hi-lo)*ih;
+
+    const fig=document.createElement('figure');
+    fig.innerHTML=`<h3 class="ct">${m.name} <span style="color:var(--muted);font-weight:400">`
+      +`(${m.better==='up'?'higher':'lower'} is better)</span></h3>`;
+    const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':m.name});
+    for(let k=0;k<=4;k++){
+      const v=lo+(hi-lo)*k/4;
+      svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(v),y2:y(v),stroke:'var(--grid)','stroke-width':1}));
+      const lb=el('text',{x:P.l-9,y:y(v)+4,'text-anchor':'end',class:'ax'});
+      lb.textContent = m.unit.indexOf('accuracy')>=0 ? pct0(v) : v.toFixed(2);
+      svg.appendChild(lb);
+    }
+    if(base && base[m.key]!=null && base[m.key]>=lo && base[m.key]<=hi){
+      svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y(base[m.key]),y2:y(base[m.key]),
+        stroke:'var(--base)','stroke-width':2,'stroke-dasharray':'5 4'}));
+      const t=el('text',{x:P.l+iw,y:y(base[m.key])-6,'text-anchor':'end',class:'vlab'});
+      t.textContent='base'; svg.appendChild(t);
+    }
+    const pts=rows.map((r,i)=>r[m.key]==null?null:[x(i),y(r[m.key]),i]).filter(Boolean);
+    if(pts.length>1) svg.appendChild(el('polyline',{points:pts.map(p=>p[0]+','+p[1]).join(' '),
+      fill:'none',stroke:'var(--s1)','stroke-width':2,'stroke-linejoin':'round'}));
+    pts.forEach(([px,py,i])=>{
+      const c=el('circle',{cx:px,cy:py,r:4.5,fill:'var(--s1)',stroke:'var(--surface)','stroke-width':2});
+      bindTip(c,`<b>${rows[i].label}</b><br>${m.name}: `
+        +(m.unit.indexOf('accuracy')>=0?pct(rows[i][m.key]):num(rows[i][m.key],4)));
+      svg.appendChild(c);
+    });
+    rows.forEach((r,i)=>{const t=el('text',{x:x(i),y:H-22,'text-anchor':'middle',class:'ax'});
+      t.textContent=r.label; svg.appendChild(t);});
+    const xl=el('text',{x:P.l+iw/2,y:H-4,'text-anchor':'middle',class:'ax'});
+    xl.textContent='training samples'; svg.appendChild(xl);
+    fig.appendChild(svg); $('charts').appendChild(fig);
+  });
+})();
+
+/* ---- table ---- */
+(function(){
+  $('tbl').innerHTML='<thead><tr><th>Model</th><th>Train size</th>'
+    +D.tableCols.map(c=>`<th>${c.name}</th>`).join('')+'</tr></thead><tbody>'
+    +D.table.map(r=>`<tr class="${r.isBase?'base':''}"><td>${r.isBase?'base (zero-shot)':r.label}</td>`
+      +`<td>${r.size}</td>`+D.tableCols.map(c=>`<td>${num(r[c.key])}</td>`).join('')+'</tr>').join('')
+    +'</tbody>';
+})();
+
+/* ---- goal-visibility imbalance ---- */
+(function(){
+  const labels=Object.keys(D.conf);
+  const full=D.conf['full']||D.conf[labels[labels.length-1]];
+  const nv=full.n_visible, no=full.n_obstructed, tot=nv+no;
+  $('imbalance').innerHTML = `The goal is obstructed on <b>${pct0(no/tot)}</b> of held-out frames `
+    + `and visible on only <b>${pct0(nv/tot)}</b>. Against that split, always answering `
+    + `“obstructed” scores <b>${pct0(no/tot)}</b> raw accuracy while having learned nothing about `
+    + `the rare class — so raw accuracy cannot tell a real result from a collapsed one.`;
+  $('callout').innerHTML = `<b>Read the balanced number instead.</b> Balanced accuracy is the mean `
+    + `of the two per-class recalls, so the always-obstructed model scores 0.50 by construction. `
+    + `At full data this model reaches <b>${pct(full.balanced_accuracy)}</b> balanced `
+    + `(${pct(full.recall_visible)} recall on visible goals, ${pct(full.recall_obstructed)} on `
+    + `obstructed) — genuinely above the degenerate baseline, but the visible class is clearly `
+    + `the harder one and is where the remaining headroom is.`;
+
+  $('recalls').innerHTML = labels.map(l=>{
+    const c=D.conf[l];
+    return `<div class="bar"><span>${l==='base'?'base':l}</span>
+      <div class="track"><div class="fill" style="width:${(c.balanced_accuracy*100).toFixed(1)}%;
+        background:${c.balanced_accuracy>0.55?'var(--s2)':'var(--warn)'}"></div></div>
+      <span class="n">${pct(c.balanced_accuracy)} balanced</span></div>
+      <div class="bar" style="opacity:.75"><span style="color:var(--muted)">↳ visible</span>
+      <div class="track"><div class="fill" style="width:${(c.recall_visible*100).toFixed(1)}%;
+        background:var(--s1)"></div></div><span class="n">${pct(c.recall_visible)} · n=${c.n_visible}</span></div>
+      <div class="bar" style="opacity:.75"><span style="color:var(--muted)">↳ obstructed</span>
+      <div class="track"><div class="fill" style="width:${(c.recall_obstructed*100).toFixed(1)}%;
+        background:var(--muted)"></div></div><span class="n">${pct(c.recall_obstructed)} · n=${c.n_obstructed}</span></div>`;
+  }).join('');
+})();
+
+/* ---- gallery ---- */
+(function(){
+  const tone={easy:'var(--good)',medium:'var(--warn)',hard:'var(--crit)'};
+  const g={}; D.gallery.forEach(o=>(g[o.bucket]=g[o.bucket]||[]).push(o));
+  const errs=D.gallery.map(o=>o.err);
+  $('ghint').innerHTML = `Frames grouped by how hard they were <i>for the fine-tuned model</i> — `
+    + `ranked by its own waypoint error, because the base model's output is too degraded to carry `
+    + `a difficulty signal. Left panel is the base model, right is LoRA at full data; grey is `
+    + `ground truth. Waypoint error across the shown frames spans `
+    + `${Math.min(...errs).toFixed(3)}–${Math.max(...errs).toFixed(3)}.`;
+  $('gallery').innerHTML = ['easy','medium','hard'].filter(k=>g[k]).map(k=>{
+    const items=g[k];
+    return `<div class="gsec"><h3><span class="dot" style="background:${tone[k]}"></span>${items[0].bucketTitle}</h3>
+      <div class="gal">`+items.map(o=>`<div class="gcard">
+        <img src="${o.img}" alt="Base and fine-tuned predicted paths over the ground truth">
+        <div class="gmeta">
+          <span>${o.baseParsed?'':'<b>base produced no valid output</b> · '}fine-tuned: err <b>${o.err}</b> · Fréchet ${o.frechet} · visibility ${pct0(o.vis)}</span>
+          <span>goal is ${o.goalVisible?'visible':'obstructed'} —
+            <b style="color:${o.goalOk?'var(--good)':'var(--crit)'}">${o.goalOk?'called correctly':'called wrong'}</b></span>
+        </div></div>`).join('')+`</div></div>`;
+  }).join('');
+})();
+</script>

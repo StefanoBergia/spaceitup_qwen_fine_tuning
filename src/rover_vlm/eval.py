@@ -221,6 +221,41 @@ def aggregate_habitat_metrics(records):
     return summary
 
 
+def goal_visibility_confusion(records):
+    """Per-class recall for the binary goal-visibility call, plus balanced accuracy.
+
+    Raw accuracy is misleading here: the eval split is roughly 75/25 obstructed/visible,
+    so a model that answers "obstructed" every time already scores ~0.75 while having
+    learned nothing about the rare class. Balanced accuracy — the mean of the two
+    per-class recalls — is 0.5 for that degenerate model, which is what makes the
+    collapse visible.
+
+    Returns {recall_visible, recall_obstructed, balanced_accuracy, n_visible,
+    n_obstructed} over parseable predictions only.
+    """
+    vv = vo = oo = ov = 0
+    for r in records:
+        pred = r.get("parsed")
+        if not pred:
+            continue
+        gt_v, pred_v = r["gt"]["goal"][2], pred["goal"][2]
+        if gt_v == 1:
+            vv += pred_v == 1
+            vo += pred_v != 1
+        else:
+            oo += pred_v == 0
+            ov += pred_v != 0
+    rv = vv / (vv + vo) if vv + vo else 0.0
+    ro = oo / (oo + ov) if oo + ov else 0.0
+    return {
+        "recall_visible": rv,
+        "recall_obstructed": ro,
+        "balanced_accuracy": (rv + ro) / 2,
+        "n_visible": vv + vo,
+        "n_obstructed": oo + ov,
+    }
+
+
 # --- habitat path classification ("which candidate is traversable?") -----------------
 
 _CHOICE_INT_RE = re.compile(r"-?\d+")

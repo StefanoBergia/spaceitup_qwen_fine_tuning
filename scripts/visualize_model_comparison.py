@@ -16,8 +16,6 @@ reader to infer significance from bar heights.
 """
 
 import argparse
-import base64
-import io
 import json
 from pathlib import Path
 
@@ -30,6 +28,7 @@ from rover_vlm.compare import (
     paired_bootstrap,
 )
 from rover_vlm.habitat_choice import CANDIDATE_COLORS, DATASET_ROOT, render_choice_image
+from rover_vlm.overlay import draw_path, draw_polyline, embed_jpeg
 
 # must match the --s1 / --s2 series tokens in _comparison_report.html
 COLOR_A, COLOR_B, COLOR_GT = (42, 120, 214), (0, 131, 0), (105, 105, 105)
@@ -107,35 +106,6 @@ def collect(task, a_dir, b_dir, full_size):
     return {"rows": rows, "tests": tests}
 
 
-def _embed(img, max_px):
-    if max(img.size) > max_px:
-        img.thumbnail((max_px, max_px), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, "JPEG", quality=80)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
-
-
-WHITE = (255, 255, 255)
-
-
-def _draw_path(draw, pts, color, W, H, r=6, width=4):
-    """Polyline plus per-waypoint visibility: filled = predicted visible, hollow = obstructed.
-
-    Every stroke gets a white underlay first — these overlays sit on cluttered indoor
-    photos where a thin coloured line disappears against furniture.
-    """
-    xy = [(p[0] * W, p[1] * H) for p in pts]
-    if len(xy) >= 2:
-        draw.line(xy, fill=WHITE, width=width + 4, joint="curve")
-        draw.line(xy, fill=color, width=width, joint="curve")
-    for (x, y), (_, _, v) in zip(xy, pts):
-        box = [x - r, y - r, x + r, y + r]
-        if v == 1:
-            draw.ellipse(box, fill=color, outline=WHITE, width=2)
-        else:
-            draw.ellipse(box, fill=WHITE, outline=color, width=3)
-
-
 def reg_gallery(pa, pb, eval_records, per_side, max_px):
     """Frames where the two models' visibility judgement differs most, both directions.
 
@@ -166,15 +136,12 @@ def reg_gallery(pa, pb, eval_records, per_side, max_px):
         gt = pa[sid]["gt"]
         # ground truth as a wide pale corridor underneath, so the two predictions read
         # as deviations from it rather than as a third competing line
-        gxy = [(p[0] * W, p[1] * H) for p in gt["path"]]
-        if len(gxy) >= 2:
-            d.line(gxy, fill=WHITE, width=14, joint="curve")
-            d.line(gxy, fill=COLOR_GT, width=9, joint="curve")
-        _draw_path(d, pa[sid]["parsed"]["path"], COLOR_A, W, H)
-        _draw_path(d, pb[sid]["parsed"]["path"], COLOR_B, W, H)
+        draw_polyline(d, [(p[0], p[1]) for p in gt["path"]], COLOR_GT, W, H, width=9)
+        draw_path(d, pa[sid]["parsed"]["path"], COLOR_A, W, H)
+        draw_path(d, pb[sid]["parsed"]["path"], COLOR_B, W, H)
         out.append({
             "id": sid,
-            "img": _embed(img, max_px),
+            "img": embed_jpeg(img, max_px),
             "aVis": pa[sid]["metrics"]["path_visibility_acc"],
             "bVis": pb[sid]["metrics"]["path_visibility_acc"],
             "aErr": pa[sid]["metrics"]["mean_point_error"],
@@ -211,7 +178,7 @@ def choice_gallery(pa, pb, eval_records, sample_dirs, per_side, max_px, tmp_dir)
             gt = pa[sid]["gt"]
             out.append({
                 "id": sid,
-                "img": _embed(Image.open(img_path), max_px),
+                "img": embed_jpeg(Image.open(img_path), max_px),
                 "aPick": pa[sid]["parsed"],
                 "bPick": pb[sid]["parsed"],
                 "accepted": gt["accepted"],

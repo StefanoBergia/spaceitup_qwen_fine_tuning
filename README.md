@@ -276,7 +276,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Report | Regenerate with | Writes to |
 |---|---|---|
 | ShareRobot prediction explorer | `uv run scripts/visualize_predictions.py` | `outputs/eval/prediction_explorer.html` |
-| Habitat path + visibility results | *(generator not committed — see note)* | `outputs/eval_habitat/habitat_results.html` |
+| Habitat path + visibility results | `uv run scripts/visualize_habitat_results.py` | `outputs/eval_habitat/habitat_results.html` |
 | Habitat classification results | `uv run scripts/visualize_choice_results.py` | `outputs/eval_habitat_choice/choice_results.html` |
 | 2B vs 0.8B comparison (both tasks) | `uv run scripts/visualize_model_comparison.py` | `outputs/model_comparison.html` |
 
@@ -302,7 +302,14 @@ models are scored on identical frames, so it runs McNemar's exact test (classifi
 and a paired bootstrap (regression) via `src/rover_vlm/compare.py` and labels each gap
 significant or not, rather than leaving significance to be guessed from bar heights.
 
-> **Note on the Habitat path+visibility report.** Its generator was written as a
-> throwaway and never committed, so that page cannot currently be regenerated from the
-> repo — the published artifact is the only copy. The other three are reproducible.
-> Folding it into a proper `scripts/` entrypoint is open work.
+Every report is regenerable from the repo. The two Habitat generators take `--eval-dir`
+/ `--label`, so the same page can be rebuilt for either base model:
+
+```bash
+uv run scripts/visualize_habitat_results.py \
+    --eval-dir outputs/eval_habitat_0.8b --label Qwen3.5-0.8B
+```
+
+Shared drawing code lives in `src/rover_vlm/overlay.py` (white-underlaid strokes;
+waypoint fill encodes visibility, so colour stays free to mean "which model"), and the
+goal-visibility class-imbalance maths in `rover_vlm.eval.goal_visibility_confusion`.
