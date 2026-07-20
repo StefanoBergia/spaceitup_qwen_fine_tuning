@@ -16,8 +16,12 @@ reader to infer significance from bar heights.
 """
 
 import argparse
+import base64
+import io
 import json
 from pathlib import Path
+
+from PIL import Image, ImageDraw
 
 from rover_vlm.compare import (
     load_metrics,
@@ -25,6 +29,10 @@ from rover_vlm.compare import (
     mcnemar_exact,
     paired_bootstrap,
 )
+from rover_vlm.habitat_choice import CANDIDATE_COLORS, DATASET_ROOT, render_choice_image
+
+# must match the --s1 / --s2 series tokens in _comparison_report.html
+COLOR_A, COLOR_B, COLOR_GT = (42, 120, 214), (0, 131, 0), (105, 105, 105)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT = REPO_ROOT / "outputs" / "model_comparison.html"
@@ -99,6 +107,121 @@ def collect(task, a_dir, b_dir, full_size):
     return {"rows": rows, "tests": tests}
 
 
+def _embed(img, max_px):
+    if max(img.size) > max_px:
+        img.thumbnail((max_px, max_px), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+WHITE = (255, 255, 255)
+
+
+def _draw_path(draw, pts, color, W, H, r=6, width=4):
+    """Polyline plus per-waypoint visibility: filled = predicted visible, hollow = obstructed.
+
+    Every stroke gets a white underlay first — these overlays sit on cluttered indoor
+    photos where a thin coloured line disappears against furniture.
+    """
+    xy = [(p[0] * W, p[1] * H) for p in pts]
+    if len(xy) >= 2:
+        draw.line(xy, fill=WHITE, width=width + 4, joint="curve")
+        draw.line(xy, fill=color, width=width, joint="curve")
+    for (x, y), (_, _, v) in zip(xy, pts):
+        box = [x - r, y - r, x + r, y + r]
+        if v == 1:
+            draw.ellipse(box, fill=color, outline=WHITE, width=2)
+        else:
+            draw.ellipse(box, fill=WHITE, outline=color, width=3)
+
+
+def reg_gallery(pa, pb, eval_records, per_side, max_px):
+    """Frames where the two models' visibility judgement differs most, both directions.
+
+    Visibility is where the significant gap lives, so showing the frames that drive it
+    is more informative than showing frames picked for looking good. Filled markers mean
+    the model called that waypoint visible, hollow means obstructed — so a run of hollow
+    dots on open floor is a visible mistake.
+    """
+    by_id = {r["id"]: r for r in eval_records}
+    rows = []
+    for sid in set(pa) & set(pb) & set(by_id):
+        ma, mb = pa[sid].get("metrics"), pb[sid].get("metrics")
+        if not ma or not mb or not pa[sid].get("parsed") or not pb[sid].get("parsed"):
+            continue
+        rows.append((ma["path_visibility_acc"] - mb["path_visibility_acc"], sid))
+    rows.sort()
+    picks = rows[:per_side] + rows[-per_side:][::-1]     # 0.8B better first, then 2B better
+
+    out = []
+    for delta, sid in picks:
+        rec = by_id[sid]
+        path = Path(rec["image"][0])
+        if not path.exists():
+            continue
+        img = Image.open(path).convert("RGB")
+        W, H = img.size
+        d = ImageDraw.Draw(img)
+        gt = pa[sid]["gt"]
+        # ground truth as a wide pale corridor underneath, so the two predictions read
+        # as deviations from it rather than as a third competing line
+        gxy = [(p[0] * W, p[1] * H) for p in gt["path"]]
+        if len(gxy) >= 2:
+            d.line(gxy, fill=WHITE, width=14, joint="curve")
+            d.line(gxy, fill=COLOR_GT, width=9, joint="curve")
+        _draw_path(d, pa[sid]["parsed"]["path"], COLOR_A, W, H)
+        _draw_path(d, pb[sid]["parsed"]["path"], COLOR_B, W, H)
+        out.append({
+            "id": sid,
+            "img": _embed(img, max_px),
+            "aVis": pa[sid]["metrics"]["path_visibility_acc"],
+            "bVis": pb[sid]["metrics"]["path_visibility_acc"],
+            "aErr": pa[sid]["metrics"]["mean_point_error"],
+            "bErr": pb[sid]["metrics"]["mean_point_error"],
+            "winner": "a" if delta > 0 else "b",
+        })
+    return out
+
+
+def choice_gallery(pa, pb, eval_records, sample_dirs, per_side, max_px, tmp_dir):
+    """Frames where the two models picked differently — the discordant pairs McNemar counts.
+
+    Balanced across both directions so the gallery shows where the smaller model wins as
+    well as where it loses.
+    """
+    by_id = {r["id"]: r for r in eval_records}
+    a_right, b_right = [], []
+    for sid in sorted(set(pa) & set(pb) & set(by_id)):
+        ma, mb = pa[sid].get("metrics"), pb[sid].get("metrics")
+        if not ma or not mb or pa[sid].get("parsed") == pb[sid].get("parsed"):
+            continue
+        if ma["accepted_correct"] and not mb["accepted_correct"]:
+            a_right.append(sid)
+        elif mb["accepted_correct"] and not ma["accepted_correct"]:
+            b_right.append(sid)
+
+    out = []
+    for side, ids in (("a", a_right[:per_side]), ("b", b_right[:per_side])):
+        for sid in ids:
+            if sid not in sample_dirs:
+                continue
+            img_path = tmp_dir / f"{sid}.jpg"
+            render_choice_image(sample_dirs[sid], img_path, dashed=True)
+            gt = pa[sid]["gt"]
+            out.append({
+                "id": sid,
+                "img": _embed(Image.open(img_path), max_px),
+                "aPick": pa[sid]["parsed"],
+                "bPick": pb[sid]["parsed"],
+                "accepted": gt["accepted"],
+                "nCand": gt["n_candidates"],
+                "margin": gt.get("margin"),
+                "winner": side,
+            })
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--a-dir-choice", type=Path, default=REPO_ROOT / "outputs/eval_habitat_choice")
@@ -109,11 +232,33 @@ def main() -> None:
     p.add_argument("--b-label", default="Qwen3.5-0.8B")
     p.add_argument("--meta", type=Path, default=REPO_ROOT / "data/prepared_habitat/meta.json")
     p.add_argument("--out", type=Path, default=OUT)
+    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--per-side", type=int, default=3,
+                   help="gallery samples per direction (each model winning)")
+    p.add_argument("--max-image-px", type=int, default=480)
     args = p.parse_args()
 
     full_size = json.loads(args.meta.read_text())["splits"]["train_full"]
     choice = collect("choice", args.a_dir_choice, args.b_dir_choice, full_size)
     reg = collect("reg", args.a_dir_reg, args.b_dir_reg, full_size)
+
+    # galleries compare the full-data models, the pair the verdict is about
+    reg_eval = json.loads((REPO_ROOT / "data/prepared_habitat/eval.json").read_text())
+    choice_eval = json.loads((REPO_ROOT / "data/prepared_habitat_choice/eval.json").read_text())
+    reg_a = load_predictions(args.a_dir_reg, "habitat_train_full")
+    reg_b = load_predictions(args.b_dir_reg, "habitat_train_full")
+    ch_a = load_predictions(args.a_dir_choice, "habitat_choice_train_full")
+    ch_b = load_predictions(args.b_dir_choice, "habitat_choice_train_full")
+
+    import tempfile
+    reg_samples, choice_samples = [], []
+    if reg_a and reg_b:
+        reg_samples = reg_gallery(reg_a, reg_b, reg_eval, args.per_side, args.max_image_px)
+    if ch_a and ch_b:
+        dirs = {d.name: d for d in args.dataset_root.glob("*/samples/*/")}
+        with tempfile.TemporaryDirectory() as tmp:
+            choice_samples = choice_gallery(ch_a, ch_b, choice_eval, dirs,
+                                            args.per_side, args.max_image_px, Path(tmp))
 
     complete = {
         "choice": all(r["a"] and r["b"] for r in choice["rows"]) and len(choice["rows"]) == len(SIZES),
@@ -129,6 +274,9 @@ def main() -> None:
         "choiceMetrics": [{"key": k, "name": n, "better": d} for k, _, n, d in CHOICE_METRICS],
         "regMetrics": [{"key": k, "name": n, "better": d} for k, _, n, d in REG_METRICS],
         "trainFull": full_size,
+        "regSamples": reg_samples,
+        "choiceSamples": choice_samples,
+        "candidateColors": ["#%02x%02x%02x" % c for c in CANDIDATE_COLORS],
     }
 
     html = (Path(__file__).parent / "_comparison_report.html").read_text()

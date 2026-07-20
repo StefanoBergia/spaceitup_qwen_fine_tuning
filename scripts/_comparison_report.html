@@ -50,6 +50,20 @@ tbody tr:last-child td{border-bottom:none}
   padding:14px 18px;margin:18px 0;font-size:14.5px;color:var(--ink2)}
 .callout b{color:var(--ink)}
 .callout.warn{border-left-color:var(--warn)}
+.gal{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin:12px 0 4px}
+.gcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden}
+.gcard img{width:100%;display:block}
+.gmeta{padding:11px 13px;font-size:12.5px;color:var(--ink2)}
+.gmeta b{color:var(--ink)}
+.grow{display:flex;justify-content:space-between;gap:8px;padding:2px 0}
+.swatch{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:0}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:1px 7px;border-radius:999px;
+  border:1px solid var(--ring);font-size:11.5px;font-weight:600;color:var(--ink);margin-right:4px}
+.chip i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.gsec{margin-top:22px}
+.gsec h3{font-size:14.5px;margin:0 0 2px;display:flex;align-items:center;gap:8px}
+.gsec p.hint{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
 .tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);
   border:1px solid var(--ring);border-radius:8px;padding:7px 10px;font-size:12.5px;
   box-shadow:0 6px 20px rgba(0,0,0,.13);opacity:0;transition:opacity .1s;z-index:9;
@@ -84,6 +98,10 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
     <div class="grid2" id="reg-charts"></div>
   </div>
   <div id="parsewarn"></div>
+
+  <h2>Where they disagree</h2>
+  <p class="note">Aggregates hide what a model actually does. These are frames where the two models <b>disagree</b> — the same discordant pairs the significance tests below are computed from — shown in both directions, so the smaller model’s wins are visible alongside its losses.</p>
+  <div id="galleries"></div>
 
   <h2>Is the gap real?</h2>
   <p class="note">Both models are scored on the <b>same held-out frames</b>, so the differences are paired and can be tested directly. Classification uses McNemar’s exact test on the frames where the two models disagree; regression uses a paired bootstrap 95% interval on the per-frame difference. A gap whose interval crosses zero — or whose p exceeds 0.05 — is not distinguishable from noise at this sample size.</p>
@@ -254,6 +272,65 @@ D.regMetrics.forEach(m=> lineChart($('reg-charts'), D.reg.rows, m.key, m.name, m
     + `metrics to mean anything — those points are averages over the few outputs that `
     + `happened to come out well-formed, and should not be compared against a model that `
     + `parsed nearly everything.</div>`;
+})();
+
+/* ---- galleries: the frames the two models actually split on ---- */
+(function(){
+  const A='var(--s1)', B='var(--s2)';
+  let html='';
+
+  if(D.choiceSamples && D.choiceSamples.length){
+    const chip=i=> i==null ? '<span class="chip">no answer</span>'
+      : `<span class="chip"><i style="background:${D.candidateColors[i%D.candidateColors.length]}"></i>${i}</span>`;
+    const card=o=>{
+      const aOk=o.accepted.includes(o.aPick), bOk=o.accepted.includes(o.bPick);
+      const mark=ok=> ok?'<span style="color:var(--good);font-weight:700">✓</span>'
+                        :'<span style="color:var(--crit);font-weight:700">✗</span>';
+      return `<div class="gcard"><img src="${o.img}" alt="Frame with ${o.nCand} numbered candidate paths">
+        <div class="gmeta">
+          <div class="grow"><span><span class="swatch" style="background:${A}"></span>${D.aLabel}</span>
+            <span>${chip(o.aPick)} ${mark(aOk)}</span></div>
+          <div class="grow"><span><span class="swatch" style="background:${B}"></span>${D.bLabel}</span>
+            <span>${chip(o.bPick)} ${mark(bOk)}</span></div>
+          <div class="grow" style="color:var(--muted);border-top:1px solid var(--grid);margin-top:5px;padding-top:5px">
+            <span>acceptable ${o.accepted.map(chip).join('')}</span>
+            <span>${o.margin!=null?'margin '+o.margin.toFixed(2):''}</span></div>
+        </div></div>`;
+    };
+    const wins=s=> D.choiceSamples.filter(o=>o.winner===s);
+    html += `<div class="gsec"><h3>Classification — picking the traversable path</h3>`
+      + `<p class="hint">Dashed segments run behind an obstacle. Badge colours match the paths.</p>`;
+    [['a',`${D.aLabel} right, ${D.bLabel} wrong`],['b',`${D.bLabel} right, ${D.aLabel} wrong`]]
+      .forEach(([s,title])=>{ const items=wins(s); if(!items.length) return;
+        html += `<h3 style="margin-top:14px;font-size:13.5px;color:var(--ink2)">`
+          + `<span class="dot" style="background:${s==='a'?A:B}"></span>${title}</h3>`
+          + `<div class="gal">${items.map(card).join('')}</div>`; });
+    html += `</div>`;
+  }
+
+  if(D.regSamples && D.regSamples.length){
+    const card=o=>`<div class="gcard"><img src="${o.img}" alt="Frame with ground-truth and both predicted paths">
+      <div class="gmeta">
+        <div class="grow"><span><span class="swatch" style="background:${A}"></span>${D.aLabel}</span>
+          <span>vis ${(o.aVis*100).toFixed(0)}% · err ${o.aErr.toFixed(3)}</span></div>
+        <div class="grow"><span><span class="swatch" style="background:${B}"></span>${D.bLabel}</span>
+          <span>vis ${(o.bVis*100).toFixed(0)}% · err ${o.bErr.toFixed(3)}</span></div>
+      </div></div>`;
+    const wins=s=> D.regSamples.filter(o=>o.winner===s);
+    html += `<div class="gsec"><h3>Path regression — tracing the route</h3>`
+      + `<p class="hint">Grey is ground truth. A waypoint is drawn <b>filled</b> where the model called it `
+      + `visible and <b>hollow</b> where it called it obstructed — so hollow dots on open floor, or filled `
+      + `dots behind furniture, are the visibility mistakes the aggregate metric is counting. `
+      + `Frames chosen for the largest visibility disagreement.</p>`;
+    [['a',`${D.aLabel} reads occlusion better here`],['b',`${D.bLabel} reads occlusion better here`]]
+      .forEach(([s,title])=>{ const items=wins(s); if(!items.length) return;
+        html += `<h3 style="margin-top:14px;font-size:13.5px;color:var(--ink2)">`
+          + `<span class="dot" style="background:${s==='a'?A:B}"></span>${title}</h3>`
+          + `<div class="gal">${items.map(card).join('')}</div>`; });
+    html += `</div>`;
+  }
+
+  $('galleries').innerHTML = html || '<p class="note">No sample frames available.</p>';
 })();
 
 /* ---- significance tables ---- */
