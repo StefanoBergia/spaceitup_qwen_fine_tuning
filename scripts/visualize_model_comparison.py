@@ -89,7 +89,10 @@ def collect(task, a_dir, b_dir, full_size):
                     continue
                 bs = paired_bootstrap(pa, pb, pkey)
                 if bs:
-                    entry[mkey] = {"name": name, "a": ma.get(mkey), "b": mb.get(mkey),
+                    # report the bootstrap's own per-sample means, not the summary's
+                    # medians: the CI is a statement about the mean difference, and
+                    # pairing a median column with a mean interval would misread
+                    entry[mkey] = {"name": name, "a": bs["a"], "b": bs["b"],
                                    "diff": bs["diff"], "lo": bs["lo"], "hi": bs["hi"],
                                    "n": bs["n"]}
         tests.append(entry)

@@ -68,6 +68,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
 
   <div id="incomplete"></div>
   <div class="tiles" id="tiles"></div>
+  <div id="verdict"></div>
 
   <h2>Picking the traversable path (classification)</h2>
   <p class="note">Candidates are drawn on the frame; the model answers with an index. <b>Accepted</b> accuracy counts any candidate the dataset marks feasible, <b>strict</b> requires the single canonical one.</p>
@@ -159,6 +160,29 @@ $('foot').textContent = `Both sweeps train on nested subsets up to ${D.trainFull
   t.push(['Parameter ratio','~2.5×', `${D.aLabel} over ${D.bLabel}`]);
   $('tiles').innerHTML = t.map(([k,v,d])=>
     `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+})();
+
+/* ---- verdict: split the "where it matters" question by what the test says ---- */
+(function(){
+  if(!D.complete.choice || !D.complete.reg) return;
+  const c=D.choice.tests.find(x=>x.size==='full')||{};
+  const r=D.reg.tests.find(x=>x.size==='full')||{};
+  const tied=[], lost=[];
+  const put=(e,label)=>{ if(!e) return;
+    const ns = e.p!=null ? e.p>=0.05 : (e.lo<=0 && e.hi>=0);
+    (ns?tied:lost).push(label); };
+  put(c.accepted_accuracy,'picking a feasible path');
+  put(c.strict_accuracy,'picking the single canonical path');
+  put(r.mean_point_error_median,'waypoint position');
+  put(r.frechet_median,'trajectory shape');
+  put(r.path_visibility_acc_mean,'per-waypoint visibility');
+  put(r.goal_visibility_accuracy,'goal visibility');
+  if(!tied.length && !lost.length) return;
+  $('verdict').innerHTML = `<div class="callout"><b>At full data the answer splits by what is being asked.</b>`
+    + (tied.length?`<br><br><b>Indistinguishable</b> (gap not significant at n=500): ${tied.join(', ')}.`:'')
+    + (lost.length?`<br><br><b>${D.aLabel} still ahead</b> (significant): ${lost.join(', ')}.`:'')
+    + `<br><br>Geometry converges once there is enough data; the judgements about what is `
+    + `<i>occluded</i> are where the smaller model keeps losing.</div>`;
 })();
 
 /* ---- a single small-multiple line chart, two series ---- */
@@ -258,7 +282,8 @@ D.regMetrics.forEach(m=> lineChart($('reg-charts'), D.reg.rows, m.key, m.name, m
       + `<td><span class="pill ${crosses?'ns':'sig'}">${crosses?'n.s.':'significant'}</span></td></tr>`);
   }));
   if(rRows.length) html += `<h3 class="ct" style="margin-top:22px">Path regression — paired bootstrap `
-    + `(95% CI on ${D.aLabel} − ${D.bLabel})</h3><table>`
+    + `(95% CI on ${D.aLabel} − ${D.bLabel}; per-frame <i>means</i>, so these differ from the `
+    + `medians plotted above)</h3><table>`
     + `<thead><tr><th>Metric</th><th>Train size</th><th>${D.aLabel}</th><th>${D.bLabel}</th>`
     + `<th>Diff</th><th>95% CI</th><th></th></tr></thead><tbody>` + rRows.join('') + `</tbody></table>`;
 
