@@ -9,22 +9,33 @@ splits, and writes a single self-contained page (inline CSS/JS, base64 images, n
 external requests) to outputs/eval_habitat_choice/choice_results.html — suitable for
 opening locally or publishing as an artifact.
 
-Sections: headline tiles, accuracy vs training-set size against both chance baselines,
+Sections: headline tiles, a worked example of the task (the verbatim prompt, a real
+frame, the expected answer), accuracy vs training-set size against both chance baselines,
 the chosen-index distribution (base vs LoRA vs ground truth), a metrics table, error
 breakdown by decision margin, and a qualitative gallery of real eval frames grouped by
 how ambiguous the decision was.
+
+The prompt is imported from rover_vlm.habitat_choice rather than copied, so the page
+cannot drift out of sync with what the model is actually asked.
 """
 
 import argparse
 import base64
 import io
 import json
+import math
 import tempfile
 from pathlib import Path
 
 from PIL import Image
 
-from rover_vlm.habitat_choice import CANDIDATE_COLORS, DATASET_ROOT, render_choice_image
+from rover_vlm.habitat_choice import (
+    CANDIDATE_COLORS,
+    CHOICE_PROMPT,
+    DATASET_ROOT,
+    candidate_polylines,
+    render_choice_image,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVAL_DIR = REPO_ROOT / "outputs" / "eval_habitat_choice"
@@ -169,6 +180,51 @@ def build_gallery(full_run, eval_records, per_bucket, max_px, dataset_root, dash
     return out
 
 
+def _legibility(sample_dir):
+    """How clearly a frame illustrates the task: the shortest candidate's visible extent.
+
+    Maximising the *minimum* arc length inside the frame favours frames where every
+    candidate is well drawn, rather than close-ups where the paths run off-image after a
+    few pixels. Returns 0 if anything is unreadable.
+    """
+    try:
+        fpv = json.loads((sample_dir / "fpv_paths.json").read_text())
+    except OSError:
+        return 0.0
+    lengths = []
+    for pts in candidate_polylines(fpv):
+        if len(pts) < 2:
+            return 0.0
+        lengths.append(sum(math.dist(pts[i][:2], pts[i + 1][:2]) for i in range(len(pts) - 1)))
+    return min(lengths) if lengths else 0.0
+
+
+def task_example(full_run, eval_records, max_px, sample_dirs):
+    """One worked example of the task: the exact image in, the exact answer out.
+
+    Deliberately uses the prepared composite verbatim (solid strokes, no highlight) —
+    this panel documents what the model actually receives, so it must not borrow the
+    gallery's dashed reading aid. Chooses an unambiguous 3-candidate frame the model got
+    right and whose paths are clearly visible: the panel explains the task, so the reader
+    should be able to see what is being asked.
+    """
+    by_id = {r["id"]: r for r in eval_records}
+    cands = [r for r in full_run["preds"]
+             if r["id"] in by_id and r["gt"]["n_candidates"] == 3
+             and len(r["gt"]["accepted"]) == 1 and r["metrics"]["accepted_correct"]
+             and (r["gt"].get("margin") or 0) > 0.4]
+    cands.sort(key=lambda r: -_legibility(sample_dirs[r["id"]]) if r["id"] in sample_dirs else 0)
+    pick = cands[0] if cands else full_run["preds"][0]
+    img = Path(by_id[pick["id"]]["image"][0])
+    return {
+        "prompt": CHOICE_PROMPT,
+        "img": embed_image(img, max_px) if img.exists() else None,
+        "answer": json.dumps({"choice": pick["gt"]["label"]}, separators=(",", ":")),
+        "id": pick["id"],
+        "nCand": pick["gt"]["n_candidates"],
+    }
+
+
 def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, tmp_dir):
     full = next(r for r in runs if r["tag"].endswith("train_full"))
     base = next(r for r in runs if r["tag"].endswith("base"))
@@ -203,6 +259,8 @@ def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, t
         "gallery": build_gallery(full, eval_records, per_bucket, max_px,
                                  dataset_root, dashed, tmp_dir),
         "dashed": dashed,
+        "task": task_example(full, eval_records, max_px,
+                             {d.name: d for d in dataset_root.glob("*/samples/*/")}),
         "colors": ["#%02x%02x%02x" % c for c in CANDIDATE_COLORS],
         "nEval": m["num_samples"],
         "nWrong": sum(1 for r in full["preds"] if not r["metrics"]["accepted_correct"]),

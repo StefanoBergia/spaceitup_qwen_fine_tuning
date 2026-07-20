@@ -49,6 +49,20 @@ tr.best td{font-weight:640}
   padding:14px 18px;margin:18px 0;font-size:14.5px;color:var(--ink2)}
 .callout b{color:var(--ink)}
 .callout.warn{border-left-color:#fab219}
+.task{display:grid;grid-template-columns:minmax(200px,300px) 1fr;gap:22px;align-items:start}
+@media (max-width:640px){.task{grid-template-columns:1fr}}
+.task img{width:100%;border-radius:8px;display:block}
+.task .cap{font-size:12px;color:var(--muted);margin-top:6px}
+.io{display:flex;flex-direction:column;gap:14px}
+.io .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+  margin-bottom:5px;font-weight:600}
+.io .body{font-size:13.5px;line-height:1.65;color:var(--ink2)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;
+  background:var(--plane);border:1px solid var(--ring);border-radius:7px;padding:9px 11px;
+  color:var(--ink);overflow-x:auto;white-space:pre}
+.slot{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12px;background:var(--plane);border:1px dashed var(--axis);border-radius:5px;
+  padding:1px 7px;color:var(--muted)}
 .gal{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:14px}
 .gcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden}
 .gcard img{width:100%;display:block}
@@ -77,6 +91,10 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
   <p class="sub">Qwen3.5-2B + LoRA on Habitat rover frames — candidates drawn on the image, model answers with an index. <span id="nEval"></span> held-out frames.</p>
 
   <div class="tiles" id="tiles"></div>
+
+  <h2>The task</h2>
+  <p class="note">Every frame is presented the same way — one image, one fixed instruction, no per-sample text. The model replies with a single index.</p>
+  <div class="card task" id="task"></div>
 
   <h2>Accuracy vs. training-set size</h2>
   <p class="note">Two baselines matter. Uniform guessing scores <b id="c1"></b>. But every frame contains a straight-line <i>direct</i> candidate that is almost never correct — a model that learns only <i>“never pick the straight line”</i> reaches <b id="c2"></b> without understanding anything about the scene. <b>That upper dashed line is the real bar.</b></p>
@@ -173,6 +191,22 @@ $('tiles').innerHTML = [
   ['Shortcut bar', pct(D.chanceNoDirect), '“never pick the straight line” alone'],
   ['Errors', D.nWrong, 'of '+D.nEval+' frames, all left/right mix-ups'],
 ].map(([k,v,d])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+
+/* ---- the task: real prompt, real image, real answer ---- */
+(function(){
+  const T=D.task, esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  // the "<image>" placeholder is stripped before the chat template and the frame is
+  // attached as a real image, so show it as a slot rather than as literal prompt text
+  const body=esc(T.prompt.replace(/^<image>\n?/,''));
+  $('task').innerHTML=`
+    <div>${T.img?`<img src="${T.img}" alt="Example frame with three numbered candidate paths">`:''}
+      <div class="cap">${T.id} · ${T.nCand} candidates · shown exactly as the model receives it (solid strokes, no highlight)</div></div>
+    <div class="io">
+      <div><div class="lbl">Prompt</div>
+        <div class="body"><span class="slot">the frame above</span><br>${body}</div></div>
+      <div><div class="lbl">Expected answer</div><div class="mono">${esc(T.answer)}</div></div>
+    </div>`;
+})();
 
 /* ---- chart 1: scaling ---- */
 (function(){
