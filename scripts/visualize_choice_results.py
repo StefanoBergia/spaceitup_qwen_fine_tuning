@@ -19,11 +19,12 @@ import argparse
 import base64
 import io
 import json
+import tempfile
 from pathlib import Path
 
 from PIL import Image
 
-from rover_vlm.habitat_choice import CANDIDATE_COLORS
+from rover_vlm.habitat_choice import CANDIDATE_COLORS, DATASET_ROOT, render_choice_image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVAL_DIR = REPO_ROOT / "outputs" / "eval_habitat_choice"
@@ -104,13 +105,18 @@ def embed_image(path: Path, max_px: int) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def build_gallery(full_run, eval_records, per_bucket, max_px):
+def build_gallery(full_run, eval_records, per_bucket, max_px, dataset_root, dashed, tmp_dir):
     """Sample eval frames across margin terciles: ambiguous -> clear.
 
     Each bucket deliberately includes the model's mistakes when it has any, so the
     gallery shows failure as well as success rather than only flattering cases.
+
+    With `dashed`, frames are re-rendered from the source dataset with occluded stretches
+    broken into dashes — a reading aid for the report. The training composites draw those
+    stretches solid, so the model itself gets no occlusion cue; `--solid` reproduces them.
     """
     by_id = {r["id"]: r for r in eval_records}
+    sample_dirs = {d.name: d for d in dataset_root.glob("*/samples/*/")} if dashed else {}
     rows = [r for r in full_run["preds"] if r["gt"].get("margin") is not None and r["id"] in by_id]
     rows.sort(key=lambda r: r["gt"]["margin"])
     n, third = len(rows), len(rows) // 3
@@ -131,6 +137,9 @@ def build_gallery(full_run, eval_records, per_bucket, max_px):
         chosen += right[::step][: per_bucket - want_wrong]
         for r in chosen:
             img_path = Path(by_id[r["id"]]["image"][0])
+            if dashed and r["id"] in sample_dirs:
+                img_path = tmp_dir / f"{r['id']}.jpg"
+                render_choice_image(sample_dirs[r["id"]], img_path, dashed=True)
             if not img_path.exists():
                 continue
             out.append({
@@ -149,7 +158,7 @@ def build_gallery(full_run, eval_records, per_bucket, max_px):
     return out
 
 
-def build_data(meta, runs, per_bucket, max_px, data_dir):
+def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, tmp_dir):
     full = next(r for r in runs if r["tag"].endswith("train_full"))
     base = next(r for r in runs if r["tag"].endswith("base"))
     m = full["metrics"]
@@ -180,7 +189,9 @@ def build_data(meta, runs, per_bucket, max_px, data_dir):
         ],
         "margins": margin_breakdown(full["preds"]),
         "byCand": by_candidate_count(full["preds"]),
-        "gallery": build_gallery(full, eval_records, per_bucket, max_px),
+        "gallery": build_gallery(full, eval_records, per_bucket, max_px,
+                                 dataset_root, dashed, tmp_dir),
+        "dashed": dashed,
         "colors": ["#%02x%02x%02x" % c for c in CANDIDATE_COLORS],
         "nEval": m["num_samples"],
         "nWrong": sum(1 for r in full["preds"] if not r["metrics"]["accepted_correct"]),
@@ -202,10 +213,16 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--per-bucket", type=int, default=4, help="gallery samples per margin bucket")
     p.add_argument("--max-image-px", type=int, default=420)
+    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--solid", action="store_true",
+                   help="show the training composites verbatim instead of re-rendering "
+                        "the gallery with occluded stretches dashed")
     args = p.parse_args()
 
     meta, runs = load(args.eval_dir, args.data_dir)
-    data = build_data(meta, runs, args.per_bucket, args.max_image_px, args.data_dir)
+    with tempfile.TemporaryDirectory() as tmp:
+        data = build_data(meta, runs, args.per_bucket, args.max_image_px, args.data_dir,
+                          args.dataset_root, not args.solid, Path(tmp))
 
     out = args.out or (args.eval_dir / "choice_results.html")
     out.parent.mkdir(parents=True, exist_ok=True)

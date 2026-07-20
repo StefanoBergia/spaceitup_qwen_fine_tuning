@@ -119,7 +119,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
   <p class="note" id="cand"></p>
 
   <h2>Real frames, hardest first</h2>
-  <p class="note">Exactly what the model saw, grouped by decision margin. Mistakes are included on purpose — roughly half of each group. Badge colours below match the numbered badges in the image.</p>
+  <p class="note">Held-out frames grouped by decision margin. Mistakes are included on purpose — roughly half of each group. Badge colours below match the numbered badges in the image.</p>
+  <p class="note" id="dashnote"></p>
   <div id="gallery"></div>
 
   <footer>
@@ -295,6 +296,12 @@ $('cand').innerHTML = 'Candidate count matters too: ' + D.byCand.map(c=>
 })();
 
 /* ---- gallery ---- */
+$('dashnote').innerHTML = D.dashed
+  ? '<b>Reading aid:</b> a path is drawn <b>dashed</b> where it passes behind an obstacle '
+    + 'and solid where it runs over visible ground. The composites the model was trained '
+    + 'and evaluated on draw every path solid — it gets no occlusion cue and has to infer '
+    + 'what is behind what from the image alone.'
+  : 'Frames are shown exactly as the model received them.';
 (function(){
   const order=['ambiguous','moderate','clear'];
   const tone={ambiguous:'var(--crit)',moderate:'#fab219',clear:'var(--good)'};

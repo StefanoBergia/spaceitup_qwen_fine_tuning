@@ -16,6 +16,7 @@ fpv_enhanced.png is 1024x1024 — normalize by image_size, never by pixel size.
 """
 
 import json
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -139,6 +140,59 @@ def drawable_candidates(fpv_paths):
     return [i for i, pts in enumerate(candidate_polylines(fpv_paths)) if len(pts) >= 2]
 
 
+DASH_ON, DASH_OFF = 13, 9
+
+
+def flag_runs(pts):
+    """Split a [(x, y, hidden), ...] polyline into maximal same-visibility stretches.
+
+    Returns [(hidden, [(x, y), ...]), ...]. A segment takes the flag of its *first*
+    point, matching the convention in habitat_data.clip_polyline_unit.
+    """
+    runs = []
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        if runs and runs[-1][0] == a[2]:
+            runs[-1][1].append((b[0], b[1]))
+        else:
+            runs.append((a[2], [(a[0], a[1]), (b[0], b[1])]))
+    return runs
+
+
+def dashify(pts, on=DASH_ON, off=DASH_OFF):
+    """Approximate a dashed line: split a polyline into the 'on' sub-polylines.
+
+    Dash phase carries across vertices so corners don't reset the pattern.
+    """
+    if len(pts) < 2:
+        return []
+    out, cur, drawing, remaining = [], [pts[0]], True, on
+    px, py = pts[0]
+    for qx, qy in pts[1:]:
+        seg = math.hypot(qx - px, qy - py)
+        travelled = 0.0
+        while seg - travelled > remaining:
+            travelled += remaining
+            t = travelled / seg
+            mx, my = px + (qx - px) * t, py + (qy - py) * t
+            if drawing:
+                cur.append((mx, my))
+                if len(cur) >= 2:
+                    out.append(cur)
+                cur = []
+            else:
+                cur = [(mx, my)]
+            drawing = not drawing
+            remaining = on if drawing else off
+        remaining -= seg - travelled
+        if drawing:
+            cur.append((qx, qy))
+        px, py = qx, qy
+    if drawing and len(cur) >= 2:
+        out.append(cur)
+    return out
+
+
 def _font(size):
     """A legible bitmap/truetype font, whatever this box has."""
     for name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf"):
@@ -163,11 +217,14 @@ def _draw_badge(draw, xy, text, color, font, r):
     )
 
 
-def render_choice_image(sample_dir, out_path, size=RENDER_SIZE, highlight=None):
+def render_choice_image(sample_dir, out_path, size=RENDER_SIZE, highlight=None, dashed=False):
     """Draw every candidate path + numbered badge on fpv_enhanced.png -> out_path (JPEG).
 
-    `highlight` (an index) thickens that candidate — used only by the inspection script,
-    never when generating training data. Returns the number of candidates drawn.
+    `highlight` (an index) thickens that candidate and `dashed` breaks occluded stretches
+    into dashes. Both are **inspection aids only** — training composites are rendered with
+    the defaults (solid, no highlight), because dashing encodes occlusion that the model
+    would otherwise have to infer, which would change the task. Keep the defaults if you
+    are generating data. Returns the number of candidates drawn.
     """
     sample_dir, out_path = Path(sample_dir), Path(out_path)
     fpv = json.loads((sample_dir / "fpv_paths.json").read_text())
@@ -184,11 +241,25 @@ def render_choice_image(sample_dir, out_path, size=RENDER_SIZE, highlight=None):
         if len(pts) < 2:
             continue
         color = CANDIDATE_COLORS[i % len(CANDIDATE_COLORS)]
-        xy = [(x * W, y * H) for x, y, _ in pts]
         base = 7 if highlight == i else 5
-        # white underlay first so the colored line stays legible on any floor texture
-        draw.line(xy, fill=(255, 255, 255), width=base + 4, joint="curve")
-        draw.line(xy, fill=color, width=base, joint="curve")
+        # solid where the path is on visible ground, dashed where it passes behind an
+        # obstacle — the underlay is dashed too, or a solid white line would show
+        # through the gaps and read as a continuous path
+        if dashed:
+            strokes = []
+            for hidden, run in flag_runs(pts):
+                xy = [(x * W, y * H) for x, y in run]
+                strokes += dashify(xy) if hidden else [xy]
+        else:
+            # one call for the whole polyline: splitting it changes how PIL renders the
+            # joints at interior vertices, and training composites must stay reproducible
+            strokes = [[(x * W, y * H) for x, y, _ in pts]]
+        # every underlay first: interleaving them would let one run's white halo
+        # paint over the previous run's colored line at the visibility boundary
+        for s in strokes:
+            draw.line(s, fill=(255, 255, 255), width=base + 4, joint="curve")
+        for s in strokes:
+            draw.line(s, fill=color, width=base, joint="curve")
 
     gw, gh = fpv["image_size"]
     gx, gy = fpv["goal"]["uv"][0] / gw * W, fpv["goal"]["uv"][1] / gh * H

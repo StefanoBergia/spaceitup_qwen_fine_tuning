@@ -8,7 +8,9 @@ from rover_vlm.habitat_choice import (
     badge_positions,
     build_choice_record,
     candidate_polylines,
+    dashify,
     drawable_candidates,
+    flag_runs,
     format_choice_answer,
 )
 
@@ -49,6 +51,44 @@ def test_drawable_candidates_reports_indices():
         _cand([[300.0, 100.0], [300.0, 400.0]]),
     ])
     assert drawable_candidates(fpv) == [0, 2]
+
+
+# --- visibility-aware stroking ------------------------------------------------------
+
+
+def test_flag_runs_splits_at_visibility_change():
+    runs = flag_runs([(0, 0, False), (1, 0, False), (2, 0, True), (3, 0, True)])
+    assert [f for f, _ in runs] == [False, True]
+    # the transition point belongs to both runs, so the strokes meet with no gap
+    assert runs[0][1][-1] == (2, 0) == runs[1][1][0]
+
+
+def test_flag_runs_all_visible_is_one_run():
+    runs = flag_runs([(0, 0, False), (1, 0, False), (2, 0, False)])
+    assert len(runs) == 1 and runs[0][0] is False
+    assert runs[0][1] == [(0, 0), (1, 0), (2, 0)]
+
+
+def test_dashify_alternates_on_and_off():
+    out = dashify([(0, 0), (60, 0)], on=10, off=10)
+    assert out[0] == [(0, 0), (10.0, 0.0)]
+    assert out[1] == [(20.0, 0.0), (30.0, 0.0)]
+    # gaps are real: consecutive dashes never touch
+    for a, b in zip(out, out[1:]):
+        assert a[-1][0] < b[0][0]
+
+
+def test_dashify_phase_carries_across_a_corner():
+    # a dash interrupted by a vertex must continue, not restart at the corner
+    out = dashify([(0, 0), (5, 0), (5, 20)], on=10, off=5)
+    first = out[0]
+    assert first[0] == (0, 0)
+    assert first[-1] == (5.0, 5.0), f"dash restarted at the corner: {first}"
+
+
+def test_dashify_degenerate_input():
+    assert dashify([]) == []
+    assert dashify([(0, 0)]) == []
 
 
 # --- badge placement ----------------------------------------------------------------

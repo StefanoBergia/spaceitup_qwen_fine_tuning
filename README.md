@@ -207,6 +207,14 @@ ground truth, the metrics table, an error breakdown by decision margin, and a ga
 real eval frames grouped by how ambiguous the decision was (mistakes included). The page
 template lives in `scripts/_choice_report.html`.
 
+> **Dashes are a reading aid, not training input.** `inspect_habitat_choice.py` and the
+> report gallery re-render frames with occluded stretches **dashed** so you can see what
+> passes behind an obstacle. The composites in `data/prepared_habitat_choice/images/` draw
+> every path **solid** — the model gets no occlusion cue and must infer depth from the
+> image. Pass `--solid` to either script to see exactly what the model receives.
+> `render_choice_image()` defaults to solid for this reason; keep the defaults when
+> generating data, or the training images change and the existing adapters no longer match.
+
 > **Read accuracy against the right baseline.** Every sample contains a straight-line
 > `direct` candidate that is correct in only 11 of 4,398 samples. A model that learns
 > nothing but "never pick the straight line" scores ~0.49 accepted accuracy, versus ~0.36

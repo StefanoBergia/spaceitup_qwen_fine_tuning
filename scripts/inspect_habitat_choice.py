@@ -3,10 +3,13 @@
 Login node (CPU-only):
     uv run scripts/inspect_habitat_choice.py --num 12
 
-Writes outputs/inspection_habitat_choice/*.jpg — the candidate paths exactly as the
-model will see them, but with the correct one thickened and the label/accepted set in
-the filename. Eyeball these before spending any GPU time: if the overlays are wrong,
-every number downstream is wrong.
+Writes outputs/inspection_habitat_choice/*.jpg — the candidate paths with the correct one
+thickened, occluded stretches dashed, and the label/accepted set in the filename. Eyeball
+these before spending any GPU time: if the overlays are wrong, every number downstream is
+wrong.
+
+Note the highlight and the dashes are reading aids: training composites draw every path
+solid and unhighlighted. Pass --solid to see exactly what the model is given.
 """
 
 import argparse
@@ -28,6 +31,8 @@ def main() -> None:
     p.add_argument("--render-size", type=int, default=768)
     p.add_argument("--multi-only", action="store_true",
                    help="only samples with more than one accepted candidate")
+    p.add_argument("--solid", action="store_true",
+                   help="draw occluded stretches solid, exactly as the training composites are")
     args = p.parse_args()
 
     dirs = sorted(args.dataset_root.glob("*/samples/*/"))
@@ -47,7 +52,8 @@ def main() -> None:
         acc = "-".join(str(a) for a in cm["accepted"])
         name = (f"{rec['id']}__label{cm['label']}_accepted{acc}"
                 f"_n{cm['n_candidates']}_{cm['kinds'][cm['label']]}.jpg")
-        render_choice_image(d, OUT_DIR / name, size=args.render_size, highlight=cm["label"])
+        render_choice_image(d, OUT_DIR / name, size=args.render_size,
+                            highlight=cm["label"], dashed=not args.solid)
         print(f"  {name}")
         drawn += 1
 
