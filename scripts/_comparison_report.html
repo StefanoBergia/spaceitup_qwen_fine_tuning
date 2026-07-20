@@ -77,11 +77,12 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
   </div>
 
   <h2>Tracing the path (regression)</h2>
-  <p class="note">Same frames, different task: predict the path to the goal as waypoints with per-point visibility. Two error metrics (lower is better) and two accuracies (higher is better).</p>
+  <p class="note">Same frames, different task: predict the path to the goal as waypoints with per-point visibility. Read <b>output format validity</b> first — the error metrics are averaged over parseable predictions only, so a model that emits valid JSON on a handful of frames gets an error score computed from those survivors alone. Hollow markers flag exactly that: fewer than half the outputs parsed, so the value is not comparable.</p>
   <div class="card">
     <div class="legend" id="leg2"></div>
     <div class="grid2" id="reg-charts"></div>
   </div>
+  <div id="parsewarn"></div>
 
   <h2>Is the gap real?</h2>
   <p class="note">Both models are scored on the <b>same held-out frames</b>, so the differences are paired and can be tested directly. Classification uses McNemar’s exact test on the frames where the two models disagree; regression uses a paired bootstrap 95% interval on the per-frame difference. A gap whose interval crosses zero — or whose p exceeds 0.05 — is not distinguishable from noise at this sample size.</p>
@@ -190,10 +191,16 @@ function lineChart(host, rows, key, title, better){
       svg.appendChild(el('polyline',{points:pts.map(p=>p[0]+','+p[1]).join(' '),
         fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'}));
     pts.forEach(([px,py,i])=>{
-      const c=el('circle',{cx:px,cy:py,r:4.5,fill:col,stroke:'var(--surface)','stroke-width':2});
       const v=rows[i][side][key];
+      // an error averaged over a handful of parseable outputs is a survivorship
+      // artefact, not a comparable score — draw it hollow so it can't be read as one
+      const low = key!=='parse_rate' && rows[i][side+'LowParse'];
+      const c=el('circle',{cx:px,cy:py,r:4.5,
+        fill:low?'var(--surface)':col, stroke:low?col:'var(--surface)','stroke-width':2});
+      const n = rows[i][side==='a'?'aParsed':'bParsed'];
       bindTip(c,`<b>${name}</b> · ${rows[i].label}<br>${title}: `
-        + (hi<=1.05?pct(v):v.toFixed(4)));
+        + (hi<=1.05?pct(v):v.toFixed(4))
+        + (low?`<br><b>only ${n} of 500 outputs parsed</b> — not comparable`:''));
       svg.appendChild(c);
     });
   });
@@ -209,6 +216,21 @@ function lineChart(host, rows, key, title, better){
 
 D.choiceMetrics.forEach(m=> lineChart($('choice-charts'), D.choice.rows, m.key, m.name, m.better));
 D.regMetrics.forEach(m=> lineChart($('reg-charts'), D.reg.rows, m.key, m.name, m.better));
+
+/* ---- name the low-parse points explicitly, not just as hollow dots ---- */
+(function(){
+  const bad=[];
+  D.reg.rows.forEach(r=>{
+    if(r.aLowParse) bad.push(`${D.aLabel} at ${r.label} (${r.aParsed}/500)`);
+    if(r.bLowParse) bad.push(`${D.bLabel} at ${r.label} (${r.bParsed}/500)`);
+  });
+  if(!bad.length) return;
+  $('parsewarn').innerHTML = `<div class="callout warn"><b>Survivorship warning.</b> `
+    + `${bad.join(' and ')} produced parseable output on too few frames for the error `
+    + `metrics to mean anything — those points are averages over the few outputs that `
+    + `happened to come out well-formed, and should not be compared against a model that `
+    + `parsed nearly everything.</div>`;
+})();
 
 /* ---- significance tables ---- */
 (function(){

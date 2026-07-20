@@ -38,11 +38,17 @@ CHOICE_METRICS = [
     ("strict_accuracy", "strict_correct", "Strict accuracy", "up"),
 ]
 REG_METRICS = [
+    ("parse_rate", None, "Output format validity", "up"),
     ("mean_point_error_median", "mean_point_error", "Waypoint error (median)", "down"),
     ("frechet_median", "frechet", "Trajectory shape error (Fréchet)", "down"),
     ("path_visibility_acc_mean", "path_visibility_acc", "Waypoint visibility accuracy", "up"),
     ("goal_visibility_accuracy", "goal_visibility_correct", "Goal visibility accuracy", "up"),
 ]
+
+# Regression errors are averaged over parseable predictions only. Below this parse rate
+# the survivors are too few (and too self-selected) for the error to mean anything, so
+# the page flags the point instead of drawing it as a peer of a fully-parsing model.
+MIN_TRUSTWORTHY_PARSE = 0.5
 
 
 def collect(task, a_dir, b_dir, full_size):
@@ -59,6 +65,12 @@ def collect(task, a_dir, b_dir, full_size):
             "size": full_size if size is None else size,
             "a": ma,
             "b": mb,
+            # error metrics average over parseable outputs only, so carry the parse rate
+            # alongside them: a low rate makes the errors a survivorship artefact
+            "aLowParse": bool(ma and task != "choice" and ma.get("parse_rate", 1) < MIN_TRUSTWORTHY_PARSE),
+            "bLowParse": bool(mb and task != "choice" and mb.get("parse_rate", 1) < MIN_TRUSTWORTHY_PARSE),
+            "aParsed": int(round(ma.get("parse_rate", 1) * ma.get("num_samples", 0))) if ma else None,
+            "bParsed": int(round(mb.get("parse_rate", 1) * mb.get("num_samples", 0))) if mb else None,
         })
         if ma is None or mb is None or key == "base":
             continue
@@ -73,6 +85,8 @@ def collect(task, a_dir, b_dir, full_size):
                                "aOnly": a_only, "bOnly": b_only, "p": p}
         else:
             for mkey, pkey, name, _ in REG_METRICS:
+                if pkey is None:          # parse_rate lives only in the summary
+                    continue
                 bs = paired_bootstrap(pa, pb, pkey)
                 if bs:
                     entry[mkey] = {"name": name, "a": ma.get(mkey), "b": mb.get(mkey),
