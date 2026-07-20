@@ -119,7 +119,14 @@ def main() -> None:
         bf16=use_cuda,
         gradient_checkpointing=args.gradient_checkpointing,
         remove_unused_columns=False,  # collator needs the raw sample dicts
-        dataloader_num_workers=0 if args.smoke else 4,
+        # Single-process data loading, deliberately. With workers > 0 the batches
+        # (large image tensors) travel to the main process through /dev/shm, and a
+        # failed shm allocation kills the feeder thread without killing the process:
+        # the batch never arrives, the training loop blocks forever, and the job sits
+        # RUNNING but frozen until it hits its time limit. That happened on thor when
+        # a second job started on the same node (job 87773, stuck at step 311/458).
+        # Training here is GPU-bound at ~3.5 s/step, so the prefetch buys little.
+        dataloader_num_workers=0,
         seed=args.seed,
         report_to="none",
     )
