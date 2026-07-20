@@ -219,3 +219,104 @@ def aggregate_habitat_metrics(records):
     if goal_v:
         summary["goal_visibility_accuracy"] = float(np.mean(goal_v))
     return summary
+
+
+# --- habitat path classification ("which candidate is traversable?") -----------------
+
+_CHOICE_INT_RE = re.compile(r"-?\d+")
+
+
+def parse_choice_answer(text):
+    """Parse a {"choice": N} answer to an int; None if no number is recoverable.
+
+    Prefers a JSON object carrying a "choice" key (so a number mentioned in reasoning
+    text can't hijack the answer) and only falls back to the first bare integer when no
+    such object exists."""
+    for match in _OBJ_RE.finditer(text):
+        try:
+            obj = _json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "choice" in obj:
+            try:
+                return int(round(float(obj["choice"])))
+            except (TypeError, ValueError):
+                continue
+    m = _CHOICE_INT_RE.search(text)
+    return int(m.group(0)) if m else None
+
+
+def choice_metrics(pred_idx, meta):
+    """Per-sample classification metrics against the label + the accepted set.
+
+    `strict_correct` scores against the single canonical `label`; `accepted_correct`
+    scores against every candidate the dataset marks feasible — the honest number when
+    ~46% of samples have more than one acceptable answer.
+    """
+    n = meta["n_candidates"]
+    kinds = meta.get("kinds") or []
+    valid = pred_idx is not None and 0 <= pred_idx < n
+    picked_direct = bool(valid and pred_idx < len(kinds) and kinds[pred_idx] == "direct")
+    return {
+        "valid": int(valid),
+        "strict_correct": int(valid and pred_idx == meta["label"]),
+        "accepted_correct": int(valid and pred_idx in meta["accepted"]),
+        "picked_direct": int(picked_direct),
+    }
+
+
+def _chance(meta, exclude_direct=False):
+    """Random-guess accuracy for one sample: (strict, accepted).
+
+    With exclude_direct, guessing is restricted to non-`direct` candidates — the
+    baseline a model gets for free by learning only "never pick the straight line".
+    """
+    kinds = meta.get("kinds") or []
+    pool = [i for i in range(meta["n_candidates"])
+            if not (exclude_direct and i < len(kinds) and kinds[i] == "direct")]
+    if not pool:
+        return None
+    hits = len([i for i in pool if i in meta["accepted"]])
+    return (1.0 / len(pool), hits / len(pool))
+
+
+def aggregate_choice_metrics(records):
+    """Aggregate per-sample choice eval records (as written by scripts/evaluate.py).
+
+    Accuracies are over ALL samples (an unparseable answer counts as wrong), so the
+    headline number is never inflated by dropping failures — parse_rate reports those
+    separately.
+    """
+    n = len(records)
+    summary = {"num_samples": n}
+    if not n:
+        return summary
+
+    parsed = [r for r in records if r.get("parsed") is not None]
+    scored = [r for r in records if r.get("metrics")]
+    summary["parse_rate"] = len(parsed) / n
+    summary["valid_choice_rate"] = sum(r["metrics"]["valid"] for r in scored) / n
+    summary["strict_accuracy"] = sum(r["metrics"]["strict_correct"] for r in scored) / n
+    summary["accepted_accuracy"] = sum(r["metrics"]["accepted_correct"] for r in scored) / n
+    summary["picked_direct_rate"] = sum(r["metrics"]["picked_direct"] for r in scored) / n
+
+    metas = [r["gt"] for r in records if r.get("gt")]
+    for suffix, excl in (("", False), ("_excluding_direct", True)):
+        vals = [c for c in (_chance(m, excl) for m in metas) if c]
+        if vals:
+            summary[f"chance_strict{suffix}"] = float(np.mean([v[0] for v in vals]))
+            summary[f"chance_accepted{suffix}"] = float(np.mean([v[1] for v in vals]))
+
+    by_n, by_sym = {}, {}
+    for r in scored:
+        by_n.setdefault(r["gt"]["n_candidates"], []).append(r["metrics"]["accepted_correct"])
+        by_sym.setdefault(bool(r["gt"].get("near_symmetric")), []).append(
+            r["metrics"]["accepted_correct"]
+        )
+    summary["accepted_accuracy_by_n_candidates"] = {
+        str(k): float(np.mean(v)) for k, v in sorted(by_n.items())
+    }
+    summary["accepted_accuracy_by_near_symmetric"] = {
+        str(k): float(np.mean(v)) for k, v in sorted(by_sym.items())
+    }
+    return summary

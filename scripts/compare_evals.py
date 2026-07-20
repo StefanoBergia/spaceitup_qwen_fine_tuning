@@ -27,9 +27,9 @@ DEFAULT_EVAL_DIR = REPO_ROOT / "outputs" / "eval"
 SURFACE = "#fcfcfb"
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, BASELINE_AXIS = "#e1e0d9", "#c3c2b7"
-SERIES = ["#2a78d6", "#008300"]  # categorical slots 1-2
+SERIES = ["#2a78d6", "#008300", "#b8860b"]  # categorical slots 1-3
 
-TABLE_COLUMNS = [
+TRAJECTORY_COLUMNS = [
     ("parse_rate", "Parse rate"),
     ("in_range_rate", "In-range rate"),
     ("rescaled_rate", "Rescaled (0-1000)"),
@@ -42,10 +42,46 @@ TABLE_COLUMNS = [
     ("goal_visibility_accuracy", "Goal vis. acc"),
 ]
 
+CHOICE_COLUMNS = [
+    ("parse_rate", "Parse rate"),
+    ("valid_choice_rate", "Valid index"),
+    ("strict_accuracy", "Strict acc"),
+    ("accepted_accuracy", "Accepted acc"),
+    ("chance_strict", "Chance (strict)"),
+    ("chance_accepted", "Chance (accepted)"),
+    ("chance_accepted_excluding_direct", "Chance (no direct)"),
+    ("picked_direct_rate", "Picked direct"),
+]
+
+TASK_COLUMNS = {"trajectory": TRAJECTORY_COLUMNS, "choice": CHOICE_COLUMNS}
+
+TASK_PANELS = {
+    "trajectory": [
+        ("Format validity", [("parse_rate", "parse rate"), ("in_range_rate", "in-range rate")], "rate"),
+        ("Waypoint error", [("mean_point_error_mean", "mean point error")], "normalized dist."),
+        ("Trajectory shape error", [("frechet_mean", "Fréchet distance")], "normalized dist."),
+    ],
+    "choice": [
+        ("Format validity", [("parse_rate", "parse rate"), ("valid_choice_rate", "valid index")], "rate"),
+        # the "no direct" line is the bar that matters: a model that learns only to
+        # avoid the straight-line candidate already scores that well
+        ("Accuracy vs. chance",
+         [("accepted_accuracy", "accepted acc"), ("chance_accepted", "chance"),
+          ("chance_accepted_excluding_direct", "chance, no direct")], "accuracy"),
+        ("Strict accuracy (canonical label)", [("strict_accuracy", "strict acc")], "accuracy"),
+    ],
+}
+
+TASK_TITLES = {
+    "trajectory": "Qwen3.5-2B LoRA on ShareRobot trajectory — performance vs. training set size",
+    "choice": "Qwen3.5-2B LoRA on Habitat path choice — accuracy vs. training set size",
+}
+
 
 def train_size(tag: str, meta_path: Path) -> int | None:
-    """lora_train_500 / habitat_train_500 -> 500; *_train_full -> actual full-split size; else None."""
-    for prefix in ("lora_train_", "habitat_train_"):
+    """lora_train_500 / habitat_train_500 / habitat_choice_train_500 -> 500;
+    *_train_full -> actual full-split size; else None."""
+    for prefix in ("lora_train_", "habitat_choice_train_", "habitat_train_"):
         if tag.startswith(prefix):
             suffix = tag.removeprefix(prefix)
             if suffix == "full":
@@ -70,29 +106,26 @@ def load_runs(eval_dir: Path, meta_path: Path) -> tuple[dict | None, list[tuple[
     return base, scaling
 
 
-def write_table(base: dict | None, scaling: list[tuple[int, dict]]) -> str:
-    header = "| Model | Train size | " + " | ".join(label for _, label in TABLE_COLUMNS) + " |"
-    sep = "|" + "---|" * (len(TABLE_COLUMNS) + 2)
+def write_table(base: dict | None, scaling: list[tuple[int, dict]], task: str = "trajectory") -> str:
+    columns = TASK_COLUMNS[task]
+    header = "| Model | Train size | " + " | ".join(label for _, label in columns) + " |"
+    sep = "|" + "---|" * (len(columns) + 2)
     rows = []
     entries = ([("base (zero-shot)", "—", base)] if base else []) + [
         (m["tag"], f"{size:,}", m) for size, m in scaling
     ]
     for name, size, m in entries:
-        cells = [f"{m[k]:.3f}" if k in m else "—" for k, _ in TABLE_COLUMNS]
+        cells = [f"{m[k]:.3f}" if k in m else "—" for k, _ in columns]
         rows.append(f"| {name} | {size} | " + " | ".join(cells) + " |")
     return "\n".join([header, sep, *rows]) + "\n"
 
 
-def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path) -> None:
+def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path,
+         task: str = "trajectory") -> None:
     sizes = [s for s, _ in scaling]
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.8), facecolor=SURFACE)
 
-    panels = [
-        ("Format validity", [("parse_rate", "parse rate"), ("in_range_rate", "in-range rate")], "rate"),
-        ("Waypoint error", [("mean_point_error_mean", "mean point error")], "normalized dist."),
-        ("Trajectory shape error", [("frechet_mean", "Fréchet distance")], "normalized dist."),
-    ]
-    for ax, (title, metrics, ylabel) in zip(axes, panels):
+    for ax, (title, metrics, ylabel) in zip(axes, TASK_PANELS[task]):
         ax.set_facecolor(SURFACE)
         for i, (key, label) in enumerate(metrics):
             values = [m.get(key) for _, m in scaling]
@@ -129,10 +162,7 @@ def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path) -> 
         if len(metrics) > 1:
             ax.legend(fontsize=8, frameon=False, labelcolor=INK2)
 
-    fig.suptitle(
-        "Qwen3.5-2B LoRA on ShareRobot trajectory — performance vs. training set size",
-        fontsize=12, color=INK, y=1.02,
-    )
+    fig.suptitle(TASK_TITLES[task], fontsize=12, color=INK, y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
@@ -142,18 +172,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval-dir", type=Path, default=DEFAULT_EVAL_DIR)
     parser.add_argument("--meta", type=Path, default=REPO_ROOT / "data/prepared/meta.json")
+    parser.add_argument("--task", choices=sorted(TASK_COLUMNS), default="trajectory",
+                        help="which metric set to report ('choice' for the classification runs)")
     args = parser.parse_args()
 
     base, scaling = load_runs(args.eval_dir, args.meta)
     if not scaling and not base:
         raise SystemExit(f"no metrics found under {args.eval_dir}/<tag>/metrics.json — run evals first")
 
-    table = write_table(base, scaling)
+    table = write_table(base, scaling, args.task)
     (args.eval_dir / "comparison.md").write_text(table)
     print(table)
 
     if scaling:
-        plot(base, scaling, args.eval_dir / "scaling_curve.png")
+        plot(base, scaling, args.eval_dir / "scaling_curve.png", args.task)
         print(f"plot  -> {args.eval_dir / 'scaling_curve.png'}")
     else:
         print("no scaling runs yet — table only")

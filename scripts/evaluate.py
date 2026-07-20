@@ -25,10 +25,13 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from rover_vlm.eval import (
+    aggregate_choice_metrics,
     aggregate_metrics,
     aggregate_habitat_metrics,
+    choice_metrics,
     habitat_metrics,
     normalize_prediction,
+    parse_choice_answer,
     parse_path_answer,
     parse_waypoints,
     trajectory_metrics,
@@ -43,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--adapter", type=Path, default=None, help="LoRA adapter dir; omit for base model")
     p.add_argument("--tag", required=True, help="name for outputs/eval/<tag>/")
-    p.add_argument("--task", choices=["sharerobot", "habitat"], default="sharerobot")
+    p.add_argument("--task", choices=["sharerobot", "habitat", "choice"], default="sharerobot")
     p.add_argument("--out-dir", type=Path, default=REPO_ROOT / "outputs" / "eval")
     p.add_argument("--eval-file", type=Path, default=REPO_ROOT / "data/prepared/eval.json")
     p.add_argument("--batch-size", type=int, default=8)
@@ -101,7 +104,11 @@ def main() -> None:
                     build_messages(prompt, image), tokenize=False, add_generation_prompt=True
                 )
             )
-            gts.append(json.loads(rec["conversations"][1]["value"]))
+            # choice scoring needs the accepted set, which the answer string can't carry
+            if args.task == "choice":
+                gts.append(rec["choice_meta"])
+            else:
+                gts.append(json.loads(rec["conversations"][1]["value"]))
 
         batch = processor(text=texts, images=images, padding=True, return_tensors="pt").to(device)
         with torch.no_grad():
@@ -110,7 +117,13 @@ def main() -> None:
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)
 
         for rec, gt, text in zip(chunk, gts, decoded):
-            if args.task == "habitat":
+            if args.task == "choice":
+                parsed = parse_choice_answer(text)
+                # unlike the other tasks, score even an unparseable answer: a missing
+                # choice is a wrong choice, and accuracy must not be inflated by drops
+                metrics = choice_metrics(parsed, gt)
+                rescaled = False
+            elif args.task == "habitat":
                 parsed = parse_path_answer(text)
                 metrics = habitat_metrics(parsed, gt) if parsed else None
                 rescaled = False
@@ -136,7 +149,12 @@ def main() -> None:
         done = start + len(chunk)
         print(f"  {done}/{len(records_in)} ({(time.time() - t0) / done:.2f}s/sample)", flush=True)
 
-    summary = aggregate_habitat_metrics(results) if args.task == "habitat" else aggregate_metrics(results)
+    aggregators = {
+        "choice": aggregate_choice_metrics,
+        "habitat": aggregate_habitat_metrics,
+        "sharerobot": aggregate_metrics,
+    }
+    summary = aggregators[args.task](results)
     summary["tag"] = args.tag
     summary["adapter"] = str(args.adapter) if args.adapter else None
 

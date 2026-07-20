@@ -158,6 +158,47 @@ uv run scripts/compare_evals.py --eval-dir outputs/eval_habitat --meta data/prep
 Results go to `outputs/eval_habitat/<tag>/{predictions,metrics}.json`, separate from the
 ShareRobot `outputs/eval/` tree so the two phases' comparisons don't collide.
 
+## Habitat classification phase
+
+A second task on the *same* Habitat frames: each sample offers several candidate paths
+(3 or 5), of which one is canonical and — in 46% of samples — more than one is
+acceptable. The candidates are drawn on the frame with numbered badges and the model
+answers `{"choice": N}`. This tests discrimination (does the model understand
+traversability?) rather than generation.
+
+```bash
+uv run scripts/prepare_habitat_choice.py          # renders composites -> data/prepared_habitat_choice/
+uv run scripts/inspect_habitat_choice.py --num 12 # overlays -> outputs/inspection_habitat_choice/
+```
+
+`prepare_habitat_choice.py` **requires `prepare_habitat.py` to have run first**: split
+membership is copied from `data/prepared_habitat/` so both tasks use exactly the same
+frames and can be compared sample by sample. Rendered composites go to
+`data/prepared_habitat_choice/images/` (gitignored — the source dataset is never
+written to); re-running skips images that already exist.
+
+Run the whole experiment as one resumable job, then compare:
+
+```bash
+sbatch slurm/run_all_habitat_choice.sbatch
+uv run scripts/compare_evals.py --task choice \
+    --eval-dir outputs/eval_habitat_choice --meta data/prepared_habitat_choice/meta.json
+```
+
+Adapters land in `outputs/runs/habitat_choice_<name>/adapter`; results in
+`outputs/eval_habitat_choice/<tag>/`.
+
+Metrics: parse rate, valid-index rate, **strict accuracy** (vs. the canonical `label`)
+and **accepted accuracy** (vs. the full `accepted` set — the headline number, since many
+samples have several valid answers). Accuracies count an unparseable answer as wrong, so
+they can't be inflated by dropping failures.
+
+> **Read accuracy against the right baseline.** Every sample contains a straight-line
+> `direct` candidate that is correct in only 11 of 4,398 samples. A model that learns
+> nothing but "never pick the straight line" scores ~0.49 accepted accuracy, versus ~0.36
+> for uniform guessing. `meta.json` and the comparison table both report
+> `chance_accepted_excluding_direct` — that ~0.49 line, not raw chance, is the bar to beat.
+
 > **Note:** the interactive `scripts/visualize_predictions.py` explorer is ShareRobot-only
 > — it expects 2-element `[x,y]` predictions and does not yet understand the habitat
 > `{"path","goal"}` format. For qualitative habitat inspection use
