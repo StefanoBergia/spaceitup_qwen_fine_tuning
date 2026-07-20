@@ -39,11 +39,12 @@ from rover_vlm.eval import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 IMAGE_ROOT = REPO_ROOT / "data" / "sharerobot" / "trajectory"
-MODEL_ID = "Qwen/Qwen3.5-2B"
+DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="HF base model repo id")
     p.add_argument("--adapter", type=Path, default=None, help="LoRA adapter dir; omit for base model")
     p.add_argument("--tag", required=True, help="name for outputs/eval/<tag>/")
     p.add_argument("--task", choices=["sharerobot", "habitat", "choice"], default="sharerobot")
@@ -74,11 +75,11 @@ def main() -> None:
     use_cuda = torch.cuda.is_available()
     dtype = torch.bfloat16 if use_cuda else torch.float32
     device = "cuda" if use_cuda else "cpu"
-    print(f"tag={args.tag} adapter={args.adapter} device={device}")
+    print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device}")
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    processor = AutoProcessor.from_pretrained(args.model_id)
     processor.tokenizer.padding_side = "left"  # decoder-only batched generation
-    model = AutoModelForImageTextToText.from_pretrained(MODEL_ID, dtype=dtype).to(device)
+    model = AutoModelForImageTextToText.from_pretrained(args.model_id, dtype=dtype).to(device)
     if args.adapter is not None:
         from peft import PeftModel
 
@@ -156,6 +157,7 @@ def main() -> None:
     }
     summary = aggregators[args.task](results)
     summary["tag"] = args.tag
+    summary["model_id"] = args.model_id
     summary["adapter"] = str(args.adapter) if args.adapter else None
 
     out_dir = args.out_dir / args.tag

@@ -26,6 +26,18 @@ LORA_TARGETS_TEXT = [
 LORA_TARGETS_VISION = ["qkv", "proj", "linear_fc1", "linear_fc2"]
 
 
+def unmatched_lora_targets(model, targets: list[str]) -> list[str]:
+    """Target names that match no module in `model`, using PEFT's suffix semantics.
+
+    PEFT silently ignores a target that matches nothing, producing an adapter that
+    trains less than intended (or not at all) — a failure that otherwise only shows
+    up as a flat loss curve hours into a GPU job. Callers should treat a non-empty
+    result as fatal. Verified to be empty for both Qwen3.5-2B and Qwen3.5-0.8B.
+    """
+    names = [name for name, _ in model.named_modules()]
+    return [t for t in targets if not any(n == t or n.endswith(f".{t}") for n in names)]
+
+
 class TrajectoryDataset(Dataset):
     """Prepared conversation-format samples: image + prompt -> waypoint list string."""
 

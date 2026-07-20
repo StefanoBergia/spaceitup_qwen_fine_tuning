@@ -9,6 +9,17 @@ lora_train_full) become points on the scaling curve; the 'base' tag becomes the
 zero-shot reference line. Writes:
     outputs/eval/comparison.md    — full metrics table (markdown)
     outputs/eval/scaling_curve.png
+
+Two base models can be overlaid by pointing --compare-dir at a second eval tree
+(whose tags must match, which is why per-model results live in separate trees
+rather than being distinguished by tag):
+
+    uv run scripts/compare_evals.py \\
+        --eval-dir outputs/eval_habitat_0.8b --label 0.8B \\
+        --compare-dir outputs/eval_habitat --compare-label 2B \\
+        --meta data/prepared_habitat/meta.json
+
+Output always lands in --eval-dir; --compare-dir is read-only.
 """
 
 import argparse
@@ -72,10 +83,16 @@ TASK_PANELS = {
     ],
 }
 
+# {models} is filled with the label(s) of the tree(s) being plotted. The subject is
+# deliberately generic for "trajectory": that metric set serves both the ShareRobot
+# runs and the Habitat path+visibility runs, so callers pass --title to say which.
 TASK_TITLES = {
-    "trajectory": "Qwen3.5-2B LoRA on ShareRobot trajectory — performance vs. training set size",
-    "choice": "Qwen3.5-2B LoRA on Habitat path choice — accuracy vs. training set size",
+    "trajectory": "{models} LoRA — waypoint performance vs. training set size",
+    "choice": "{models} LoRA on Habitat path choice — accuracy vs. training set size",
 }
+
+# line style per model when overlaying: primary solid, comparison dashed
+MODEL_STYLES = ["-", "--"]
 
 
 def train_size(tag: str, meta_path: Path) -> int | None:
@@ -88,6 +105,18 @@ def train_size(tag: str, meta_path: Path) -> int | None:
                 return json.loads(meta_path.read_text())["splits"]["train_full"]
             return int(suffix) if suffix.isdigit() else None
     return None
+
+
+def model_label(base: dict | None, scaling: list[tuple[int, dict]], eval_dir: Path) -> str:
+    """Best available name for a tree's base model, for table rows and plot legends.
+
+    Prefers the model_id recorded by evaluate.py; eval trees produced before that
+    was recorded fall back to the directory name rather than guessing a model.
+    """
+    for m in ([base] if base else []) + [m for _, m in scaling]:
+        if m.get("model_id"):
+            return m["model_id"].removeprefix("Qwen/Qwen3.5-")
+    return eval_dir.name
 
 
 def load_runs(eval_dir: Path, meta_path: Path) -> tuple[dict | None, list[tuple[int, dict]]]:
@@ -106,41 +135,73 @@ def load_runs(eval_dir: Path, meta_path: Path) -> tuple[dict | None, list[tuple[
     return base, scaling
 
 
-def write_table(base: dict | None, scaling: list[tuple[int, dict]], task: str = "trajectory") -> str:
+def write_table(groups: list[tuple[str, dict | None, list[tuple[int, dict]]]],
+                task: str = "trajectory") -> str:
+    """Markdown table for one or more eval trees.
+
+    A single group renders exactly as it always has; a base-model column is added
+    only when overlaying, so existing single-model comparison.md files keep their
+    established shape.
+    """
     columns = TASK_COLUMNS[task]
-    header = "| Model | Train size | " + " | ".join(label for _, label in columns) + " |"
-    sep = "|" + "---|" * (len(columns) + 2)
+    overlay = len(groups) > 1
+    lead = ["Base model"] if overlay else []
+    header = "| " + " | ".join([*lead, "Model", "Train size", *(label for _, label in columns)]) + " |"
+    sep = "|" + "---|" * (len(columns) + 2 + len(lead))
+
     rows = []
-    entries = ([("base (zero-shot)", "—", base)] if base else []) + [
-        (m["tag"], f"{size:,}", m) for size, m in scaling
-    ]
-    for name, size, m in entries:
-        cells = [f"{m[k]:.3f}" if k in m else "—" for k, _ in columns]
-        rows.append(f"| {name} | {size} | " + " | ".join(cells) + " |")
+    for model_label, base, scaling in groups:
+        entries = ([("base (zero-shot)", "—", base)] if base else []) + [
+            (m["tag"], f"{size:,}", m) for size, m in scaling
+        ]
+        for name, size, m in entries:
+            cells = [f"{m[k]:.3f}" if k in m else "—" for k, _ in columns]
+            prefix = [model_label] if overlay else []
+            rows.append("| " + " | ".join([*prefix, name, size, *cells]) + " |")
     return "\n".join([header, sep, *rows]) + "\n"
 
 
-def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path,
-         task: str = "trajectory") -> None:
-    sizes = [s for s, _ in scaling]
+def plot(groups: list[tuple[str, dict | None, list[tuple[int, dict]]]], out_path: Path,
+         task: str = "trajectory", title: str | None = None) -> None:
+    """Scaling curves for one or more eval trees.
+
+    When overlaying, colour encodes the metric and line style encodes the base
+    model (solid = primary, dashed = comparison), so a panel reads as "same colour,
+    different weight" rather than doubling the palette.
+    """
+    overlay = len(groups) > 1
+    sizes = sorted({s for _, _, scaling in groups for s, _ in scaling})
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.8), facecolor=SURFACE)
 
-    for ax, (title, metrics, ylabel) in zip(axes, TASK_PANELS[task]):
+    for ax, (panel_title, metrics, ylabel) in zip(axes, TASK_PANELS[task]):
         ax.set_facecolor(SURFACE)
-        for i, (key, label) in enumerate(metrics):
-            values = [m.get(key) for _, m in scaling]
-            ax.plot(
-                sizes, values, "-o", color=SERIES[i], linewidth=2, markersize=8,
-                markeredgecolor=SURFACE, markeredgewidth=2, label=label,
-            )
-            if base and key in base:
-                name = f"base {label}" if len(metrics) > 1 else "base"
-                ax.axhline(base[key], color=MUTED, linewidth=1.5, linestyle=(0, (4, 3)))
-                ax.annotate(
-                    f"{name}: {base[key]:.3f}", xy=(1.0, base[key]), xycoords=("axes fraction", "data"),
-                    xytext=(-4, 4), textcoords="offset points", ha="right",
-                    fontsize=8, color=INK2,
+        for g, (model_label, base, scaling) in enumerate(groups):
+            group_sizes = [s for s, _ in scaling]
+            for i, (key, label) in enumerate(metrics):
+                values = [m.get(key) for _, m in scaling]
+                # a metric the task doesn't compute (e.g. in_range_rate on habitat runs)
+                # would otherwise draw nothing but still claim a legend entry
+                if all(v is None for v in values):
+                    continue
+                series_label = f"{model_label} · {label}" if overlay else label
+                ax.plot(
+                    group_sizes, values, MODEL_STYLES[g % len(MODEL_STYLES)], marker="o",
+                    color=SERIES[i], linewidth=2, markersize=8,
+                    markeredgecolor=SURFACE, markeredgewidth=2, label=series_label,
                 )
+                if base and key in base:
+                    name = f"base {label}" if len(metrics) > 1 else "base"
+                    if overlay:
+                        name = f"{model_label} {name}"
+                    ax.axhline(base[key], color=MUTED, linewidth=1.5,
+                               linestyle=(0, (4, 3)) if g == 0 else (0, (1, 2)))
+                    ax.annotate(
+                        f"{name}: {base[key]:.3f}", xy=(1.0, base[key]),
+                        xycoords=("axes fraction", "data"),
+                        # stagger by model so two close baselines don't overprint
+                        xytext=(-4, 4 + 10 * g), textcoords="offset points", ha="right",
+                        fontsize=8, color=INK2,
+                    )
         ax.set_xscale("log")
         ax.set_xticks(sizes)
         # compact tick labels (500 / 1K / 6.4K) so the tight 5000-vs-full pair doesn't collide
@@ -150,7 +211,7 @@ def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path,
             )
         )
         ax.minorticks_off()
-        ax.set_title(title, fontsize=11, color=INK, pad=10)
+        ax.set_title(panel_title, fontsize=11, color=INK, pad=10)
         ax.set_xlabel("training samples (log)", fontsize=9, color=INK2)
         ax.set_ylabel(ylabel, fontsize=9, color=INK2)
         ax.tick_params(colors=MUTED, labelsize=8)
@@ -159,10 +220,13 @@ def plot(base: dict | None, scaling: list[tuple[int, dict]], out_path: Path,
             ax.spines[spine].set_visible(False)
         for spine in ("left", "bottom"):
             ax.spines[spine].set_color(BASELINE_AXIS)
-        if len(metrics) > 1:
-            ax.legend(fontsize=8, frameon=False, labelcolor=INK2)
+        if (len(metrics) > 1 or overlay) and ax.get_legend_handles_labels()[0]:
+            # handlelength: the swatch must be long enough that solid-vs-dashed
+            # (which is what encodes the model) is actually distinguishable
+            ax.legend(fontsize=8, frameon=False, labelcolor=INK2,
+                      handlelength=3.2 if overlay else 2.0)
 
-    fig.suptitle(TASK_TITLES[task], fontsize=12, color=INK, y=1.02)
+    fig.suptitle(title or TASK_TITLES[task], fontsize=12, color=INK, y=1.02)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
@@ -174,18 +238,36 @@ def main() -> None:
     parser.add_argument("--meta", type=Path, default=REPO_ROOT / "data/prepared/meta.json")
     parser.add_argument("--task", choices=sorted(TASK_COLUMNS), default="trajectory",
                         help="which metric set to report ('choice' for the classification runs)")
+    parser.add_argument("--label", default=None, help="name for --eval-dir's base model in the table/plot")
+    parser.add_argument("--compare-dir", type=Path, default=None,
+                        help="a second eval tree to overlay (read-only; output goes to --eval-dir)")
+    parser.add_argument("--compare-label", default=None, help="name for --compare-dir's base model")
+    parser.add_argument("--title", default=None, help="override the plot title")
     args = parser.parse_args()
 
     base, scaling = load_runs(args.eval_dir, args.meta)
     if not scaling and not base:
         raise SystemExit(f"no metrics found under {args.eval_dir}/<tag>/metrics.json — run evals first")
 
-    table = write_table(base, scaling, args.task)
+    groups = [(args.label or model_label(base, scaling, args.eval_dir), base, scaling)]
+    if args.compare_dir is not None:
+        c_base, c_scaling = load_runs(args.compare_dir, args.meta)
+        if not c_scaling and not c_base:
+            raise SystemExit(f"no metrics found under {args.compare_dir}/<tag>/metrics.json")
+        groups.append(
+            (args.compare_label or model_label(c_base, c_scaling, args.compare_dir), c_base, c_scaling)
+        )
+
+    title = args.title
+    if title is None:
+        title = TASK_TITLES[args.task].format(models=" vs. ".join(label for label, _, _ in groups))
+
+    table = write_table(groups, args.task)
     (args.eval_dir / "comparison.md").write_text(table)
     print(table)
 
-    if scaling:
-        plot(base, scaling, args.eval_dir / "scaling_curve.png", args.task)
+    if any(scaling for _, _, scaling in groups):
+        plot(groups, args.eval_dir / "scaling_curve.png", args.task, title)
         print(f"plot  -> {args.eval_dir / 'scaling_curve.png'}")
     else:
         print("no scaling runs yet — table only")

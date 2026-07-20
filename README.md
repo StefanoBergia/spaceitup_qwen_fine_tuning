@@ -225,3 +225,44 @@ template lives in `scripts/_choice_report.html`.
 > — it expects 2-element `[x,y]` predictions and does not yet understand the habitat
 > `{"path","goal"}` format. For qualitative habitat inspection use
 > `scripts/inspect_habitat.py`; a habitat explorer is a deferred follow-up.
+
+## Comparing base model sizes
+
+Both habitat sweeps are parameterized by base model, so the same experiment can be
+re-run on a smaller Qwen3.5 and the scaling curves overlaid. The model argument
+suffixes the **output trees**; eval tags are deliberately left identical across
+models, which is what makes the overlay possible.
+
+```bash
+sbatch slurm/run_all_habitat.sbatch 0.8b          # -> outputs/runs_0.8b/, outputs/eval_habitat_0.8b/
+sbatch slurm/run_all_habitat_choice.sbatch 0.8b   # -> outputs/eval_habitat_choice_0.8b/
+```
+
+No argument (or `2b`) reproduces the original Qwen3.5-2B paths exactly. An unrecognized
+model name exits non-zero rather than falling back to the default — a typo must never
+quietly write into a completed tree.
+
+Overlay the two models once both sweeps finish (output goes to `--eval-dir`; the
+`--compare-dir` tree is read-only):
+
+```bash
+uv run scripts/compare_evals.py \
+    --eval-dir outputs/eval_habitat_0.8b --label 0.8B \
+    --compare-dir outputs/eval_habitat --compare-label 2B \
+    --meta data/prepared_habitat/meta.json
+```
+
+In the overlaid plot, **colour is the metric and line style is the model** (solid =
+`--eval-dir`, dashed = `--compare-dir`).
+
+`scripts/train.py` and `scripts/evaluate.py` both take `--model-id` directly if you
+want a size the sbatch wrappers don't list. `evaluate.py` records the resolved id in
+`metrics.json` and `train.py` writes a `train_config.json` next to each adapter, so a
+result tree says which model produced it instead of relying on directory naming.
+
+> **A LoRA target that matches nothing is fatal, not a warning.** PEFT silently ignores
+> unmatched `target_modules`, which would train fewer parameters than intended and only
+> surface as a flat loss curve hours into a job. `train.py` checks every target against
+> the loaded module tree and exits with the unmatched names. Qwen3.5-2B and Qwen3.5-0.8B
+> both match `LORA_TARGETS_TEXT` in full (6 full-attention layers, 18 linear-attention,
+> 24 MLPs), so no change is needed between those two.
