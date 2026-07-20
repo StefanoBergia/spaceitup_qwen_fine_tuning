@@ -266,3 +266,43 @@ result tree says which model produced it instead of relying on directory naming.
 > the loaded module tree and exits with the unmatched names. Qwen3.5-2B and Qwen3.5-0.8B
 > both match `LORA_TARGETS_TEXT` in full (6 full-attention layers, 18 linear-attention,
 > 24 MLPs), so no change is needed between those two.
+
+## Visualizations — where each one lives
+
+Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
+zero network requests — required by the artifact CSP), regenerated from the eval
+outputs on the login node. All are CPU-only; none need a GPU.
+
+| Report | Regenerate with | Writes to |
+|---|---|---|
+| ShareRobot prediction explorer | `uv run scripts/visualize_predictions.py` | `outputs/eval/prediction_explorer.html` |
+| Habitat path + visibility results | *(generator not committed — see note)* | `outputs/eval_habitat/habitat_results.html` |
+| Habitat classification results | `uv run scripts/visualize_choice_results.py` | `outputs/eval_habitat_choice/choice_results.html` |
+| 2B vs 0.8B comparison (both tasks) | `uv run scripts/visualize_model_comparison.py` | `outputs/model_comparison.html` |
+
+Published artifacts (private to the owner; republish the same file path to update in
+place, or pass the URL as `url=` from another session):
+
+- ShareRobot explorer — https://claude.ai/code/artifact/71daf6f4-76c8-47bf-8825-540d32347f9b
+- Habitat path + visibility — https://claude.ai/code/artifact/4fdd1859-b6d9-4e14-b20d-5b41b24a9574
+- Habitat classification — https://claude.ai/code/artifact/a5c5b899-1148-4f41-8c7a-4325558d39cf
+- 2B vs 0.8B comparison — https://claude.ai/code/artifact/1195c008-dc27-482c-953f-4b017965f89e
+
+Useful flags:
+
+```bash
+uv run scripts/visualize_choice_results.py --per-bucket 6      # more gallery samples
+uv run scripts/visualize_choice_results.py --solid             # training composites verbatim
+uv run scripts/visualize_model_comparison.py --per-side 5      # more disagreement frames
+uv run scripts/visualize_model_comparison.py --a-label 2B --b-label 0.8B
+```
+
+`visualize_model_comparison.py` is the only report that tests its own claims: both
+models are scored on identical frames, so it runs McNemar's exact test (classification)
+and a paired bootstrap (regression) via `src/rover_vlm/compare.py` and labels each gap
+significant or not, rather than leaving significance to be guessed from bar heights.
+
+> **Note on the Habitat path+visibility report.** Its generator was written as a
+> throwaway and never committed, so that page cannot currently be regenerated from the
+> repo — the published artifact is the only copy. The other three are reproducible.
+> Folding it into a proper `scripts/` entrypoint is open work.
