@@ -20,6 +20,8 @@ dependencies = [
     "matplotlib>=3.8",
     "tqdm>=4.66",
     "pyyaml>=6.0",
+    # OpenAI-compatible client for the Cosmos3 trace-labelling endpoint (scripts/label_traces.py)
+    "openai>=1.0",
 ]
 
 # Use uv-managed Python (lives on NFS, ships its own C headers): the system
