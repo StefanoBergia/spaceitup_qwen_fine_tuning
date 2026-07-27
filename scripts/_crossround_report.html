@@ -1,0 +1,352 @@
+<title>What 2.2× the training data bought — Habitat rover tasks</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#008300; --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+  --before:#898781;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --before:#7a7873; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --before:#7a7873; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:26px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--ink2);margin:0 0 28px;font-size:15px;max-width:76ch}
+h2{font-size:18px;margin:44px 0 4px;letter-spacing:-.005em}
+h3.ct{font-size:14px;margin:0 0 10px;color:var(--ink)}
+.note{color:var(--ink2);font-size:14px;margin:0 0 18px;max-width:74ch}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:12px;margin:22px 0 8px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:16px 18px}
+.tile .k{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.tile .v{font-size:30px;font-weight:640;margin:6px 0 2px;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums}
+.tile .d{font-size:13px;color:var(--ink2)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin:0 0 14px;font-size:13px;color:var(--ink2)}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:-1px}
+.legend i.hatch{background:repeating-linear-gradient(45deg,var(--muted),var(--muted) 2px,transparent 2px,transparent 4px);
+  border:1px solid var(--ring)}
+figure{margin:0}
+figcaption{color:var(--ink2);font-size:13.5px;margin-top:10px;max-width:78ch}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--grid)}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+.scroll{overflow-x:auto}
+.pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
+  border:1px solid var(--ring)}
+.sig{color:#fff;background:var(--good)}
+.ns{color:var(--ink2);background:var(--plane)}
+.art{color:#000;background:var(--warn)}
+.callout{border-left:3px solid var(--s1);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:18px 0;font-size:14.5px;color:var(--ink2)}
+.callout b{color:var(--ink)}
+.callout.warn{border-left-color:var(--warn)}
+.tip{position:fixed;pointer-events:none;background:var(--surface);color:var(--ink);
+  border:1px solid var(--ring);border-radius:8px;padding:7px 10px;font-size:12.5px;
+  box-shadow:0 6px 20px rgba(0,0,0,.13);opacity:0;transition:opacity .1s;z-index:9;
+  font-variant-numeric:tabular-nums}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.ax{font-size:11px;fill:var(--muted)}
+.vlab{font-size:11px;fill:var(--ink2);font-variant-numeric:tabular-nums}
+.slab{font-size:12px;fill:var(--ink)}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
+  color:var(--muted);font-size:13px;max-width:80ch}
+</style>
+
+<div class="wrap">
+  <h1>What did 2.2× the training data buy?</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div id="warnbox"></div>
+
+  <h2>Path regression — the gain is real</h2>
+  <p class="note">Round-1 model (3,660 training samples) vs. v2 model (8,140), scored on the
+    same held-out frames. Each row is one metric: the dot pair shows both models, the bar
+    beneath is the 95% confidence interval on their difference.</p>
+  <div class="legend">
+    <span><i style="background:var(--before)"></i>round 1 — 3,660 samples</span>
+    <span><i style="background:var(--s1)"></i>v2 — 8,140 samples</span>
+  </div>
+  <div class="card"><div id="regchart"></div></div>
+  <figcaption id="regcap"></figcaption>
+
+  <h2>Path classification — most of the gap is an artifact</h2>
+  <p class="note">The same paired test says classification improved too. It is largely an
+    illusion: the round-1 model is being tested in rooms it never trained in, and it loses
+    accuracy for that reason alone. Subtracting that handicap leaves what is actually
+    attributable to training data.</p>
+  <div class="legend">
+    <span><i style="background:var(--s1)"></i>attributable to more data</span>
+    <span><i class="hatch"></i>artifact of unequal room exposure</span>
+  </div>
+  <div class="card"><div id="chochart"></div></div>
+  <figcaption id="chocap"></figcaption>
+
+  <h2>Why the discount is needed</h2>
+  <p class="note">The same round-1 model, scored on its own eval split (rooms it trained in)
+    and on the 553 unfamiliar rooms. A drop means that model was relying on room familiarity —
+    which inflates any comparison where only one model has it.</p>
+  <div class="scroll card"><table id="pentab"></table></div>
+
+  <h2>Three methods, different biases</h2>
+  <p class="note">No single comparison settles this, so here are all three. They disagree
+    only where the exposure asymmetry bites — which is itself the evidence that the
+    asymmetry, not the data, is driving the classification result.</p>
+  <div class="scroll card"><table id="methtab"></table></div>
+
+  <h2>Is the newer eval split just easier?</h2>
+  <p class="note">The control: the <b>base</b> model never trained on anything, so a difference
+    in its score between the two eval splits would be pure frame difficulty. There is none —
+    which is what licenses comparing each model on its own round's split at all.</p>
+  <div class="scroll card"><table id="difftab"></table></div>
+
+  <h2>Every comparison</h2>
+  <div class="scroll card"><table id="alltab"></table></div>
+
+  <footer id="foot"></footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const el = (t,a={}) => { const n=document.createElementNS(NS,t);
+  for(const k in a) n.setAttribute(k,a[k]); return n; };
+const pct = v => (v*100).toFixed(1)+'%';
+const pts = v => (v>=0?'+':'')+(v*100).toFixed(1)+' pts';
+const num = v => v.toFixed(4);
+const sigPill = s => `<span class="pill ${s?'sig':'ns'}">${s?'significant':'ns'}</span>`;
+
+$('sub').textContent = `Round 1 trained on ${D.oldTrain.toLocaleString()} samples, v2 on `
+  + `${D.newTrain.toLocaleString()} — 2.2×. Both models are scored on the same ${D.n} held-out `
+  + `frames, so differences are paired. Those frames did not exist when round 1 was prepared, `
+  + `which is what makes them fair game for a model trained before they were generated.`;
+
+/* ---- tooltip ---- */
+const tip=$('tip');
+function bindTip(node, html){
+  node.addEventListener('mousemove',e=>{ tip.innerHTML=html; tip.style.opacity=1;
+    tip.style.left=Math.min(e.clientX+14, innerWidth-240)+'px'; tip.style.top=(e.clientY+16)+'px'; });
+  node.addEventListener('mouseleave',()=>tip.style.opacity=0);
+}
+
+/* ---- headline tiles ---- */
+(function(){
+  const vis = D.reg.find(r=>r.model==='2B' && r.name.startsWith('Waypoint visibility'));
+  const err = D.reg.find(r=>r.model==='2B' && r.name==='Waypoint error');
+  const goal = D.reg.find(r=>r.model==='2B' && r.name.startsWith('Goal visibility'));
+  const cho = D.choice.find(c=>c.model==='2B' && c.name==='Strict accuracy');
+  const t=[];
+  if(err) t.push(['Waypoint error', pts(err.diff), `${num(err.r1)} → ${num(err.v2)} · significant`]);
+  if(vis) t.push(['Waypoint visibility', pts(vis.diff), `${pct(vis.r1)} → ${pct(vis.v2)} · significant`]);
+  if(goal) t.push(['Goal visibility', pts(goal.v2-goal.r1), `${pct(goal.r1)} → ${pct(goal.v2)} · significant`]);
+  if(cho) t.push(['Classification, adjusted', pts(cho.adjusted),
+                  `raw ${pts(cho.raw)} minus ${pts(cho.penalty)} exposure artifact`]);
+  $('tiles').innerHTML = t.map(([k,v,d])=>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join('');
+})();
+
+/* ---- the caveat, before any chart ---- */
+(function(){
+  const asym = D.exposure.new_model - D.exposure.old_model;
+  if(asym <= 0.1) return;
+  $('warnbox').innerHTML = `<div class="callout warn"><b>Unequal room exposure — read the `
+    + `classification numbers with this in mind.</b> The generator adds whole new scenes, so on `
+    + `these ${D.n} frames the v2 model has trained in ${Math.round(D.exposure.new_model*100)}% `
+    + `of the rooms and the round-1 model in ${Math.round(D.exposure.old_model*100)}%. A raw v2 `
+    + `win therefore measures more data <i>plus</i> the room coverage that came with it. Path `
+    + `geometry turns out not to care (the round-1 model does not degrade in unfamiliar rooms), `
+    + `so the regression result stands as-is. Classification does care, and is discounted below.`
+    + `</div>`;
+})();
+
+/* ---- regression: dot pair + CI bar per metric ---- */
+(function(){
+  const rows = D.reg.filter(r=>r.kind==='cont');
+  const host = $('regchart');
+  ['2B','0.8B'].forEach(model=>{
+    const mine = rows.filter(r=>r.model===model);
+    if(!mine.length) return;
+    const h3=document.createElement('h3'); h3.className='ct';
+    h3.textContent = `Qwen3.5-${model}`; host.appendChild(h3);
+    const W=920, RH=52, P={t:8,r:150,b:26,l:190}, H=P.t+P.b+RH*mine.length;
+    const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img',
+      'aria-label':`Round 1 versus v2 on ${mine.length} regression metrics for ${model}`});
+    const iw=W-P.l-P.r;
+    mine.forEach((r,i)=>{
+      const y=P.t+RH*i+RH/2;
+      // each metric has its own scale: they are different units entirely
+      const vals=[r.v2,r.r1], lo=Math.min(...vals), hi=Math.max(...vals);
+      const pad=(hi-lo)*1.6+1e-9, x0=Math.max(0,lo-pad), x1=hi+pad;
+      const X=v=>P.l+(v-x0)/(x1-x0)*iw;
+      const t=el('text',{x:P.l-12,y:y+4,'text-anchor':'end',class:'slab'});
+      t.textContent=r.name; svg.appendChild(t);
+      svg.appendChild(el('line',{x1:P.l,x2:P.l+iw,y1:y,y2:y,stroke:'var(--grid)','stroke-width':1}));
+      // connector then the two dots; v2 drawn last so it sits on top
+      svg.appendChild(el('line',{x1:X(r.r1),x2:X(r.v2),y1:y,y2:y,
+        stroke:'var(--axis)','stroke-width':2}));
+      [[r.r1,'var(--before)','round 1'],[r.v2,'var(--s1)','v2']].forEach(([v,c])=>{
+        const dot=el('circle',{cx:X(v),cy:y,r:7,fill:c,stroke:'var(--surface)','stroke-width':2});
+        svg.appendChild(dot);
+      });
+      const better = r.better==='down' ? r.diff<0 : r.diff>0;
+      const lab=el('text',{x:P.l+iw+12,y:y+4,class:'vlab'});
+      lab.textContent = `${num(r.r1)} → ${num(r.v2)}`;
+      svg.appendChild(lab);
+      const verd=el('text',{x:W-4,y:y+4,'text-anchor':'end',class:'vlab',
+        fill: r.sig ? (better?'var(--good)':'var(--crit)') : 'var(--muted)'});
+      verd.textContent = r.sig ? (better?'better':'worse') : 'ns';
+      svg.appendChild(verd);
+      const hit=el('rect',{x:P.l,y:y-RH/2,width:iw,height:RH,fill:'transparent'});
+      bindTip(hit,`<b>${r.name}</b> · ${model}<br>round 1: ${num(r.r1)}<br>v2: ${num(r.v2)}`
+        +`<br>diff ${r.diff>=0?'+':''}${num(r.diff)}<br>95% CI [${num(r.lo)}, ${num(r.hi)}]`);
+      svg.appendChild(hit);
+    });
+    host.appendChild(svg);
+  });
+  const nsig=D.reg.filter(r=>r.sig).length;
+  $('regcap').textContent = `${nsig} of ${D.reg.length} regression comparisons favour v2 `
+    + `significantly, across both model sizes. Each row is scaled to its own metric — the dot `
+    + `separation shows direction and relative size, not a shared axis.`;
+})();
+
+/* ---- classification: raw gap decomposed into artifact + real ---- */
+(function(){
+  const rows=D.choice;
+  const W=920, RH=54, P={t:26,r:170,b:30,l:190}, H=P.t+P.b+RH*rows.length;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img',
+    'aria-label':'Raw classification gap split into the part attributable to data and the part explained by room exposure'});
+  const iw=W-P.l-P.r;
+  const maxv=Math.max(...rows.map(r=>Math.max(r.raw,r.penalty,r.adjusted)))*1.15;
+  const X=v=>P.l+Math.max(0,v)/maxv*iw;
+  // hatch for the artifact portion: it is not a peer category, it is the part to discount
+  const defs=el('defs'); const pat=el('pattern',{id:'hatch',width:6,height:6,
+    patternUnits:'userSpaceOnUse',patternTransform:'rotate(45)'});
+  pat.appendChild(el('rect',{width:6,height:6,fill:'var(--surface)'}));
+  pat.appendChild(el('line',{x1:0,y1:0,x2:0,y2:6,stroke:'var(--muted)','stroke-width':2.5}));
+  defs.appendChild(pat); svg.appendChild(defs);
+  for(let g=0; g<=4; g++){
+    const v=maxv*g/4, x=X(v);
+    svg.appendChild(el('line',{x1:x,x2:x,y1:P.t-8,y2:P.t+RH*rows.length,
+      stroke:'var(--grid)','stroke-width':1}));
+    const t=el('text',{x:x,y:P.t+RH*rows.length+18,'text-anchor':'middle',class:'ax'});
+    t.textContent=(v*100).toFixed(0)+' pts'; svg.appendChild(t);
+  }
+  rows.forEach((r,i)=>{
+    const y=P.t+RH*i+RH/2, bh=20;
+    const lab=el('text',{x:P.l-12,y:y+4,'text-anchor':'end',class:'slab'});
+    lab.textContent=`${r.model} · ${r.name}`; svg.appendChild(lab);
+    const real=Math.max(0,r.adjusted), art=Math.max(0,r.penalty);
+    // real part anchored at the baseline, artifact stacked beyond it, 2px surface gap between
+    const wr=X(real)-P.l;
+    if(wr>0) svg.appendChild(el('rect',{x:P.l,y:y-bh/2,width:wr,height:bh,rx:4,fill:'var(--s1)'}));
+    const wa=X(real+art)-X(real)-2;
+    if(wa>0) svg.appendChild(el('rect',{x:X(real)+2,y:y-bh/2,width:wa,height:bh,rx:4,
+      fill:'url(#hatch)',stroke:'var(--ring)','stroke-width':1}));
+    const v=el('text',{x:X(real+art)+12,y:y+4,class:'vlab'});
+    v.textContent=`raw ${pts(r.raw)} → ${pts(r.adjusted)} real`;
+    svg.appendChild(v);
+    const hit=el('rect',{x:P.l,y:y-RH/2,width:iw,height:RH,fill:'transparent'});
+    bindTip(hit,`<b>${r.model} · ${r.name}</b><br>v2 ${pct(r.v2)} vs round 1 ${pct(r.r1)}`
+      +`<br>raw gap ${pts(r.raw)} (McNemar p=${r.p.toExponential(2)})`
+      +`<br>room-exposure artifact ${pts(r.penalty)}<br><b>attributable to data ${pts(r.adjusted)}</b>`
+      +(r.unpaired?`<br>independent estimate ${pts(r.unpaired.diff)} (${r.unpaired.sig?'sig':'ns'})`:''));
+    svg.appendChild(hit);
+  });
+  $('chochart').appendChild(svg);
+  const big=D.choice.find(c=>c.model==='2B'&&c.name==='Strict accuracy');
+  $('chocap').textContent = big ? `For the 2B model, ${Math.round(big.penalty/big.raw*100)}% of the `
+    + `raw ${pts(big.raw)} gap is explained by the round-1 model being tested in unfamiliar rooms. `
+    + `What remains, ${pts(big.adjusted)}, is within noise of the independent estimate from each `
+    + `model's own eval split — two methods with different biases agreeing.` : '';
+})();
+
+/* ---- exposure penalty table ---- */
+(function(){
+  const rows=D.penalty;
+  $('pentab').innerHTML =
+    '<thead><tr><th>Model</th><th>Task</th><th>Metric</th><th>Own eval<br>(familiar rooms)</th>'
+    + '<th>553 unfamiliar<br>rooms</th><th>Change</th></tr></thead><tbody>'
+    + rows.map(r=>{
+        const d=r.unseen-r.own;
+        return `<tr><td>${r.model}</td><td>${r.task}</td><td>${r.name}</td>`
+          + `<td>${num(r.own)}</td><td>${num(r.unseen)}</td>`
+          + `<td>${d>=0?'+':''}${num(d)} `
+          + `<span class="pill ${r.hurt?'art':'ns'}">${r.hurt?'handicapped':'no drop'}</span></td></tr>`;
+      }).join('') + '</tbody>';
+})();
+
+/* ---- three methods ---- */
+(function(){
+  const rows=[];
+  D.reg.filter(r=>r.kind==='cont').forEach(r=>rows.push({
+    what:`${r.model} · ${r.name}`, paired:r.diff, psig:r.sig,
+    m55:r.m55&&r.m55.diff, m55sig:r.m55&&r.m55.sig,
+    unp:r.unpaired&&r.unpaired.diff, unpsig:r.unpaired&&r.unpaired.sig, adj:null}));
+  D.choice.forEach(c=>rows.push({
+    what:`${c.model} · ${c.name}`, paired:c.raw, psig:c.sig, adj:c.adjusted,
+    unp:c.unpaired&&c.unpaired.diff, unpsig:c.unpaired&&c.unpaired.sig, m55:null}));
+  $('methtab').innerHTML =
+    '<thead><tr><th>Comparison</th><th>Paired, 553 frames<br>(exposure-biased)</th>'
+    + '<th>After exposure<br>discount</th><th>Own-split unpaired<br>(no exposure bias)</th>'
+    + '<th>Matched-exposure<br>55 frames</th></tr></thead><tbody>'
+    + rows.map(r=>`<tr><td>${r.what}</td>`
+        + `<td>${num(r.paired)} ${sigPill(r.psig)}</td>`
+        + `<td>${r.adj==null?'—':num(r.adj)}</td>`
+        + `<td>${r.unp==null?'—':num(r.unp)+' '+sigPill(r.unpsig)}</td>`
+        + `<td>${r.m55==null?'—':num(r.m55)+' '+sigPill(r.m55sig)}</td></tr>`).join('')
+    + '</tbody>';
+})();
+
+/* ---- eval-set difficulty control ---- */
+(function(){
+  $('difftab').innerHTML =
+    '<thead><tr><th>Task</th><th>Metric</th><th>Base on v2 eval</th><th>Base on round-1 eval</th>'
+    + '<th>Difference</th><th>95% CI</th></tr></thead><tbody>'
+    + D.difficulty.map(r=>`<tr><td>${r.task}</td><td>${r.name}</td><td>${num(r.v2Eval)}</td>`
+        + `<td>${num(r.r1Eval)}</td><td>${r.diff>=0?'+':''}${num(r.diff)}</td>`
+        + `<td>[${num(r.lo)}, ${num(r.hi)}] ${sigPill(r.sig)}</td></tr>`).join('')
+    + '</tbody>';
+})();
+
+/* ---- everything ---- */
+(function(){
+  const rows=[...D.reg.map(r=>({t:'regression',...r})), ...D.choice.map(c=>({t:'classification',...c}))];
+  $('alltab').innerHTML =
+    '<thead><tr><th>Task</th><th>Model</th><th>Metric</th><th>round 1<br>(3,660)</th>'
+    + '<th>v2<br>(8,140)</th><th>Difference</th><th>Test</th></tr></thead><tbody>'
+    + rows.map(r=>{
+        const d = r.kind==='cont' ? r.diff : (r.v2-r.r1);
+        const test = r.p!=null ? `McNemar p=${r.p<1e-4?r.p.toExponential(1):r.p.toFixed(4)}`
+                               : `CI [${num(r.lo)}, ${num(r.hi)}]`;
+        return `<tr><td>${r.t}</td><td>${r.model}</td><td>${r.name}</td><td>${num(r.r1)}</td>`
+          + `<td>${num(r.v2)}</td><td>${d>=0?'+':''}${num(d)}</td>`
+          + `<td>${test} ${sigPill(r.sig)}</td></tr>`;
+      }).join('') + '</tbody>';
+})();
+
+$('foot').innerHTML = `Frames: the ${D.n} of the v2 eval split absent from round 1's pool `
+  + `entirely. ${D.excluded} further v2 eval frames were round-1 <i>training</i> data and are `
+  + `excluded — scoring the round-1 model there would report inflated numbers on seen data. `
+  + `The ${D.counts.shared} frames both rounds held out are the matched-exposure column. `
+  + `Continuous metrics use a paired bootstrap (4,000 resamples, 95% percentile interval); `
+  + `binary outcomes use McNemar's exact test. Regenerate with `
+  + `<code>uv run scripts/visualize_crossround.py</code>.`;
+</script>

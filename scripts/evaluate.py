@@ -52,8 +52,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-file", type=Path, default=REPO_ROOT / "data/prepared/eval.json")
     p.add_argument("--batch-size", type=int, default=8)
     # base model tends to answer in verbose grounding-JSON (~20 tokens/point), so
-    # leave headroom; fine-tuned outputs are ~10 tokens/point
+    # leave headroom; fine-tuned outputs are ~10 tokens/point. A thinking model also
+    # spends ~100 words on the trace, so bump this when --enable-thinking is set.
     p.add_argument("--max-new-tokens", type=int, default=256)
+    p.add_argument("--enable-thinking", action="store_true",
+                   help="render the generation prompt with an OPEN <think> block so a "
+                        "trace-trained adapter reasons before answering. Required to eval "
+                        "an adapter trained by scripts/prepare_habitat_traces.py; leave off "
+                        "for plain (answer-only) adapters and the base model.")
     p.add_argument("--max-samples", type=int, default=None)
     return p.parse_args()
 
@@ -102,7 +108,8 @@ def main() -> None:
             images.append(image)
             texts.append(
                 processor.apply_chat_template(
-                    build_messages(prompt, image), tokenize=False, add_generation_prompt=True
+                    build_messages(prompt, image), tokenize=False, add_generation_prompt=True,
+                    enable_thinking=args.enable_thinking,
                 )
             )
             # choice scoring needs the accepted set, which the answer string can't carry

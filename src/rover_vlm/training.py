@@ -2,7 +2,16 @@
 
 Consumes the conversation-format JSON files produced by scripts/prepare_data.py.
 The collator builds batches via the Qwen3.5 processor's chat template and masks
-labels so the loss is computed only on the assistant answer (the waypoint list).
+labels so the loss is computed only on the assistant response.
+
+Reasoning traces (optional): a record may carry a top-level "reasoning" string
+(attached by scripts/prepare_habitat_traces.py). When present, it is rendered inside
+Qwen3.5's native <think>...</think> via the processor's `reasoning_content` field, and
+the label mask is opened so the reasoning IS trained on. The mask boundary is the exact
+`enable_thinking=True` generation prompt (ending at "<think>\\n"), so the trained region is
+precisely what the model must produce at inference: the reasoning, then </think>, then the
+answer. Records without "reasoning" render an empty <think></think> and train answer-only,
+exactly as before — so plain and traced runs share one code path.
 """
 
 import json
@@ -57,35 +66,60 @@ class TrajectoryDataset(Dataset):
         # inserts image tokens itself, so strip it from the text.
         prompt = rec["conversations"][0]["value"].replace("<image>\n", "").replace("<image>", "")
         answer = rec["conversations"][1]["value"]
-        return {"id": rec["id"], "image": image, "prompt": prompt, "answer": answer}
+        # Optional reasoning trace -> Qwen's <think> block (see module docstring). None for
+        # plain records, so the collator falls back to answer-only training.
+        return {"id": rec["id"], "image": image, "prompt": prompt, "answer": answer,
+                "reasoning": rec.get("reasoning")}
 
 
 class TrajectoryCollator:
-    """Batch samples with the Qwen processor; mask everything but the answer in labels."""
+    """Batch samples with the Qwen processor; mask the prompt so loss covers only the
+    assistant response. When a sample carries a "reasoning" trace, the response includes
+    the <think> block and the mask boundary shifts so the reasoning is trained on too."""
 
     def __init__(self, processor):
         self.processor = processor
         self.processor.tokenizer.padding_side = "right"
 
-    def _messages(self, sample: dict, with_answer: bool) -> list[dict]:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": sample["image"]},
-                    {"type": "text", "text": sample["prompt"]},
-                ],
-            }
-        ]
-        if with_answer:
-            messages.append(
-                {"role": "assistant", "content": [{"type": "text", "text": sample["answer"]}]}
-            )
-        return messages
+    def _user_msg(self, sample: dict) -> dict:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": sample["image"]},
+                {"type": "text", "text": sample["prompt"]},
+            ],
+        }
+
+    def _assistant_msg(self, sample: dict) -> dict:
+        msg = {"role": "assistant", "content": [{"type": "text", "text": sample["answer"]}]}
+        if sample.get("reasoning"):
+            # `reasoning_content` is the processor's official channel: it renders as
+            # <think>\n{reasoning}\n</think>\n\n before the answer (verified against the
+            # Qwen3.5-2B template). Putting the trace here — not in the answer text — keeps
+            # the answer JSON exactly the ground-truth string.
+            msg["reasoning_content"] = sample["reasoning"]
+        return msg
+
+    def _prompt_ids(self, sample: dict):
+        """Token ids of the generation prompt that PRECEDES the trained region — i.e. the
+        exact prefix the model is handed at inference. With reasoning, enable_thinking=True
+        so the prompt ends at "<think>\\n" and the reasoning falls inside the loss; without
+        it, the default empty-<think> boundary reproduces the prior answer-only behavior."""
+        prompt_text = self.processor.apply_chat_template(
+            [self._user_msg(sample)],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=bool(sample.get("reasoning")),
+        )
+        return self.processor(
+            text=[prompt_text], images=[sample["image"]], return_tensors="pt"
+        )["input_ids"][0]
 
     def __call__(self, samples: list[dict]) -> dict:
         texts = [
-            self.processor.apply_chat_template(self._messages(s, with_answer=True), tokenize=False)
+            self.processor.apply_chat_template(
+                [self._user_msg(s), self._assistant_msg(s)], tokenize=False
+            )
             for s in samples
         ]
         batch = self.processor(
@@ -97,19 +131,18 @@ class TrajectoryCollator:
 
         labels = batch["input_ids"].clone()
         labels[batch["attention_mask"] == 0] = -100
-        # Mask the prompt part: tokenize each sample's prompt-only rendering (which
-        # includes its image tokens) and blank out that prefix.
         for i, sample in enumerate(samples):
-            prompt_text = self.processor.apply_chat_template(
-                self._messages(sample, with_answer=False),
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            prompt_len = len(
-                self.processor(
-                    text=[prompt_text], images=[sample["image"]], return_tensors="pt"
-                )["input_ids"][0]
-            )
+            prompt_ids = self._prompt_ids(sample)
+            prompt_len = len(prompt_ids)
+            # The generation prompt must be an exact token prefix of the full sequence, or
+            # the mask would leak/clip the response (a silent mistrain — see the flat-loss
+            # failure mode in unmatched_lora_targets). Fail loud if a template change ever
+            # breaks the prefix property this collator relies on.
+            if not torch.equal(batch["input_ids"][i, :prompt_len], prompt_ids):
+                raise RuntimeError(
+                    f"prompt/response token boundary misaligned for sample "
+                    f"{sample.get('id')!r}; chat-template rendering changed."
+                )
             labels[i, :prompt_len] = -100
         batch["labels"] = labels
         return batch

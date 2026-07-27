@@ -30,11 +30,14 @@ from .habitat_choice import CANDIDATE_COLORS
 # reasoning as a *product* inside the answer JSON instead.
 #
 # v3 stopped making the path task echo its whole waypoint list (200 wasted tokens that
-# pushed Cosmos into fenced JSON and lost the <answer> tags — it echoes just the goal now),
-# and removed the concrete furniture example from the rules: 2 of 12 v2 traces parroted
+# pushed Cosmos into fenced JSON and lost the <answer> tags — it echoes just the goal now).
+#
+# v4 removed the concrete furniture example from the rules: 2 of 12 v2 traces parroted
 # "the sofa and the kitchen counter" straight out of the prompt, inventing objects that
 # were not in the frame. Illustrative nouns in a labelling prompt become hallucinations
-# in the labels.
+# in the labels. This landed *after* the v3 run, so the v2 and v3 labels were both
+# produced with the example still in place — the recovered prompt diffs say so even
+# though this comment used to credit v3 with both changes.
 #
 # v5 bounded the scratch block. v4 told Cosmos to "think as long as you need", and on
 # 2 of 20 choice samples it did exactly that — 3,300 words of deliberation, hitting the
@@ -328,12 +331,30 @@ _LEAK_PATTERNS = [
     r"\bthe correct (?:one|candidate|option|choice|path|route)\b",
     r"\bi need to (?:reject|explain|justify|show|prove)\b",
     r"\b(?:the|a) user\b",
-    r"\b(?:the )?(?:question|prompt|task|instruction)s?\b",
     r"\bcandidate \d+ is (?:the )?correct\b",
     r"\brecall the candidates\b",
-    # Meta-framing: the trace is the rover's monologue, so it must not narrate producing it
+    # Meta-framing: the trace is the rover's monologue, so it must not narrate producing it.
     r"\b(?:let me|i(?:'| a)?ll) (?:explain|justify|describe why)\b",
-    r"\bexplains? why\b",
+    # --- added after the full path run (job 88327), which the v1-era patterns missed on
+    # ~5% of path traces. The path prompt hands over a route ("the route it should take is
+    # {json}"), so the model refers back to "the planned path" / "the pre-planned
+    # trajectory" — deferring to a route that will not exist at inference. This is the
+    # handed-route family; the choice task, which hands no route, never produces it. The
+    # boundary is deliberately CLEAR-ONLY: bare "intended path" is left out, because it
+    # reads as the rover's own intent rather than a plan it was given.
+    r"\b(?:the|this|that|a|my|entire|its) (?:pre-?planned|planned|designated|prescribed|"
+    r"assigned|predetermined|required|mapped|charted|plotted|computed|calculated|known|"
+    r"given|provided|specified|correct|optimal|reference|suggested|recommended) "
+    r"(?:path|route|trajectory|course|line|way)\b",
+    r"\b(?:follow|following|trust|adhere to|stick to) the "
+    r"(?:pre-?planned|planned|designated|prescribed|given|known)\b",
+    # Two v1-era patterns were too broad and mis-fired on the full run. Bare "explains why"
+    # hit ordinary physical causation ("the cabinet explains why the goal is hidden"); the
+    # meta-framing form it was meant for is already covered above. A bare
+    # question|prompt|task|instruction hit "complete my task" / "this task" in rover voice.
+    # Both are re-added here in anchored forms that keep the giveaway sense only.
+    r"\bthe (?:question|prompt|instructions?)\b",
+    r"\bthe task (?:is|was|says?|states?|asks?|given|requires?)\b",
 ]
 _LEAK = re.compile("|".join(_LEAK_PATTERNS), re.I)
 

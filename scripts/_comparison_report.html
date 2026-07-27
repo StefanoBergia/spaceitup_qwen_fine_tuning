@@ -148,9 +148,9 @@ $('foot').textContent = `Both sweeps train on nested subsets up to ${D.trainFull
   if(!D.complete.choice) missing.push('classification');
   if(!D.complete.reg) missing.push('path regression');
   if(!missing.length) return;
-  $('incomplete').innerHTML = `<div class="callout warn"><b>Incomplete results.</b> The `
-    + `${missing.join(' and ')} sweep${missing.length>1?'s are':' is'} still missing at least one `
-    + `run, so any comparison below covers only what has finished. Re-run this page once the `
+  $('incomplete').innerHTML = `<div class="callout warn"><b>Unpaired results.</b> In the `
+    + `${missing.join(' and ')} sweep${missing.length>1?'s':''}, a training size ran for one model `
+    + `but not the other, so the comparison below is not like-for-like. Re-run this page once the `
     + `job completes.</div>`;
 })();
 
@@ -197,7 +197,7 @@ $('foot').textContent = `Both sweeps train on nested subsets up to ${D.trainFull
   put(r.goal_visibility_accuracy,'goal visibility');
   if(!tied.length && !lost.length) return;
   $('verdict').innerHTML = `<div class="callout"><b>At full data the answer splits by what is being asked.</b>`
-    + (tied.length?`<br><br><b>Indistinguishable</b> (gap not significant at n=500): ${tied.join(', ')}.`:'')
+    + (tied.length?`<br><br><b>Indistinguishable</b> (gap not significant${D.evalN?` at n=${D.evalN}`:''}): ${tied.join(', ')}.`:'')
     + (lost.length?`<br><br><b>${D.aLabel} still ahead</b> (significant): ${lost.join(', ')}.`:'')
     + `<br><br>Geometry converges once there is enough data; the judgements about what is `
     + `<i>occluded</i> are where the smaller model keeps losing.</div>`;

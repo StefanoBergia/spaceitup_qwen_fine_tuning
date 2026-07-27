@@ -17,6 +17,7 @@ reader to infer significance from bar heights.
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -227,17 +228,30 @@ def main() -> None:
             choice_samples = choice_gallery(ch_a, ch_b, choice_eval, dirs,
                                             args.per_side, args.max_image_px, Path(tmp))
 
-    complete = {
-        "choice": all(r["a"] and r["b"] for r in choice["rows"]) and len(choice["rows"]) == len(SIZES),
-        "reg": all(r["a"] and r["b"] for r in reg["rows"]) and len(reg["rows"]) == len(SIZES),
-    }
+    # "Complete" means *paired*: every size that ran has both models, so nothing below
+    # compares one model against a gap. It deliberately does NOT require all of SIZES —
+    # a sweep configured with a single training size (VERSION=_v2 SIZES=train_full) is a
+    # finished experiment, not a half-finished one, and flagging it would both cry wolf
+    # and suppress the verdict section that is the point of the page.
+    def paired(rows):
+        return bool(rows) and all(r["a"] and r["b"] for r in rows)
+
+    complete = {"choice": paired(choice["rows"]), "reg": paired(reg["rows"])}
     for name, ok in complete.items():
         if not ok:
-            print(f"  WARNING: {name} results are incomplete — the page will say so")
+            print(f"  WARNING: {name} runs are unpaired (a size is missing for one model)"
+                  f" — the page will say so")
+        else:
+            sizes = ", ".join(r["label"] for r in (choice if name == "choice" else reg)["rows"])
+            print(f"  {name}: paired across {sizes}")
 
     data = {
         "aLabel": args.a_label, "bLabel": args.b_label,
         "choice": choice, "reg": reg, "complete": complete,
+        # the held-out split actually scored, so the verdict can state its own n instead
+        # of hardcoding the size the first round happened to use
+        "evalN": next((r["a"]["num_samples"] for r in reg["rows"] + choice["rows"]
+                       if r["a"] and r["a"].get("num_samples")), None),
         "choiceMetrics": [{"key": k, "name": n, "better": d} for k, _, n, d in CHOICE_METRICS],
         "regMetrics": [{"key": k, "name": n, "better": d} for k, _, n, d in REG_METRICS],
         "trainFull": full_size,
@@ -248,7 +262,14 @@ def main() -> None:
 
     html = (Path(__file__).parent / "_comparison_report.html").read_text()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(html.replace("/*__DATA__*/null", json.dumps(data)))
+    html = html.replace("/*__DATA__*/null", json.dumps(data))
+    # the <title> must state which run this is in the file itself — it names the published
+    # artifact, and successive dataset rounds are otherwise indistinguishable in a gallery
+    html = re.sub(r"<title>.*?</title>",
+                  f"<title>{args.a_label} vs {args.b_label} on Habitat rover tasks "
+                  f"({full_size:,} train / {data['evalN']:,} eval)</title>",
+                  html, count=1)
+    args.out.write_text(html)
     print(f"wrote {args.out}  ({args.out.stat().st_size / 1024:.0f} KB)")
 
 

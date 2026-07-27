@@ -1,0 +1,451 @@
+<title>How the Cosmos3 trace prompt converged — six revisions</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#008300; --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+  --before:#898781; --band:rgba(12,163,12,.10);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --before:#7a7873; --band:rgba(12,163,12,.16); color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#008300; --before:#7a7873; --band:rgba(12,163,12,.16); color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+h2{font-size:18px;margin:44px 0 4px;letter-spacing:-.005em}
+h2.first{margin-top:0}
+h3{font-size:14px;margin:26px 0 8px}
+.note{color:var(--ink2);font-size:14px;margin:0 0 18px;max-width:74ch}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tr.diag td{color:var(--muted)}
+.scroll{overflow-x:auto}
+.bar{display:inline-block;min-width:74px;padding:1px 7px;border-radius:5px;
+  background-image:linear-gradient(var(--fill),var(--fill));background-repeat:no-repeat;
+  background-size:var(--pct) 100%;border:1px solid var(--ring)}
+.pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;
+  border:1px solid var(--ring)}
+.ok{color:#fff;background:var(--good)}
+.bad{color:#fff;background:var(--crit)}
+.warnp{color:#000;background:var(--warn)}
+.ns{color:var(--ink2);background:var(--plane)}
+th button{font:inherit;font-size:12px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--muted);font-weight:600;background:none;border:0;padding:0;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px}
+th button::after{content:"i";display:inline-grid;place-items:center;width:14px;height:14px;
+  border-radius:50%;border:1px solid var(--axis);font-size:9px;font-style:italic;
+  font-family:Georgia,serif;text-transform:none;letter-spacing:0;line-height:1}
+th button:hover,th button[aria-expanded="true"]{color:var(--ink)}
+th button[aria-expanded="true"]::after{background:var(--s1);border-color:var(--s1);color:#fff}
+th button:focus-visible{outline:2px solid var(--s1);outline-offset:3px;border-radius:3px}
+.infobox{border-left:3px solid var(--s1);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:12px 0 0;font-size:14px;color:var(--ink2);max-width:82ch}
+.infobox h4{margin:0 0 5px;font-size:14px;color:var(--ink)}
+.infobox p{margin:0}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+.tabs button{font:inherit;font-size:13.5px;padding:5px 14px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--ring);background:var(--surface);color:var(--ink2)}
+.tabs button[aria-pressed="true"]{background:var(--s1);border-color:var(--s1);color:#fff}
+.frame{display:grid;grid-template-columns:260px 1fr;gap:20px;background:var(--surface);
+  border:1px solid var(--ring);border-radius:12px;padding:18px;margin:0 0 16px;
+  align-items:start}
+.frame img{width:100%;height:auto;border-radius:8px;display:block;border:1px solid var(--ring)}
+.side{position:sticky;top:18px}
+.fid{font-size:12px;color:var(--muted);margin:8px 0 0;word-break:break-all;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.fmeta{font-size:12.5px;color:var(--ink2);margin:6px 0 0}
+.gt{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+  margin:14px 0 2px}
+.vrow{border-top:1px solid var(--grid);padding:14px 0 4px}
+.vrow:first-child{border-top:none;padding-top:0}
+.vhead{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:0 0 8px}
+.vname{font-weight:640;font-size:13px;font-variant-numeric:tabular-nums}
+.vmeta{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.cell .clab{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+  margin:0 0 5px;display:flex;justify-content:space-between;gap:8px}
+.sent{margin:0;background:var(--plane);border:1px solid var(--ring);border-radius:8px;
+  padding:10px 12px;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:var(--ink2);white-space:pre-wrap;word-break:break-word}
+.got{margin:0;font-size:14px;color:var(--ink2);max-width:70ch}
+.clip{max-height:190px;overflow-y:auto}
+.clip.open{max-height:none;overflow-y:visible}
+.more{font:inherit;font-size:11px;background:none;border:0;padding:0;cursor:pointer;
+  color:var(--s1);text-transform:uppercase;letter-spacing:.06em}
+.more:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+.vtext{font-size:14px;color:var(--ink2);margin:0;max-width:70ch}
+.vtext.missing{color:var(--muted);font-style:italic}
+.why{font-size:13.5px;color:var(--ink2);margin:0 0 10px;max-width:76ch}
+pre{background:var(--plane);border:1px solid var(--ring);border-radius:10px;padding:16px;
+  overflow-x:auto;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  white-space:pre-wrap;word-break:break-word;color:var(--ink2);margin:10px 0 0}
+.pcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;
+  padding:16px 18px;margin:0 0 14px}
+.diff{margin:8px 0 0;border:1px solid var(--ring);border-radius:10px;overflow:hidden;
+  font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.dl{padding:2px 12px;white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
+.dl.add{background:color-mix(in srgb,var(--good) 14%,transparent);color:var(--ink)}
+.dl.del{background:color-mix(in srgb,var(--crit) 13%,transparent);color:var(--ink2);
+  text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--crit) 55%,transparent)}
+.dl.hunk{background:var(--plane);color:var(--muted);text-align:center;letter-spacing:.3em}
+details{margin:10px 0 0}
+summary{cursor:pointer;font-size:13px;color:var(--ink2)}
+summary:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+svg{display:block;overflow:visible}
+.ax{font-size:10px;fill:var(--muted)}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
+  color:var(--muted);font-size:13px;max-width:80ch}
+@media (max-width:900px){.pair{grid-template-columns:1fr}}
+@media (max-width:720px){.frame{grid-template-columns:1fr}.side{position:static}}
+</style>
+
+<div class="wrap">
+  <h2 class="first">Gate metrics per prompt version</h2>
+  <p class="note">One row per revision of the labelling prompt. Select any column heading for
+    what it measures — several of these numbers mean something narrower than their name
+    suggests.</p>
+  <div id="metrics"></div>
+
+  <h2>Every frame: what was sent, and what came back</h2>
+  <p class="note">Each card is one frame with its ground truth, then one row per prompt version:
+    the prompt that was sent on the left, the trace it produced on the right. Earlier versions'
+    sample ids are a strict subset of v6's, so these are literally the same frames re-labelled;
+    a version missing from a card was never run on it, rather than having failed.</p>
+  <div class="tabs" id="frametabs"></div>
+  <div id="frames"></div>
+
+  <h2>What changed between the prompts</h2>
+  <p class="note" id="promptnote"></p>
+  <div class="tabs" id="prompttabs"></div>
+  <div id="prompt"></div>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const el = (t, a = {}) => { const n = document.createElementNS(NS, t);
+  for (const k in a) n.setAttribute(k, a[k]); return n; };
+const h = (t, cls, txt) => { const n = document.createElement(t);
+  if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const TASKS = Object.keys(D.tasks);
+const LATEST = D.promptVersion;
+const [WLO, WHI] = D.targetWords;
+
+const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+
+/* --------------------------------------------------------------- gate metrics */
+/* `invert` marks a metric where zero is the goal (leakage). The bar still fills with what
+   went right, so a clean run reads as full rather than as an empty chip. */
+const rate = (num, den, invert) => {
+  const p = pct(num, den);
+  const good = invert ? num === 0 : p >= 95;
+  const bad = invert ? p > 10 : p < 70;
+  const span = h('span', 'bar', `${num}/${den}`);
+  span.style.setProperty('--pct', `${invert ? 100 - p : p}%`);
+  span.style.setProperty('--fill', good ? 'color-mix(in srgb, var(--good) 18%, transparent)'
+    : bad ? 'color-mix(in srgb, var(--crit) 20%, transparent)'
+    : 'color-mix(in srgb, var(--warn) 22%, transparent)');
+  return span;
+};
+
+/* Axis is capped so the 60-120 band stays legible: v1's 412-word median would otherwise
+   squash every other version into a sliver. Anything past the cap gets an overflow arrow,
+   and the exact median is in the column beside it either way. */
+const WORD_AXIS = 250;
+
+function wordSpread(q) {
+  const W = 168, H = 22, pad = 2, domain = WORD_AXIS;
+  const svg = el('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}` });
+  if (!q) return svg;
+  const x = v => pad + (W - 2 * pad) * Math.min(1, v / domain);
+  svg.append(el('rect', { x: x(WLO), y: 3, width: x(WHI) - x(WLO), height: H - 6,
+    fill: 'var(--band)', rx: 3 }));
+  svg.append(el('line', { x1: x(q.min), x2: x(q.max), y1: H / 2, y2: H / 2,
+    stroke: 'var(--axis)', 'stroke-width': 1 }));
+  svg.append(el('rect', { x: x(q.p25), y: 6, width: Math.max(2, x(q.p75) - x(q.p25)),
+    height: H - 12, fill: 'var(--s1)', opacity: .35, rx: 2 }));
+  svg.append(el('line', { x1: x(q.med), x2: x(q.med), y1: 4, y2: H - 4,
+    stroke: 'var(--s1)', 'stroke-width': 2.5 }));
+  if (q.max > domain)
+    svg.append(el('polygon', { points: `${W - 5},${H / 2 - 4} ${W + 2},${H / 2} ${W - 5},${H / 2 + 4}`,
+      fill: 'var(--axis)' }));
+  return svg;
+}
+
+/* One definition panel per table, opened from the column heading. A click rather than a
+   hover tooltip: these definitions carry the caveats, and they have to be reachable by
+   keyboard and on a touch screen, where hover does not exist. */
+function columnInfo(panel) {
+  const buttons = [];
+  return (def, cell) => {
+    const b = document.createElement('button');
+    b.textContent = def ? def.col : cell;
+    if (!def) { b.disabled = true; return b; }
+    b.setAttribute('aria-expanded', 'false');
+    buttons.push(b);
+    b.onclick = () => {
+      const open = b.getAttribute('aria-expanded') === 'true';
+      for (const other of buttons) other.setAttribute('aria-expanded', 'false');
+      panel.textContent = '';
+      if (open) return;                       // second click on the same column closes it
+      b.setAttribute('aria-expanded', 'true');
+      const box = h('div', 'infobox');
+      box.append(h('h4', null, def.title));
+      const p = h('p'); p.innerHTML = def.body; box.append(p);
+      panel.append(box);
+    };
+    return b;
+  };
+}
+
+function metrics() {
+  const box = $('metrics');
+  const defs = Object.fromEntries(D.metricDefs.map(d => [d.col, d]));
+  for (const task of TASKS) {
+    const t = D.tasks[task];
+    box.append(h('h3', null, `${t.label} — ${t.split}`));
+    const wrapper = h('div', 'scroll card');
+    const table = document.createElement('table');
+    const head = table.createTHead().insertRow();
+    const panel = h('div');
+    const mkInfo = columnInfo(panel);
+    for (const c of ['Version', 'n', 'Trace', 'Verified', 'Leak (now)', 'Leak (as run)',
+                     'Truncated', 'Words · axis 0–250', 'Median']) {
+      const th = h('th');
+      th.append(mkInfo(defs[c] || defs[c.split(' ·')[0]], c));
+      head.append(th);
+    }
+    const body = table.createTBody();
+    for (const v of t.versions) {
+      const tr = body.insertRow();
+      if (v.diagnostic) tr.className = 'diag';
+      const name = h('td', null, '');
+      name.append(h('span', 'vname', v.version));
+      if (v.diagnostic) name.append(h('span', 'vmeta', '  diagnostic re-run'));
+      else if (v.version === LATEST) name.append(h('span', 'vmeta', '  ← in use'));
+      tr.append(name);
+      tr.insertCell().textContent = v.n;
+      tr.insertCell().append(rate(v.traces, v.n));
+      tr.insertCell().append(rate(v.match, v.n));
+      tr.insertCell().append(rate(v.leakNow, v.n, true));
+      const stored = tr.insertCell();
+      stored.append(h('span', 'vmeta', `${v.leakStored}/${v.n}`));
+      const trunc = tr.insertCell();
+      trunc.append(h('span', v.length ? 'pill warnp' : 'vmeta', v.length ? `${v.length}` : '0'));
+      tr.insertCell().append(wordSpread(v.words));
+      tr.insertCell().textContent = v.words ? v.words.med : '—';
+    }
+    wrapper.append(table);
+    box.append(wrapper);
+    box.append(panel);
+  }
+}
+
+/* ------------------------------------------------------------------- frames */
+/* One task selection for the whole page. Two independent toggles let you read the path
+   frames while the prompt section below still showed the choice prompt — and the choice
+   prompt is the one that talks about candidates 0/1/2, so the mismatch read as the path
+   prompt describing three paths. Every tab bar registers here and they move together. */
+let activeTask = TASKS[0], failuresOnly = false;
+const taskBars = [];
+
+function setTask(task) {
+  activeTask = task;
+  for (const bar of taskBars)
+    for (const b of bar.children)
+      if (b.dataset.task) b.setAttribute('aria-pressed', b.dataset.task === task);
+  renderFrames();
+  renderPrompts();
+}
+
+/* Above this many characters a cell opens clipped with an expand toggle. Set to roughly
+   what fills the 190px window in either column, so the toggle never appears on a cell that
+   already fits and does nothing when pressed. Prompts are always past it; traces usually
+   are not, so a normal 95-word trace shows in full and only the runaway ones — v1's 412
+   words — get a toggle. Below the threshold no max-height is applied at all, so a narrow
+   viewport can never clip a cell that has no way to expand. */
+const CLIP_CHARS = 650;
+
+function clipCell(label, text, cls, missing) {
+  const cell = h('div', 'cell');
+  const lab = h('div', 'clab');
+  lab.append(h('span', null, label));
+  if (!text) {
+    cell.append(lab, h('p', 'vtext missing', missing));
+    return cell;
+  }
+  const body = h('div', cls, text);
+  if (text.length > CLIP_CHARS) {
+    body.className = cls + ' clip';
+    const more = h('button', 'more', 'expand');
+    more.onclick = () => {
+      const open = body.className.includes('open');
+      body.className = cls + (open ? ' clip' : ' clip open');
+      more.textContent = open ? 'expand' : 'collapse';
+    };
+    lab.append(more);
+  }
+  cell.append(lab, body);
+  return cell;
+}
+
+function hasFailure(f) {
+  return Object.values(f.traces).some(v => !v.trace || v.leaks.length || !v.match || v.error
+    || (v.finish && v.finish !== 'stop'));
+}
+
+function renderFrames() {
+  const box = $('frames');
+  box.textContent = '';
+  const t = D.tasks[activeTask];
+  const shown = t.frames.filter(f => !failuresOnly || hasFailure(f));
+  if (!shown.length) box.append(h('p', 'note', 'No frames match this filter.'));
+  for (const f of shown) {
+    const card = h('div', 'frame');
+    const left = h('div', 'side');
+    if (f.img) { const img = new Image(); img.src = f.img; img.alt = f.id; left.append(img); }
+    left.append(h('p', 'fid', f.id));
+    left.append(h('p', 'gt', 'Ground truth'));
+    left.append(h('p', 'fmeta', activeTask === 'choice'
+      ? `candidate ${f.meta.label} of ${f.meta.n_candidates} is traversable `
+        + `· routes ${(f.meta.kinds || []).join(', ')} · margin ${f.meta.margin}`
+      : `${f.meta.path.length} waypoints · `
+        + `${f.meta.path.filter(p => !p[2]).length} occluded · `
+        + `goal ${f.meta.goal[2] ? 'visible' : 'hidden'}`));
+    card.append(left);
+
+    const right = h('div');
+    for (const v of t.versions) {
+      const r = f.traces[v.version];
+      if (!r) continue;
+      const row = h('div', 'vrow');
+      const head = h('div', 'vhead');
+      head.append(h('span', 'vname', v.version));
+      head.append(h('span', 'vmeta', `${r.words} words`
+        + (r.scratch ? ` · ${r.scratch} scratch` : '')));
+      if (r.leaks.length) head.append(h('span', 'pill bad', `leak: ${r.leaks.join(', ')}`));
+      if (!r.match) head.append(h('span', 'pill ns',
+        r.verifiable ? 'answer mismatch' : 'no JSON — unverified'));
+      if (r.finish && r.finish !== 'stop') head.append(h('span', 'pill warnp', r.finish));
+      row.append(head);
+
+      const pair = h('div', 'pair');
+      pair.append(
+        clipCell('Prompt sent', r.prompt, 'sent',
+                 'prompt not recovered for this version'),
+        clipCell('Trace returned', r.trace, 'got',
+                 r.error || 'no trace recovered'));
+      row.append(pair);
+      right.append(row);
+    }
+    card.append(right);
+    box.append(card);
+  }
+}
+
+/* Any number of task bars, all driving the same selection. */
+function taskTabs(id, withCount) {
+  const box = $(id);
+  for (const task of TASKS) {
+    const b = h('button', null, D.tasks[task].label
+      + (withCount ? ` (${D.tasks[task].frames.length})` : ''));
+    b.dataset.task = task;
+    b.setAttribute('aria-pressed', task === activeTask);
+    b.onclick = () => setTask(task);
+    box.append(b);
+  }
+  taskBars.push(box);
+  return box;
+}
+
+function frameTabs() {
+  const box = taskTabs('frametabs', true);
+  const f = h('button', null, 'Only frames with a failure');
+  f.setAttribute('aria-pressed', 'false');
+  f.dataset.filter = '1';
+  f.onclick = () => {
+    failuresOnly = !failuresOnly;
+    f.setAttribute('aria-pressed', String(failuresOnly));
+    renderFrames();
+  };
+  box.append(f);
+}
+
+/* ------------------------------------------------------------------- prompt */
+
+function renderPrompts() {
+  const box = $('prompt');
+  box.textContent = '';
+  for (const p of D.prompts[activeTask]) {
+    const card = h('div', 'pcard');
+    const head = h('div', 'vhead');
+    head.append(h('span', 'vname', p.version));
+    // Name the task on every card: these prompts differ completely between the two, and
+    // scrolling past the toggle used to leave you guessing which one you were reading.
+    head.append(h('span', 'vmeta', `· ${D.tasks[activeTask].label}`));
+    if (p.text == null) {
+      head.append(h('span', 'vmeta', '· not recovered — this run predates the transcript'));
+      card.append(head); box.append(card); continue;
+    }
+    head.append(h('span', 'vmeta', `· ${p.words} words`));
+    if (p.from) head.append(h('span', 'vmeta', `· diff vs ${p.from}`));
+    else head.append(h('span', 'vmeta', '· first version on this task'));
+    card.append(head);
+
+    if (p.why) { const w = h('p', 'why'); w.innerHTML = p.why; card.append(w); }
+
+    if (p.diff && p.diff.length) {
+      const d = h('div', 'diff');
+      for (const l of p.diff) d.append(h('div', 'dl ' + l.op, l.op === 'hunk' ? '⋯' : l.t || ' '));
+      card.append(d);
+    } else if (p.from) {
+      card.append(h('p', 'vtext missing', `identical to ${p.from} on this task`));
+    }
+
+    const det = document.createElement('details');
+    det.append(h('summary', null, `Full ${p.version} prompt`));
+    det.append(h('pre', null, p.text));
+    card.append(det);
+    box.append(card);
+  }
+}
+
+function prompts() {
+  const recovered = TASKS.some(t => D.prompts[t].some(p => p.text && p.version !== LATEST));
+  $('promptnote').textContent = recovered
+    ? `The literal prompt behind every run, recovered from the session transcript by replaying `
+      + `each edit to src/rover_vlm/traces.py in order — the repo only ever held ${LATEST}. The `
+      + `replay reproduces the current file byte for byte, and the ${LATEST} entry is checked `
+      + `against what the code builds today, so these are the prompts that actually ran rather `
+      + `than a reconstruction of them. The two tasks have entirely separate prompts — only `
+      + `the leakage rules and the reply format are shared — so this selector follows the one `
+      + `above it.`
+    : `Rendered live from src/rover_vlm/traces.py. Earlier versions are not shown: run `
+      + `scripts/recover_trace_prompts.py to recover them from the session transcript.`;
+  taskTabs('prompttabs', false);
+  renderPrompts();
+}
+
+metrics(); frameTabs(); renderFrames(); prompts();
+$('foot').textContent = `Generated by scripts/visualize_traces.py from outputs/traces/*.jsonl. `
+  + `Traces come from nvidia/Cosmos3-Nano served as a reasoner-only vLLM endpoint; they are `
+  + `labels for fine-tuning, not model predictions, and none of them was written by hand. `
+  + `Each prompt is re-rendered for its own frame through that version's prompt code, so the `
+  + `ground-truth values shown are the ones that sample was actually sent.`;
+</script>

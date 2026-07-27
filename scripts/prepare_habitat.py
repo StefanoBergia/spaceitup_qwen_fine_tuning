@@ -3,6 +3,8 @@
 Login node (CPU-only):
     uv run scripts/prepare_habitat.py
     uv run scripts/prepare_habitat.py --limit 200   # quick subset for testing
+    uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v2 \
+        --eval-size 1000 --train-sizes ""           # bigger eval, train_full only
 
 Reads every <root>/*/samples/*/ dir, keeps correct-path-in-FOV samples, and writes
 fixed-seed nested splits to data/prepared_habitat/. Images are referenced by absolute
@@ -23,11 +25,19 @@ TRAIN_SIZES = [500, 1000, 2000]
 SEED = 42
 
 
+def parse_train_sizes(spec: str) -> list[int]:
+    """"500,1000" -> [500, 1000]; "" -> [] (train_full only, always emitted)."""
+    return [int(s) for s in spec.replace(",", " ").split()]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
     p.add_argument("--out-dir", type=Path, default=OUT_DIR)
     p.add_argument("--limit", type=int, default=None, help="cap sample dirs scanned (testing)")
+    p.add_argument("--eval-size", type=int, default=EVAL_SIZE, help="held-out eval split size")
+    p.add_argument("--train-sizes", type=parse_train_sizes, default=list(TRAIN_SIZES),
+                   help="comma/space-separated intermediate subset sizes; empty for train_full only")
     args = p.parse_args()
 
     sample_dirs = sorted(args.dataset_root.glob("*/samples/*/"))
@@ -50,10 +60,10 @@ def main() -> None:
             print(f"  {i + 1}/{len(sample_dirs)} ({len(records)} kept, {skipped} skipped)")
 
     print(f"kept {len(records)} records, skipped {skipped}")
-    if len(records) <= EVAL_SIZE:
-        raise SystemExit(f"only {len(records)} records — need > {EVAL_SIZE} for an eval split")
+    if len(records) <= args.eval_size:
+        raise SystemExit(f"only {len(records)} records — need > {args.eval_size} for an eval split")
 
-    splits = make_splits(records, EVAL_SIZE, TRAIN_SIZES, SEED)
+    splits = make_splits(records, args.eval_size, args.train_sizes, SEED)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for name, recs in splits.items():
         (args.out_dir / f"{name}.json").write_text(json.dumps(recs, indent=1))

@@ -87,8 +87,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);
 </style>
 
 <div class="wrap">
-  <h1>Can a 2B vision model pick the traversable path?</h1>
-  <p class="sub">Qwen3.5-2B + LoRA on Habitat rover frames — candidates drawn on the image, model answers with an index. <span id="nEval"></span> held-out frames.</p>
+  <h1 id="h1">Can a vision model pick the traversable path?</h1>
+  <p class="sub"><span id="modelName"></span> + LoRA on Habitat rover frames — candidates drawn on the image, model answers with an index. <span id="nEval"></span> held-out frames.</p>
 
   <div class="tiles" id="tiles"></div>
 
@@ -148,6 +148,10 @@ const $ = id => document.getElementById(id);
 const NS = 'http://www.w3.org/2000/svg';
 const el = (t,a={}) => { const n=document.createElementNS(NS,t);
   for(const k in a) n.setAttribute(k,a[k]); return n; };
+
+/* name the base model everywhere it is claimed, from the eval tree's own model_id */
+$('modelName').textContent = D.model;
+$('h1').textContent = `Can ${D.model} pick the traversable path?`;
 
 /* ---- tooltip ---- */
 const tip=$('tip');
