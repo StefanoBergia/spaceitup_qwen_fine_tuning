@@ -742,21 +742,28 @@ uv run scripts/visualize_traced_comparison.py   # -> outputs/eval_habitat_v2_tra
 ```
 
 One self-contained HTML page covering both the **2B-vs-0.8B** comparison and **per-sample
-reasoning inspection**, built from the two traced eval trees plus `eval.json` (for the
-`id → image` lookup). It shows: headline tiles (traced vs each size's own base), a metrics
-table with the four rows {2B base, 2B traced, 0.8B base, 0.8B traced} and a hover-definition on
-every column, a 2B-vs-0.8B **paired-bootstrap** line on waypoint error (over frames both
-adapters parsed), and a gallery — each frame with both sizes' predicted paths over the
-ground-truth corridor, next to **the `<think>` reasoning each size generated**, its waypoints,
-and its per-sample metrics. Frames are grouped into easy/medium/hard terciles by the 2B traced
-error. A new script because the `habitat_train_full_traced` tag is off the size-scaling curve
-(`compare_evals.py` skips it) and no existing report surfaces the generated reasoning; it reuses
-`rover_vlm.overlay` (path/goal drawing) and `rover_vlm.compare.paired_bootstrap`.
+reasoning inspection**, built from the traced eval trees, the **plain (no-reasoning) LoRA**
+trees (`outputs/eval_habitat_v2{,_0.8b}`), and `eval.json` (for the `id → image` lookup). It
+shows: headline tiles (traced vs plain per size), a metrics table with six rows —
+**base / plain SFT / traced** for each size — and a hover-definition on every column, paired-
+bootstrap **tests** (plain-vs-traced per size, then 2B-vs-0.8B among the traced), and a gallery
+— each frame with both sizes' predicted paths over the ground-truth corridor, next to **the
+`<think>` reasoning each size generated**, its waypoints, its per-sample metrics, and the plain
+model's error on that same frame. Frames are grouped into easy/medium/hard terciles by the 2B
+traced error. A new script because the `habitat_train_full_traced` tag is off the size-scaling
+curve (`compare_evals.py` skips it) and no existing report surfaces the generated reasoning; it
+reuses `rover_vlm.overlay` (path/goal drawing) and `rover_vlm.compare.paired_bootstrap`.
 
-Measured (job 88716): 2B traced median waypoint error **0.069** (base 0.465), 0.8B traced
-**0.082** (base 0.858); parse rate **100% / 99.9%** (base 62.6% / 71.9%). The paired test finds
-2B significantly better than 0.8B, but only marginally (diff ≈ −0.009, 95% CI excludes 0) — the
-sizes converge, echoing the plain-regression comparison.
+**Key result (job 88716): the reasoning trace *hurt* accuracy.** The honest baseline is plain
+SFT, not zero-shot base. Traced beats base hugely (2B median waypoint error 0.069 vs 0.465), but
+loses to plain SFT on the same eval split — median waypoint error plain **0.044** vs traced
+0.069 (2B), plain **0.046** vs 0.082 (0.8B); goal-visibility accuracy plain 0.867 vs traced
+0.768 (2B). Paired bootstrap on mean waypoint error confirms it: plain significantly better for
+both sizes (2B diff −0.024, CI [−0.032, −0.016]; 0.8B diff −0.027, CI [−0.036, −0.019]), and on
+Fréchet and per-waypoint visibility too. Not a data-size artifact (7,768 traced vs 8,140 plain,
+4.6% fewer, can't explain a ~25% error rise) — the likely cause is the inference-time reasoning
+adding autoregressive drift on a pure-geometry output. Among the traced adapters, 2B still edges
+0.8B (diff −0.009, CI excludes 0) — the sizes converge, echoing the plain-regression rounds.
 
 ## Visualizations — where each one lives
 

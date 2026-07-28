@@ -13,6 +13,11 @@ comparison of the two model sizes AND it surfaces the model's generated <think> 
 each gallery card shows the frame with both models' predicted paths over the ground truth,
 next to the reasoning each size produced, its waypoints, and its per-sample metrics.
 
+It also carries the **plain (no-reasoning) LoRA** as a baseline in every comparison, because
+the decisive question is not traced-vs-zero-shot-base but traced-vs-plain-SFT: on this task
+the plain fine-tune is significantly BETTER, so the report shows base / plain / traced side by
+side, tests plain-vs-traced per size, and annotates each gallery frame with the plain error.
+
 Why a new script: the tag `habitat_train_full_traced` is not on the size-scaling curve, so
 compare_evals.py skips it and visualize_habitat_results.py (which keys off `...train_full`)
 does not pick it up; and no existing report renders the `generated` reasoning text.
@@ -29,9 +34,12 @@ from rover_vlm.overlay import embed_jpeg, render_pair
 REPO_ROOT = Path(__file__).resolve().parent.parent
 A_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_traced"
 B_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_traced_0.8b"
+A_PLAIN_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2"        # plain (no-reasoning) LoRA, 2B
+B_PLAIN_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_0.8b"   # plain (no-reasoning) LoRA, 0.8B
 EVAL_FILE = REPO_ROOT / "data" / "prepared_habitat_v2" / "eval.json"
 
 BASE_TAG = "habitat_base"
+PLAIN_TAG = "habitat_train_full"          # plain answer-only LoRA on the same v2 split
 TRACED_TAG = "habitat_train_full_traced"
 
 COLOR_A, COLOR_B = (42, 120, 214), (230, 97, 0)  # 2B blue, 0.8B orange
@@ -78,13 +86,35 @@ def load_run(eval_dir, tag):
     return metrics, preds
 
 
-def build_table(a_label, b_label, a_base, a_traced, b_base, b_traced):
-    """Four rows — {A base, A traced, B base, B traced} — one cell per TABLE_COLS key."""
+VARIANTS = ("base", "plain", "traced")
+
+
+def build_table(a_label, b_label, a_metrics, b_metrics):
+    """Six rows — each model's {base, plain, traced} — one cell per TABLE_COLS key.
+
+    `*_metrics` is a dict {variant: metrics.json dict or None}. base = zero-shot,
+    plain = the no-reasoning LoRA, traced = the reasoning LoRA."""
     def row(model, variant, metrics):
         return {"model": model, "variant": variant, "isBase": variant == "base",
                 **{k: (metrics.get(k) if metrics else None) for k, _, _, _ in TABLE_COLS}}
-    return [row(a_label, "base", a_base), row(a_label, "traced", a_traced),
-            row(b_label, "base", b_base), row(b_label, "traced", b_traced)]
+    rows = []
+    for model, mset in ((a_label, a_metrics), (b_label, b_metrics)):
+        rows += [row(model, v, mset.get(v)) for v in VARIANTS]
+    return rows
+
+
+def paired_test(title, a_pred, b_pred, a_name, b_name, lower_better=True):
+    """One plain-language paired-bootstrap verdict on mean waypoint error, or None if the
+    two runs share no jointly-parsed frames. `lower_better` flips which side a negative
+    (a-b) difference favours; for error, lower a means a wins."""
+    s = paired_bootstrap(a_pred, b_pred, "mean_point_error")
+    if not s:
+        return None
+    a_wins = (s["diff"] < 0) if lower_better else (s["diff"] > 0)
+    return {"title": title, "aName": a_name, "bName": b_name,
+            "a": s["a"], "b": s["b"], "diff": s["diff"], "lo": s["lo"], "hi": s["hi"],
+            "n": s["n"], "significant": s["lo"] > 0 or s["hi"] < 0,
+            "better": a_name if a_wins else b_name}
 
 
 def _pred_summary(rec):
@@ -105,17 +135,26 @@ def _pred_summary(rec):
     }
 
 
-def build_gallery(a_traced, b_traced, id_to_image, per_bucket, max_px):
-    """Rank eval ids into easy/medium/hard terciles by the A (2B) traced waypoint error, pick
-    `per_bucket` from each, and render both models' reasoning + paths for the same frame."""
+def _plain_err(preds, sid):
+    r = preds.get(sid)
+    if r and r.get("metrics") and "mean_point_error" in r["metrics"]:
+        return round(r["metrics"]["mean_point_error"], 3)
+    return None
+
+
+def build_gallery(a_traced, b_traced, a_plain, b_plain, id_to_image, a_label, per_bucket, max_px):
+    """Rank eval ids into easy/medium/hard terciles by the A traced waypoint error, pick
+    `per_bucket` from each, and render both models' reasoning + paths for the same frame. Each
+    model's per-sample PLAIN (no-reasoning) error is attached so the card shows, frame by
+    frame, whether reasoning helped or hurt."""
     scored = sorted((r["metrics"]["mean_point_error"], sid)
                     for sid, r in a_traced.items()
                     if r.get("metrics") and sid in id_to_image)
     n = len(scored)
     third = n // 3
-    buckets = [("easy", "Easy — lowest 2B waypoint error", scored[:third]),
+    buckets = [("easy", f"Easy — lowest {a_label} traced waypoint error", scored[:third]),
                ("medium", "Medium", scored[third:2 * third]),
-               ("hard", "Hard — highest 2B waypoint error", scored[2 * third:])]
+               ("hard", f"Hard — highest {a_label} traced waypoint error", scored[2 * third:])]
 
     out = []
     for key, title, pool in buckets:
@@ -132,12 +171,16 @@ def build_gallery(a_traced, b_traced, id_to_image, per_bucket, max_px):
                               ar.get("parsed") if ar else None,
                               br.get("parsed") if br else None,
                               COLOR_A, COLOR_B)
+            sa, sb = _pred_summary(ar), _pred_summary(br)
+            if sa:
+                sa["plainErr"] = _plain_err(a_plain, sid)
+            if sb:
+                sb["plainErr"] = _plain_err(b_plain, sid)
             out.append({
                 "id": sid, "bucket": key, "bucketTitle": title,
                 "img": embed_jpeg(img, max_px * 2),
                 "gtGoalVisible": bool(gt and gt.get("goal") and gt["goal"][2] == 1),
-                "a": _pred_summary(ar),
-                "b": _pred_summary(br),
+                "a": sa, "b": sb,
             })
     return out
 
@@ -146,6 +189,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--a-dir", type=Path, default=A_DIR)
     p.add_argument("--b-dir", type=Path, default=B_DIR)
+    p.add_argument("--a-plain-dir", type=Path, default=A_PLAIN_DIR,
+                   help="plain (no-reasoning) LoRA eval tree for model A")
+    p.add_argument("--b-plain-dir", type=Path, default=B_PLAIN_DIR)
     p.add_argument("--a-label", default="2B")
     p.add_argument("--b-label", default="0.8B")
     p.add_argument("--eval-file", type=Path, default=EVAL_FILE)
@@ -158,16 +204,31 @@ def main() -> None:
     a_traced_m, a_traced_p = load_run(args.a_dir, TRACED_TAG)
     b_base_m, _ = load_run(args.b_dir, BASE_TAG)
     b_traced_m, b_traced_p = load_run(args.b_dir, TRACED_TAG)
+    a_plain_m, a_plain_p = load_run(args.a_plain_dir, PLAIN_TAG)
+    b_plain_m, b_plain_p = load_run(args.b_plain_dir, PLAIN_TAG)
     if not (a_traced_m and b_traced_m):
         raise SystemExit(f"missing traced metrics under {args.a_dir} / {args.b_dir} — "
                          "run slurm/train_traced_both.sbatch first")
+    for label, m, d in ((args.a_label, a_plain_m, args.a_plain_dir),
+                        (args.b_label, b_plain_m, args.b_plain_dir)):
+        if m is None:
+            print(f"  note: no plain (no-reasoning) run for {label} under {d} — "
+                  "its baseline column and plain-vs-traced test will be blank")
 
     eval_records = json.loads(args.eval_file.read_text())
     id_to_image = {r["id"]: r["image"][0] for r in eval_records}
 
-    # 2B-vs-0.8B paired comparison on the continuous waypoint error, over ids BOTH traced
-    # adapters parsed — the honest way to test whether the size gap is real.
-    sig = paired_bootstrap(a_traced_p, b_traced_p, "mean_point_error")
+    # The comparisons that matter, each a paired bootstrap on waypoint error over jointly
+    # parsed frames. The headline is reasoning-vs-plain PER SIZE (does the trace help?);
+    # then the cross-size check on the traced adapters.
+    tests = [t for t in (
+        paired_test(f"{args.a_label}: does reasoning help? (plain SFT vs traced)",
+                    a_plain_p, a_traced_p, "plain SFT", "traced"),
+        paired_test(f"{args.b_label}: does reasoning help? (plain SFT vs traced)",
+                    b_plain_p, b_traced_p, "plain SFT", "traced"),
+        paired_test(f"Model size, both traced ({args.a_label} vs {args.b_label})",
+                    a_traced_p, b_traced_p, args.a_label, args.b_label),
+    ) if t]
 
     data = {
         "aLabel": args.a_label, "bLabel": args.b_label,
@@ -176,10 +237,11 @@ def main() -> None:
         "tableCols": [{"key": k, "name": nm, "def": d, "better": bt}
                       for k, nm, d, bt in TABLE_COLS],
         "table": build_table(args.a_label, args.b_label,
-                             a_base_m, a_traced_m, b_base_m, b_traced_m),
-        "sig": sig,
-        "gallery": build_gallery(a_traced_p, b_traced_p, id_to_image,
-                                 args.per_bucket, args.max_image_px),
+                             {"base": a_base_m, "plain": a_plain_m, "traced": a_traced_m},
+                             {"base": b_base_m, "plain": b_plain_m, "traced": b_traced_m}),
+        "tests": tests,
+        "gallery": build_gallery(a_traced_p, b_traced_p, a_plain_p, b_plain_p,
+                                 id_to_image, args.a_label, args.per_bucket, args.max_image_px),
     }
 
     out = args.out or (args.a_dir / "traced_comparison.html")

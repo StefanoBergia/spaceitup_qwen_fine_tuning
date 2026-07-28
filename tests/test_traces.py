@@ -545,17 +545,31 @@ def test_reasoning_and_answer_splits_on_first_close_tag():
     assert r == "think" and a == "ans </think> more"
 
 
-def test_build_table_four_rows_and_keys():
+def test_build_table_six_rows_base_plain_traced():
     tv = _traced_viz()
     m = {k: 0.5 for k, _, _, _ in tv.TABLE_COLS}
-    rows = tv.build_table("2B", "0.8B", m, m, m, m)
+    rows = tv.build_table("2B", "0.8B",
+                          {"base": m, "plain": m, "traced": m},
+                          {"base": m, "plain": m, "traced": m})
     assert [(r["model"], r["variant"], r["isBase"]) for r in rows] == [
-        ("2B", "base", True), ("2B", "traced", False),
-        ("0.8B", "base", True), ("0.8B", "traced", False)]
+        ("2B", "base", True), ("2B", "plain", False), ("2B", "traced", False),
+        ("0.8B", "base", True), ("0.8B", "plain", False), ("0.8B", "traced", False)]
     assert all(k in rows[0] for k, _, _, _ in tv.TABLE_COLS)
-    # a missing metric dict yields None cells rather than raising
-    none_row = tv.build_table("2B", "0.8B", None, m, m, m)[0]
-    assert none_row["parse_rate"] is None
+    # a missing variant (e.g. no plain run) yields None cells rather than raising
+    rows2 = tv.build_table("2B", "0.8B",
+                           {"base": m, "plain": None, "traced": m}, {"base": m, "plain": m, "traced": m})
+    plain2b = next(r for r in rows2 if r["model"] == "2B" and r["variant"] == "plain")
+    assert plain2b["parse_rate"] is None
+
+
+def test_paired_test_direction_and_significance():
+    tv = _traced_viz()
+    # 'a' has uniformly lower error than 'b' -> a is better, and the CI excludes 0
+    a = {f"s{i}": {"metrics": {"mean_point_error": 0.10}} for i in range(30)}
+    b = {f"s{i}": {"metrics": {"mean_point_error": 0.30}} for i in range(30)}
+    t = tv.paired_test("t", a, b, "plain", "traced")
+    assert t["better"] == "plain" and t["significant"] is True and t["diff"] < 0
+    assert tv.paired_test("t", {}, b, "plain", "traced") is None   # no shared frames
 
 
 def test_pred_summary_extracts_reasoning_or_none():
@@ -600,16 +614,21 @@ def test_generator_end_to_end_and_escapes_script(tmp_path, monkeypatch):
     b_recs = [rec(0, 0.06, "b easy</think>{}"), rec(1, 0.25, "b mid</think>{}"),
               rec(2, 0.55, "b hard</think>{}")]
     a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    a_plain, b_plain = tmp_path / "ap", tmp_path / "bp"
     _write_run(a_dir, "habitat_base", "Qwen/Qwen3.5-2B", 0.4, a_recs)
     _write_run(a_dir, "habitat_train_full_traced", "Qwen/Qwen3.5-2B", 0.05, a_recs)
     _write_run(b_dir, "habitat_base", "Qwen/Qwen3.5-0.8B", 0.8, b_recs)
     _write_run(b_dir, "habitat_train_full_traced", "Qwen/Qwen3.5-0.8B", 0.06, b_recs)
+    # plain (no-reasoning) runs live in their own trees under the PLAIN_TAG
+    _write_run(a_plain, "habitat_train_full", "Qwen/Qwen3.5-2B", 0.03, a_recs)
+    _write_run(b_plain, "habitat_train_full", "Qwen/Qwen3.5-0.8B", 0.04, b_recs)
 
     eval_file = tmp_path / "eval.json"
     eval_file.write_text(json.dumps([{"id": f"s{i}", "image": [str(img)]} for i in range(3)]))
     out = tmp_path / "report.html"
 
     monkeypatch.setattr(sys, "argv", ["x", "--a-dir", str(a_dir), "--b-dir", str(b_dir),
+                                      "--a-plain-dir", str(a_plain), "--b-plain-dir", str(b_plain),
                                       "--eval-file", str(eval_file), "--out", str(out),
                                       "--per-bucket", "1"])
     tv.main()
@@ -618,3 +637,9 @@ def test_generator_end_to_end_and_escapes_script(tmp_path, monkeypatch):
     assert "const D = {" in html
     assert html.count("</script>") == 1            # only the real closing tag
     assert "<\\/script>" in html                   # the model's </script> was escaped
+    # the plain baseline made it into the payload: 6 table rows and a per-card plain error
+    payload = re.search(r"const D = (\{.*?\});\nconst \$", html, re.S).group(1).replace("<\\/", "</")
+    d = json.loads(payload)
+    assert len(d["table"]) == 6 and {r["variant"] for r in d["table"]} == {"base", "plain", "traced"}
+    assert any(c["a"] and c["a"].get("plainErr") is not None for c in d["gallery"])
+    assert any("plain SFT vs traced" in t["title"] for t in d["tests"])
