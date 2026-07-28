@@ -765,6 +765,28 @@ Fréchet and per-waypoint visibility too. Not a data-size artifact (7,768 traced
 adding autoregressive drift on a pure-geometry output. Among the traced adapters, 2B still edges
 0.8B (diff −0.009, CI excludes 0) — the sizes converge, echoing the plain-regression rounds.
 
+##### Is the reasoning itself any good? (`src/rover_vlm/trace_eval.py` + `scripts/judge_traces.py`)
+
+The metrics above score the *answer*. To score the *reasoning*, two tiers — because "reasoning
+accuracy" is not one thing and lexical overlap is a weak proxy for it:
+
+- **Cheap (CPU, in the report already).** `trace_eval.py`: **ROUGE-L** of each student trace vs
+  the Cosmos3 teacher trace for the same eval frame (we labelled the eval split too —
+  `outputs/traces_full/path_v6_eval.filtered.jsonl`, 953 refs) = distillation fidelity; and an
+  **occlusion-grounding** heuristic — does the trace's hidden/visible language match the GT
+  goal-visibility flag (balanced accuracy). Both caveated in the report: the teacher saw the
+  answer while the student didn't, so ROUGE means "reasons like the teacher", not "is correct".
+  Result: ROUGE-L ≈ **0.34**, occlusion grounding ≈ **0.51** (chance), and ROUGE↔waypoint-error
+  correlation ≈ **−0.10** — i.e. the trace is largely **decorative** on this task.
+- **Trustworthy (GPU, ready to launch).** `sbatch slurm/judge_traces.sbatch` runs a VLM-as-judge
+  (`nvidia/Cosmos-Reason2-8B` — a different model from both teacher and student, cached,
+  transformers, no vLLM) scoring each trace *reference-free against the image itself* 1–5 on
+  faithfulness / occlusion / coherence + a hallucinated-object list. Writes
+  `<eval-dir>/<tag>/judge_metrics.json`; resumable. Re-running `visualize_traced_comparison.py`
+  after the job picks the scores up automatically and adds a judge row to the report. Caveat: the
+  judge is Qwen-derived like the student, so `--model-id`/`JUDGE=` can swap a non-Qwen judge to
+  rule out self-preference.
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,

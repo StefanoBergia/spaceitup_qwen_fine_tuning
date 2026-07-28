@@ -28,8 +28,16 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
+
 from rover_vlm.compare import paired_bootstrap
 from rover_vlm.overlay import embed_jpeg, render_pair
+from rover_vlm.trace_eval import (
+    aggregate_trace_quality,
+    claims_occlusion,
+    goal_occluded,
+    rouge_l,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 A_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_traced"
@@ -37,6 +45,8 @@ B_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_traced_0.8b"
 A_PLAIN_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2"        # plain (no-reasoning) LoRA, 2B
 B_PLAIN_DIR = REPO_ROOT / "outputs" / "eval_habitat_v2_0.8b"   # plain (no-reasoning) LoRA, 0.8B
 EVAL_FILE = REPO_ROOT / "data" / "prepared_habitat_v2" / "eval.json"
+# Cosmos3 teacher traces for the eval frames — the reference for distillation fidelity.
+REF_TRACES = REPO_ROOT / "outputs" / "traces_full" / "path_v6_eval.filtered.jsonl"
 
 BASE_TAG = "habitat_base"
 PLAIN_TAG = "habitat_train_full"          # plain answer-only LoRA on the same v2 split
@@ -84,6 +94,48 @@ def load_run(eval_dir, tag):
     if ppath.exists():
         preds = {r["id"]: r for r in json.loads(ppath.read_text())}
     return metrics, preds
+
+
+def load_judge(eval_dir, tag):
+    """VLM-judge aggregate for this run, if scripts/judge_traces.py has been run; else None."""
+    p = eval_dir / tag / "judge_metrics.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def load_ref_traces(path):
+    """{id: Cosmos3 teacher trace} from a filtered labelling file, kept rows only."""
+    out = {}
+    if path and Path(path).exists():
+        for line in Path(path).open():
+            if line.strip():
+                r = json.loads(line)
+                if r.get("keep") and r.get("trace"):
+                    out[r["id"]] = r["trace"]
+    return out
+
+
+def trace_quality(preds, refs):
+    """Reasoning-trace quality for one model vs the Cosmos reference. Returns (aggregate,
+    {id: rouge_f1}). ROUGE-L is distillation fidelity; occlusion grounding is scored against
+    the GT goal-visibility flag; the ROUGE-vs-error correlation says whether more teacher-like
+    reasoning tracks a better answer (near 0 => the reasoning is decorative)."""
+    recs, per_id, pairs = [], {}, []
+    for sid, p in preds.items():
+        ref = refs.get(sid)
+        if not ref:
+            continue
+        reasoning, _ = reasoning_and_answer(p.get("generated", ""))
+        f1 = rouge_l(reasoning, ref)["f1"]
+        per_id[sid] = f1
+        recs.append({"rouge_f1": f1, "occ_claim": claims_occlusion(reasoning),
+                     "gt_occ": goal_occluded(p.get("gt"))})
+        if p.get("metrics"):
+            pairs.append((f1, p["metrics"]["mean_point_error"]))
+    agg = aggregate_trace_quality(recs)
+    if len(pairs) > 2:
+        agg["corr_rouge_err"] = float(
+            np.corrcoef([x for x, _ in pairs], [y for _, y in pairs])[0, 1])
+    return agg, per_id
 
 
 VARIANTS = ("base", "plain", "traced")
@@ -142,11 +194,12 @@ def _plain_err(preds, sid):
     return None
 
 
-def build_gallery(a_traced, b_traced, a_plain, b_plain, id_to_image, a_label, per_bucket, max_px):
+def build_gallery(a_traced, b_traced, a_plain, b_plain, refs, a_rouge, b_rouge,
+                  id_to_image, a_label, per_bucket, max_px):
     """Rank eval ids into easy/medium/hard terciles by the A traced waypoint error, pick
     `per_bucket` from each, and render both models' reasoning + paths for the same frame. Each
-    model's per-sample PLAIN (no-reasoning) error is attached so the card shows, frame by
-    frame, whether reasoning helped or hurt."""
+    model's per-sample PLAIN error and ROUGE-L vs the Cosmos reference are attached, and the
+    reference trace itself is shown, so a card is a full student-vs-teacher-vs-truth view."""
     scored = sorted((r["metrics"]["mean_point_error"], sid)
                     for sid, r in a_traced.items()
                     if r.get("metrics") and sid in id_to_image)
@@ -174,12 +227,15 @@ def build_gallery(a_traced, b_traced, a_plain, b_plain, id_to_image, a_label, pe
             sa, sb = _pred_summary(ar), _pred_summary(br)
             if sa:
                 sa["plainErr"] = _plain_err(a_plain, sid)
+                sa["rouge"] = round(a_rouge[sid], 3) if sid in a_rouge else None
             if sb:
                 sb["plainErr"] = _plain_err(b_plain, sid)
+                sb["rouge"] = round(b_rouge[sid], 3) if sid in b_rouge else None
             out.append({
                 "id": sid, "bucket": key, "bucketTitle": title,
                 "img": embed_jpeg(img, max_px * 2),
                 "gtGoalVisible": bool(gt and gt.get("goal") and gt["goal"][2] == 1),
+                "ref": refs.get(sid),         # Cosmos teacher trace, the ROUGE reference
                 "a": sa, "b": sb,
             })
     return out
@@ -195,6 +251,8 @@ def main() -> None:
     p.add_argument("--a-label", default="2B")
     p.add_argument("--b-label", default="0.8B")
     p.add_argument("--eval-file", type=Path, default=EVAL_FILE)
+    p.add_argument("--ref-traces", type=Path, default=REF_TRACES,
+                   help="Cosmos3 teacher traces for the eval frames (ROUGE-L reference)")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--per-bucket", type=int, default=3)
     p.add_argument("--max-image-px", type=int, default=480)
@@ -218,6 +276,14 @@ def main() -> None:
     eval_records = json.loads(args.eval_file.read_text())
     id_to_image = {r["id"]: r["image"][0] for r in eval_records}
 
+    # Reasoning-trace quality (cheap tier): distillation fidelity (ROUGE-L vs the Cosmos
+    # teacher) + occlusion grounding vs the GT flag, per traced model.
+    refs = load_ref_traces(args.ref_traces)
+    a_tq, a_rouge = trace_quality(a_traced_p, refs)
+    b_tq, b_rouge = trace_quality(b_traced_p, refs)
+    if not refs:
+        print(f"  note: no reference traces at {args.ref_traces} — ROUGE section will be blank")
+
     # The comparisons that matter, each a paired bootstrap on waypoint error over jointly
     # parsed frames. The headline is reasoning-vs-plain PER SIZE (does the trace help?);
     # then the cross-size check on the traced adapters.
@@ -240,7 +306,11 @@ def main() -> None:
                              {"base": a_base_m, "plain": a_plain_m, "traced": a_traced_m},
                              {"base": b_base_m, "plain": b_plain_m, "traced": b_traced_m}),
         "tests": tests,
+        "traceQuality": {"hasRef": bool(refs), "a": a_tq, "b": b_tq,
+                         "aJudge": load_judge(args.a_dir, TRACED_TAG),
+                         "bJudge": load_judge(args.b_dir, TRACED_TAG)},
         "gallery": build_gallery(a_traced_p, b_traced_p, a_plain_p, b_plain_p,
+                                 refs, a_rouge, b_rouge,
                                  id_to_image, args.a_label, args.per_bucket, args.max_image_px),
     }
 

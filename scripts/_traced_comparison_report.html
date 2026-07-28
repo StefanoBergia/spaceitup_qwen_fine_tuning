@@ -57,6 +57,7 @@ td .m{font-variant-numeric:normal;color:var(--muted);font-size:12px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--grid)}
 @media (max-width:640px){.two{grid-template-columns:1fr}}
 .pane{background:var(--surface);padding:12px 14px}
+.refpane{border-top:1px solid var(--grid)}.refpane .reason{background:var(--surface)}
 .pane h4{margin:0 0 6px;font-size:13px;display:flex;align-items:center;gap:7px}
 .pane h4 .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
 .metrics{font-size:12.5px;color:var(--ink2);margin:0 0 8px;font-variant-numeric:tabular-nums}
@@ -78,6 +79,12 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);color:v
   <p class="note">Hover a column header for what it measures. Three variants per size: <b>base</b> is the zero-shot model (thinking on); <b>plain SFT</b> is the answer-only LoRA (no reasoning); <b>traced</b> is the LoRA fine-tuned to emit a Cosmos3 reasoning trace first. The honest baseline for the trace is plain SFT, not base. Each fine-tuned cell is coloured vs the row above it — <b style="color:var(--good)">green</b> if it improved on that column's better-direction, <b style="color:var(--crit)">red</b> if it regressed.</p>
   <div class="card scroll"><table id="tbl"></table></div>
   <div class="callout" id="sig"></div>
+
+  <h2>Reasoning-trace quality — is the reasoning itself any good?</h2>
+  <p class="note" id="tqnote"></p>
+  <div class="tiles" id="tq"></div>
+  <div class="callout" id="tqcaveat"></div>
+  <div id="tqjudge"></div>
 
   <h2>Per-sample reasoning — what each size actually said</h2>
   <p class="note" id="ghint"></p>
@@ -171,6 +178,48 @@ const impColor=(v,ref,better)=>{
   }).join('');
 })();
 
+/* ---- reasoning-trace quality (cheap tier: ROUGE-L vs teacher + occlusion grounding) ---- */
+(function(){
+  const tq=D.traceQuality, A=tq&&tq.a, B=tq&&tq.b;
+  const note=$('tqnote'), tiles=$('tq'), cav=$('tqcaveat');
+  if(!tq || !tq.hasRef || !A || !A.n){
+    note.textContent='No Cosmos reference traces were available, so trace-quality metrics are omitted.';
+    tiles.style.display='none'; cav.style.display='none'; return;
+  }
+  note.innerHTML = `Two cheap CPU signals on the reasoning itself. <b>ROUGE-L</b> is distillation `
+    + `fidelity — token overlap with the Cosmos3 teacher trace for the same frame. `
+    + `<b>Occlusion grounding</b> is whether the trace's hidden/visible language matches the true `
+    + `goal-visibility flag (balanced accuracy; 0.50 = chance).`;
+  const mk=(label,q)=>[
+    [`${label} ROUGE-L vs teacher`, num(q.rouge_l_median,3), `mean ${num(q.rouge_l_mean,3)} · token overlap`],
+    [`${label} occlusion grounding`, q.occ_balanced==null?'—':num(q.occ_balanced,3), `balanced acc · chance 0.50`],
+  ];
+  const t=[...mk(D.aLabel,A),...mk(D.bLabel,B)];
+  tiles.innerHTML=t.map(([k,v,d])=>
+    `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="d">${esc(d)}</div></div>`).join('');
+  const corr=A.corr_rouge_err;
+  cav.innerHTML = `<b>Read these as a floor, not a verdict.</b> The teacher trace was written with `
+    + `the ground-truth answer in view while the student reasons without it — so ROUGE ≈ `
+    + `<b>${num(A.rouge_l_median,2)}</b> means “reasons like the teacher”, not “is correct”, and `
+    + `can't reach 1. Occlusion grounding sits near <b>${num(A.occ_balanced,2)}</b> (≈ chance), so `
+    + `the trace's talk of what's hidden barely tracks what truly is`
+    + (corr!=null?`, and ROUGE-L correlates only <b>${num(corr,2)}</b> with waypoint error`:``)
+    + `. On this task the trace reads as largely <b>decorative</b>; the VLM judge `
+    + `(scripts/judge_traces.py) is the trustworthy grounding test.`;
+
+  // VLM-judge tier — only present once scripts/judge_traces.py has been run
+  const J=tq.aJudge, JB=tq.bJudge;
+  if(J || JB){
+    const row=(label,j)=> j? `<div class="test"><b>${esc(label)}</b> (judge ${esc(j.judge_model||'')}, `
+        + `n=${j.n_scored}/${j.n_total}): faithful <b>${num(j.faithful_mean,2)}</b>/5 · `
+        + `occlusion <b>${num(j.occlusion_mean,2)}</b>/5 · coherent <b>${num(j.coherent_mean,2)}</b>/5 · `
+        + `hallucinated on <b>${pct(j.hallucination_rate)}</b> of frames</div>` : '';
+    $('tqjudge').innerHTML = `<div class="callout"><b>VLM-judge grounding (reference-free).</b> `
+      + `A separate model scores each trace against the image itself, 1–5.`
+      + row(D.aLabel+' traced', J) + row(D.bLabel+' traced', JB) + `</div>`;
+  }
+})();
+
 /* ---- gallery: reasoning + paths, both sizes, per frame ---- */
 (function(){
   const tone={easy:'var(--good)',medium:'var(--warn)',hard:'var(--crit)'};
@@ -186,9 +235,10 @@ const impColor=(v,ref,better)=>{
     const pcmp = p.plainErr==null ? '' :
       ` <span style="color:${p.err<=p.plainErr?'var(--good)':'var(--crit)'}">`
       + `(plain SFT ${num(p.plainErr)} — reasoning ${p.err<=p.plainErr?'helped':'hurt'} here)</span>`;
+    const rouge = p.rouge==null ? '' : ` · <span title="ROUGE-L vs Cosmos teacher">ROUGE ${num(p.rouge)}</span>`;
     return `<div class="pane"><h4><span class="sw" style="background:${color}"></span>${esc(label)}</h4>`
       + `<div class="metrics">traced err <b>${num(p.err)}</b>${pcmp} · Fréchet ${num(p.frechet)} · vis ${pct(p.vis)} · `
-      + `goal ${p.goalOk?'<b style="color:var(--good)">right</b>':'<b style="color:var(--crit)">wrong</b>'} · `
+      + `goal ${p.goalOk?'<b style="color:var(--good)">right</b>':'<b style="color:var(--crit)">wrong</b>'}${rouge} · `
       + `${p.nWaypoints} waypoints → goal ${goal}</div>`
       + `<div class="reason">${esc(p.reasoning)||'<span class="none">empty</span>'}</div></div>`;
   };
@@ -200,6 +250,7 @@ const impColor=(v,ref,better)=>{
           <div class="cap"><span>${esc(o.id)}</span><span>ground-truth goal is ${o.gtGoalVisible?'visible':'obstructed'}</span></div>
           <img src="${o.img}" alt="predicted paths for both sizes over the ground truth">
           <div class="two">${pane(D.aLabel+' traced',getComputedStyle(document.documentElement).getPropertyValue('--a'),o.a)}${pane(D.bLabel+' traced',getComputedStyle(document.documentElement).getPropertyValue('--b'),o.b)}</div>
+          ${o.ref?`<div class="pane refpane"><h4>Cosmos3 teacher — the ROUGE reference <span style="font-weight:400;color:var(--muted)">(written with the answer in view)</span></h4><div class="reason">${esc(o.ref)}</div></div>`:''}
         </div>`).join('')
       + `</div>`;
   }).join('');
