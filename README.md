@@ -735,6 +735,29 @@ model is handed a pre-closed think block and never reasons. `parse_path_answer` 
 reasoning prose and scans for the `{"path",…,"goal"}` object, so no parser change is needed;
 give generation enough room (`--max-new-tokens 384`) for ~100 words of trace plus the answer.
 
+#### Traced results report (`scripts/visualize_traced_comparison.py`)
+
+```bash
+uv run scripts/visualize_traced_comparison.py   # -> outputs/eval_habitat_v2_traced/traced_comparison.html
+```
+
+One self-contained HTML page covering both the **2B-vs-0.8B** comparison and **per-sample
+reasoning inspection**, built from the two traced eval trees plus `eval.json` (for the
+`id → image` lookup). It shows: headline tiles (traced vs each size's own base), a metrics
+table with the four rows {2B base, 2B traced, 0.8B base, 0.8B traced} and a hover-definition on
+every column, a 2B-vs-0.8B **paired-bootstrap** line on waypoint error (over frames both
+adapters parsed), and a gallery — each frame with both sizes' predicted paths over the
+ground-truth corridor, next to **the `<think>` reasoning each size generated**, its waypoints,
+and its per-sample metrics. Frames are grouped into easy/medium/hard terciles by the 2B traced
+error. A new script because the `habitat_train_full_traced` tag is off the size-scaling curve
+(`compare_evals.py` skips it) and no existing report surfaces the generated reasoning; it reuses
+`rover_vlm.overlay` (path/goal drawing) and `rover_vlm.compare.paired_bootstrap`.
+
+Measured (job 88716): 2B traced median waypoint error **0.069** (base 0.465), 0.8B traced
+**0.082** (base 0.858); parse rate **100% / 99.9%** (base 62.6% / 71.9%). The paired test finds
+2B significantly better than 0.8B, but only marginally (diff ≈ −0.009, 95% CI excludes 0) — the
+sizes converge, echoing the plain-regression comparison.
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
@@ -749,6 +772,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | 2B vs 0.8B comparison (both tasks) | `uv run scripts/visualize_model_comparison.py` | `outputs/model_comparison.html` |
 | Cross-round: what more data bought | `uv run scripts/visualize_crossround.py` | `outputs/crossround_report.html` |
 | Trace prompt: how v6 was arrived at | `uv run scripts/visualize_traces.py` | `outputs/traces_report.html` |
+| Traced fine-tune: 2B vs 0.8B + reasoning | `uv run scripts/visualize_traced_comparison.py` | `outputs/eval_habitat_v2_traced/traced_comparison.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):
@@ -769,6 +793,10 @@ other (different eval sets):
 - Classification, 2B — https://claude.ai/code/artifact/830c3d90-3453-4c19-98f4-3f7d0acba12c
 - Classification, 0.8B — https://claude.ai/code/artifact/9e3fbf7f-9d9c-4825-a2df-81635ccb4538
 - **Cross-round — what 2.2× the data bought** — https://claude.ai/code/artifact/ebba6298-4f40-4e7b-a65c-88efa8533b78
+
+Traced fine-tune (reasoning distilled into the path, job 88716):
+
+- **Traced 2B vs 0.8B + per-sample reasoning** — https://claude.ai/code/artifact/97d7146c-1a7d-46e7-8427-7acb9fd7c4ec
 
 Reasoning-trace phase (labelling runs, not model evals — no round applies):
 

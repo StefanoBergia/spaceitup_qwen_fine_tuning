@@ -517,3 +517,104 @@ def test_filter_drop_priority_and_non_destructive(tmp_path):
     assert counts == {"error": 1, "no-trace": 1, "truncated": 1, "leak": 1, "drift": 1}
     # the shipped set must be leak-free by the detector that defines the gate
     assert not [r for r in out if r["keep"] and leakage_spans(r["trace"])]
+
+
+# --- the traced 2B-vs-0.8B report (scripts/visualize_traced_comparison.py) -----------
+
+
+def _traced_viz():
+    spec = importlib.util.spec_from_file_location(
+        "visualize_traced_comparison",
+        Path(__file__).resolve().parent.parent / "scripts" / "visualize_traced_comparison.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["visualize_traced_comparison"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_reasoning_and_answer_splits_on_first_close_tag():
+    tv = _traced_viz()
+    # normal: reasoning then </think> then answer
+    r, a = tv.reasoning_and_answer('I see a clear floor.</think>\n\n{"path":[]}')
+    assert r == "I see a clear floor." and a == '{"path":[]}'
+    # no close tag (base ramble): all reasoning, empty answer
+    r, a = tv.reasoning_and_answer("just rambling with no tag")
+    assert r == "just rambling with no tag" and a == ""
+    # a stray </think> inside the answer must not re-split: only the first counts
+    r, a = tv.reasoning_and_answer("think</think>ans </think> more")
+    assert r == "think" and a == "ans </think> more"
+
+
+def test_build_table_four_rows_and_keys():
+    tv = _traced_viz()
+    m = {k: 0.5 for k, _, _, _ in tv.TABLE_COLS}
+    rows = tv.build_table("2B", "0.8B", m, m, m, m)
+    assert [(r["model"], r["variant"], r["isBase"]) for r in rows] == [
+        ("2B", "base", True), ("2B", "traced", False),
+        ("0.8B", "base", True), ("0.8B", "traced", False)]
+    assert all(k in rows[0] for k, _, _, _ in tv.TABLE_COLS)
+    # a missing metric dict yields None cells rather than raising
+    none_row = tv.build_table("2B", "0.8B", None, m, m, m)[0]
+    assert none_row["parse_rate"] is None
+
+
+def test_pred_summary_extracts_reasoning_or_none():
+    tv = _traced_viz()
+    rec = {"parsed": {"path": [[0.5, 0.9, 1]], "goal": [0.5, 0.6, 0]},
+           "generated": "clear floor ahead</think>\n{\"path\":[]}",
+           "metrics": {"mean_point_error": 0.1, "frechet": 0.2,
+                       "path_visibility_acc": 1.0, "goal_visibility_correct": True}}
+    s = tv._pred_summary(rec)
+    assert s["reasoning"] == "clear floor ahead" and s["nWaypoints"] == 1 and s["goalOk"] is True
+    assert tv._pred_summary({"parsed": None}) is None      # unparsed -> None
+    assert tv._pred_summary(None) is None
+
+
+def _write_run(d, tag, model_id, err_median, records):
+    (d / tag).mkdir(parents=True)
+    metrics = {"num_samples": len(records), "parse_rate": 1.0,
+               "mean_point_error_median": err_median, "frechet_median": 0.1,
+               "path_visibility_acc_mean": 0.9, "goal_point_error_median": 0.02,
+               "goal_visibility_accuracy": 0.8, "model_id": model_id}
+    (d / tag / "metrics.json").write_text(json.dumps(metrics))
+    (d / tag / "predictions.json").write_text(json.dumps(records))
+
+
+def test_generator_end_to_end_and_escapes_script(tmp_path, monkeypatch):
+    """Run main() against a tiny synthetic eval tree: the placeholder is replaced, and a
+    reasoning containing </script> is neutralised so it cannot close the block early."""
+    from PIL import Image
+    tv = _traced_viz()
+    img = tmp_path / "f.png"
+    Image.new("RGB", (32, 32), "gray").save(img)
+
+    def rec(i, err, generated):
+        return {"id": f"s{i}", "generated": generated,
+                "parsed": {"path": [[0.5, 0.9, 1]], "goal": [0.5, 0.6, 0]},
+                "gt": {"path": [[0.5, 0.9, 1]], "goal": [0.5, 0.6, 0]},
+                "metrics": {"mean_point_error": err, "frechet": 0.1,
+                            "path_visibility_acc": 1.0, "goal_visibility_correct": True}}
+    # one reasoning carries a literal </script> to exercise the escape
+    a_recs = [rec(0, 0.05, "easy</think>{}"), rec(1, 0.2, "mid</think>{}"),
+              rec(2, 0.5, "hard reasoning with </script> inside</think>{}")]
+    b_recs = [rec(0, 0.06, "b easy</think>{}"), rec(1, 0.25, "b mid</think>{}"),
+              rec(2, 0.55, "b hard</think>{}")]
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    _write_run(a_dir, "habitat_base", "Qwen/Qwen3.5-2B", 0.4, a_recs)
+    _write_run(a_dir, "habitat_train_full_traced", "Qwen/Qwen3.5-2B", 0.05, a_recs)
+    _write_run(b_dir, "habitat_base", "Qwen/Qwen3.5-0.8B", 0.8, b_recs)
+    _write_run(b_dir, "habitat_train_full_traced", "Qwen/Qwen3.5-0.8B", 0.06, b_recs)
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(json.dumps([{"id": f"s{i}", "image": [str(img)]} for i in range(3)]))
+    out = tmp_path / "report.html"
+
+    monkeypatch.setattr(sys, "argv", ["x", "--a-dir", str(a_dir), "--b-dir", str(b_dir),
+                                      "--eval-file", str(eval_file), "--out", str(out),
+                                      "--per-bucket", "1"])
+    tv.main()
+    html = out.read_text()
+    assert "/*__DATA__*/null" not in html          # payload injected
+    assert "const D = {" in html
+    assert html.count("</script>") == 1            # only the real closing tag
+    assert "<\\/script>" in html                   # the model's </script> was escaped

@@ -1,0 +1,185 @@
+<title>Traced fine-tune — 2B vs 0.8B</title>
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --ring:rgba(11,11,11,.10);
+  --a:#2a78d6; --b:#e66100; --good:#0ca30c; --warn:#fab219; --crit:#d03b3b;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --ring:rgba(255,255,255,.10);
+  --a:#3987e5; --b:#f07a1f; color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --ring:rgba(255,255,255,.10);
+  --a:#3987e5; --b:#f07a1f; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:26px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--ink2);margin:0 0 26px;font-size:15px;max-width:76ch}
+h2{font-size:18px;margin:44px 0 4px;letter-spacing:-.005em}
+.note{color:var(--ink2);font-size:14px;margin:0 0 18px;max-width:74ch}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:22px 0 8px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:16px 18px}
+.tile .k{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.tile .v{font-size:30px;font-weight:640;margin:6px 0 2px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.tile .d{font-size:13px;color:var(--ink2)}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:9px 10px;border-bottom:1px solid var(--grid)}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+th .info{cursor:help;border-bottom:1px dotted var(--muted)}
+tbody tr.base td{color:var(--ink2)}
+tbody tr.sep td{border-top:2px solid var(--grid)}
+td .m{font-variant-numeric:normal;color:var(--muted);font-size:12px}
+.scroll{overflow-x:auto}
+.callout{border-left:3px solid var(--a);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:16px 0;font-size:14.5px;color:var(--ink2)}
+.callout b{color:var(--ink)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin:8px 0 12px;font-size:13px;color:var(--ink2)}
+.legend i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:-1px}
+.legend .ring{width:11px;height:11px;border-radius:50%;background:transparent;
+  border:2.5px solid var(--ink2);display:inline-block;margin-right:6px;vertical-align:-1px}
+.gsec{margin-top:24px}
+.gsec h3{font-size:15px;margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.gcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.gcard>img{width:100%;display:block}
+.gcard .cap{padding:8px 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--grid);
+  display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--grid)}
+@media (max-width:640px){.two{grid-template-columns:1fr}}
+.pane{background:var(--surface);padding:12px 14px}
+.pane h4{margin:0 0 6px;font-size:13px;display:flex;align-items:center;gap:7px}
+.pane h4 .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+.metrics{font-size:12.5px;color:var(--ink2);margin:0 0 8px;font-variant-numeric:tabular-nums}
+.metrics b{color:var(--ink)}
+.reason{font-size:12.5px;line-height:1.5;color:var(--ink2);background:var(--plane);
+  border:1px solid var(--grid);border-radius:8px;padding:9px 11px;max-height:150px;overflow-y:auto;
+  white-space:pre-wrap}
+.none{font-size:12.5px;color:var(--crit)}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);color:var(--muted);font-size:13px}
+</style>
+
+<div class="wrap">
+  <h1>Reasoning traces, distilled into a rover path — 2B vs 0.8B</h1>
+  <p class="sub" id="sub"></p>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>All metrics — base vs traced LoRA, both sizes</h2>
+  <p class="note">Hover a column header for what it measures. Base rows are the zero-shot model with thinking on; traced rows are the LoRA fine-tuned on Cosmos3 reasoning traces.</p>
+  <div class="card scroll"><table id="tbl"></table></div>
+  <div class="callout" id="sig"></div>
+
+  <h2>Per-sample reasoning — what each size actually said</h2>
+  <p class="note" id="ghint"></p>
+  <div class="legend">
+    <span><i style="background:var(--a)"></i><span id="lgA"></span> (left panel)</span>
+    <span><i style="background:var(--b)"></i><span id="lgB"></span> (right panel)</span>
+    <span><i style="background:#696969"></i>ground truth</span>
+    <span><span class="ring"></span>hollow waypoint = model called it obstructed</span>
+  </div>
+  <div id="gallery"></div>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const pct = v => v==null?'—':(v*100).toFixed(1)+'%';
+const num = (v,d=3) => v==null?'—':(+v).toFixed(d);
+const esc = s => (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+$('sub').textContent = `Both Qwen3.5 sizes LoRA-fine-tuned to emit a <think> reasoning trace then a `
+  + `[x, y, visibility] rover path. ${D.nEval.toLocaleString()} held-out frames; each size shown `
+  + `zero-shot (base) and traced.`;
+$('lgA').textContent = `${D.aLabel} traced`;
+$('lgB').textContent = `${D.bLabel} traced`;
+$('foot').textContent = `${D.aModelId||D.aLabel} vs ${D.bModelId||D.bLabel}. One fixed held-out split. `
+  + `Generated by scripts/visualize_traced_comparison.py.`;
+
+/* ---- tiles: traced vs its own base, per size ---- */
+(function(){
+  const rows=D.table, byV=(model,variant)=>rows.find(r=>r.model===model&&r.variant===variant);
+  const aT=byV(D.aLabel,'traced'), aB=byV(D.aLabel,'base');
+  const bT=byV(D.bLabel,'traced'), bB=byV(D.bLabel,'base');
+  const t=[
+    [`${D.aLabel} waypoint error`, num(aT.mean_point_error_median), `base ${num(aB.mean_point_error_median)} · median norm. dist`],
+    [`${D.bLabel} waypoint error`, num(bT.mean_point_error_median), `base ${num(bB.mean_point_error_median)} · median norm. dist`],
+    [`${D.aLabel} parse rate`, pct(aT.parse_rate), `base ${pct(aB.parse_rate)}`],
+    [`${D.bLabel} parse rate`, pct(bT.parse_rate), `base ${pct(bB.parse_rate)}`],
+  ];
+  $('tiles').innerHTML=t.map(([k,v,d])=>
+    `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div><div class="d">${esc(d)}</div></div>`).join('');
+})();
+
+/* ---- metrics table with column infoboxes ---- */
+(function(){
+  const head='<thead><tr><th>Model</th>'
+    + D.tableCols.map(c=>`<th><span class="info" title="${esc(c.def)}">${esc(c.name)} ⓘ</span></th>`).join('')
+    + '</tr></thead>';
+  const body='<tbody>'+D.table.map((r,i)=>{
+    const cls=(r.isBase?'base':'')+(i===2?' sep':'');   // blank line between the two models
+    const name=r.isBase?`${esc(r.model)} · base`:`<b>${esc(r.model)} · traced</b>`;
+    const cells=D.tableCols.map(c=>{
+      const v=r[c.key];
+      const fmt=c.key==='parse_rate'||c.key.indexOf('acc')>=0?pct(v):num(v);
+      return `<td>${fmt}</td>`;
+    }).join('');
+    return `<tr class="${cls}"><td>${name}</td>${cells}</tr>`;
+  }).join('')+'</tbody>';
+  $('tbl').innerHTML=head+body;
+})();
+
+/* ---- significance callout ---- */
+(function(){
+  const s=D.sig;
+  if(!s){$('sig').innerHTML='Not enough jointly-parsed samples to test the size gap.';return;}
+  const excl = (s.lo>0)||(s.hi<0);
+  const better = s.diff<0 ? D.aLabel : D.bLabel;
+  $('sig').innerHTML = `<b>Does size matter here?</b> On the ${s.n.toLocaleString()} frames both `
+    + `traced adapters parsed, mean waypoint error is <b>${num(s.a,4)}</b> for ${esc(D.aLabel)} vs `
+    + `<b>${num(s.b,4)}</b> for ${esc(D.bLabel)} — a paired difference of ${num(s.diff,4)} `
+    + `(95% CI ${num(s.lo,4)} to ${num(s.hi,4)}). The interval `
+    + `<b>${excl?`excludes 0, so ${esc(better)} is significantly better`:'includes 0, so the gap is not significant'}</b>.`;
+})();
+
+/* ---- gallery: reasoning + paths, both sizes, per frame ---- */
+(function(){
+  const tone={easy:'var(--good)',medium:'var(--warn)',hard:'var(--crit)'};
+  const g={}; D.gallery.forEach(o=>(g[o.bucket]=g[o.bucket]||[]).push(o));
+  $('ghint').innerHTML = `Frames grouped by how hard they were for the <i>${esc(D.aLabel)}</i> traced model `
+    + `(its own waypoint error). Each card: the frame with both sizes' predicted paths over the grey `
+    + `ground-truth corridor, then the reasoning each size generated before answering.`;
+
+  const pane=(label,color,p)=>{
+    if(!p) return `<div class="pane"><h4><span class="sw" style="background:${color}"></span>${esc(label)}</h4>`
+      + `<div class="none">no parseable output</div></div>`;
+    const goal=p.goal?`[${p.goal.map(x=>(+x).toFixed(2)).join(', ')}]`:'—';
+    return `<div class="pane"><h4><span class="sw" style="background:${color}"></span>${esc(label)}</h4>`
+      + `<div class="metrics">err <b>${num(p.err)}</b> · Fréchet ${num(p.frechet)} · vis ${pct(p.vis)} · `
+      + `goal ${p.goalOk?'<b style="color:var(--good)">right</b>':'<b style="color:var(--crit)">wrong</b>'} · `
+      + `${p.nWaypoints} waypoints → goal ${goal}</div>`
+      + `<div class="reason">${esc(p.reasoning)||'<span class="none">empty</span>'}</div></div>`;
+  };
+
+  $('gallery').innerHTML = ['easy','medium','hard'].filter(k=>g[k]).map(k=>{
+    const items=g[k];
+    return `<div class="gsec"><h3><span class="dot" style="background:${tone[k]}"></span>${esc(items[0].bucketTitle)}</h3>`
+      + items.map(o=>`<div class="gcard">
+          <div class="cap"><span>${esc(o.id)}</span><span>ground-truth goal is ${o.gtGoalVisible?'visible':'obstructed'}</span></div>
+          <img src="${o.img}" alt="predicted paths for both sizes over the ground truth">
+          <div class="two">${pane(D.aLabel+' traced',getComputedStyle(document.documentElement).getPropertyValue('--a'),o.a)}${pane(D.bLabel+' traced',getComputedStyle(document.documentElement).getPropertyValue('--b'),o.b)}</div>
+        </div>`).join('')
+      + `</div>`;
+  }).join('');
+})();
+</script>
