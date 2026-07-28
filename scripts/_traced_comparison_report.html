@@ -207,24 +207,38 @@ const impColor=(v,ref,better)=>{
     + `. On this task the trace reads as largely <b>decorative</b>; the VLM judge `
     + `(scripts/judge_traces.py) is the trustworthy grounding test.`;
 
-  // Judge tier — grades the reasoning AGAINST THE GROUND TRUTH. Only shown once
+  // Judge tier — grades the reasoning AGAINST THE GROUND TRUTH, as a table. Only shown once
   // scripts/judge_traces.py has been run (new-schema files carry direction_accuracy).
   const has=j=>j && j.direction_accuracy!=null;
-  const judged=[tq.aJudge,tq.bJudge,tq.aJudgeBase,tq.bJudgeBase].some(has);
-  if(judged){
-    const row=(label,variant,j)=> has(j)
-      ? `<div class="test"><b>${esc(label)} · ${esc(variant)}</b> (n=${j.n_scored}/${j.n_total}): `
-        + `direction correct <b>${pct(j.direction_accuracy)}</b> · occlusion correct `
-        + `<b>${pct(j.occlusion_accuracy)}</b> · contradicts GT ${pct(j.contradiction_rate)} · `
-        + `overall <b>${num(j.score_mean,2)}</b>/5</div>`
-      : '';
-    const model=(tq.aJudge&&tq.aJudge.judge_model)||(tq.aJudgeBase&&tq.aJudgeBase.judge_model)||'';
-    $('tqjudge').innerHTML = `<div class="callout"><b>Judge vs ground truth.</b> A separate model `
-      + `(${esc(model)}) is given the true path direction and goal occlusion and grades whether `
-      + `each trace agrees — an objective check, and the base rows are the discrimination test `
-      + `(the reasoning should agree with truth less when zero-shot).`
-      + row(D.aLabel,'traced',tq.aJudge) + row(D.aLabel,'base',tq.aJudgeBase)
-      + row(D.bLabel,'traced',tq.bJudge) + row(D.bLabel,'base',tq.bJudgeBase) + `</div>`;
+  if([tq.aJudge,tq.bJudge,tq.aJudgeBase,tq.bJudgeBase].some(has)){
+    const jcols=[['direction_accuracy','Direction correct','up'],
+                 ['occlusion_accuracy','Occlusion correct','up'],
+                 ['contradiction_rate','Contradicts GT','down'],
+                 ['score_mean','Overall /5','up']];
+    const baseOf={[D.aLabel]:tq.aJudgeBase,[D.bLabel]:tq.bJudgeBase};
+    const rows=[[D.aLabel,'traced',tq.aJudge],[D.aLabel,'base',tq.aJudgeBase],
+                [D.bLabel,'traced',tq.bJudge],[D.bLabel,'base',tq.bJudgeBase]].filter(r=>has(r[2]));
+    const model=(tq.aJudge||tq.aJudgeBase||tq.bJudge||tq.bJudgeBase).judge_model||'';
+    const head='<thead><tr><th>Model</th>'+jcols.map(c=>`<th>${c[1]}</th>`).join('')
+      +'<th>n</th></tr></thead>';
+    let prev=null;
+    const body='<tbody>'+rows.map(([label,variant,j])=>{
+      const sep=prev!==null&&label!==prev; prev=label;
+      const cls=(variant==='base'?'base':'')+(sep?' sep':'');
+      const name=variant==='traced'?`${esc(label)} · <b>traced</b>`:`${esc(label)} · base`;
+      const ref=variant==='traced'?baseOf[label]:null;   // colour traced vs its own base
+      const cells=jcols.map(c=>{
+        const v=j[c[0]], fmt=c[0]==='score_mean'?num(v,2):pct(v);
+        const color=ref?impColor(v,ref[c[0]],c[2]):'';
+        return `<td style="${color}">${fmt}</td>`;
+      }).join('');
+      return `<tr class="${cls}"><td>${name}</td>${cells}<td>${j.n_scored}</td></tr>`;
+    }).join('')+'</tbody>';
+    $('tqjudge').innerHTML = `<p class="note">A separate judge (${esc(model)}) is given the true `
+      + `path direction and goal occlusion and grades whether each trace agrees — an objective, `
+      + `checkable measure. The <b>base</b> rows are the discrimination check: agreement should `
+      + `drop sharply when the reasoning is zero-shot, and it does. Traced cells are coloured vs `
+      + `their own base.</p><div class="card scroll"><table>${head+body}</table></div>`;
   }
 })();
 
