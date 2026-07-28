@@ -207,16 +207,24 @@ const impColor=(v,ref,better)=>{
     + `. On this task the trace reads as largely <b>decorative</b>; the VLM judge `
     + `(scripts/judge_traces.py) is the trustworthy grounding test.`;
 
-  // VLM-judge tier — only present once scripts/judge_traces.py has been run
-  const J=tq.aJudge, JB=tq.bJudge;
-  if(J || JB){
-    const row=(label,j)=> j? `<div class="test"><b>${esc(label)}</b> (judge ${esc(j.judge_model||'')}, `
-        + `n=${j.n_scored}/${j.n_total}): faithful <b>${num(j.faithful_mean,2)}</b>/5 · `
-        + `occlusion <b>${num(j.occlusion_mean,2)}</b>/5 · coherent <b>${num(j.coherent_mean,2)}</b>/5 · `
-        + `hallucinated on <b>${pct(j.hallucination_rate)}</b> of frames</div>` : '';
-    $('tqjudge').innerHTML = `<div class="callout"><b>VLM-judge grounding (reference-free).</b> `
-      + `A separate model scores each trace against the image itself, 1–5.`
-      + row(D.aLabel+' traced', J) + row(D.bLabel+' traced', JB) + `</div>`;
+  // Judge tier — grades the reasoning AGAINST THE GROUND TRUTH. Only shown once
+  // scripts/judge_traces.py has been run (new-schema files carry direction_accuracy).
+  const has=j=>j && j.direction_accuracy!=null;
+  const judged=[tq.aJudge,tq.bJudge,tq.aJudgeBase,tq.bJudgeBase].some(has);
+  if(judged){
+    const row=(label,variant,j)=> has(j)
+      ? `<div class="test"><b>${esc(label)} · ${esc(variant)}</b> (n=${j.n_scored}/${j.n_total}): `
+        + `direction correct <b>${pct(j.direction_accuracy)}</b> · occlusion correct `
+        + `<b>${pct(j.occlusion_accuracy)}</b> · contradicts GT ${pct(j.contradiction_rate)} · `
+        + `overall <b>${num(j.score_mean,2)}</b>/5</div>`
+      : '';
+    const model=(tq.aJudge&&tq.aJudge.judge_model)||(tq.aJudgeBase&&tq.aJudgeBase.judge_model)||'';
+    $('tqjudge').innerHTML = `<div class="callout"><b>Judge vs ground truth.</b> A separate model `
+      + `(${esc(model)}) is given the true path direction and goal occlusion and grades whether `
+      + `each trace agrees — an objective check, and the base rows are the discrimination test `
+      + `(the reasoning should agree with truth less when zero-shot).`
+      + row(D.aLabel,'traced',tq.aJudge) + row(D.aLabel,'base',tq.aJudgeBase)
+      + row(D.bLabel,'traced',tq.bJudge) + row(D.bLabel,'base',tq.bJudgeBase) + `</div>`;
   }
 })();
 

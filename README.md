@@ -778,14 +778,19 @@ accuracy" is not one thing and lexical overlap is a weak proxy for it:
   answer while the student didn't, so ROUGE means "reasons like the teacher", not "is correct".
   Result: ROUGE-L ≈ **0.34**, occlusion grounding ≈ **0.51** (chance), and ROUGE↔waypoint-error
   correlation ≈ **−0.10** — i.e. the trace is largely **decorative** on this task.
-- **Trustworthy (GPU, ready to launch).** `sbatch slurm/judge_traces.sbatch` runs a VLM-as-judge
+- **Trustworthy (GPU, ready to launch).** `sbatch slurm/judge_traces.sbatch` runs an LLM-as-judge
   (`nvidia/Cosmos-Reason2-8B` — a different model from both teacher and student, cached,
-  transformers, no vLLM) scoring each trace *reference-free against the image itself* 1–5 on
-  faithfulness / occlusion / coherence + a hallucinated-object list. Writes
-  `<eval-dir>/<tag>/judge_metrics.json`; resumable. Re-running `visualize_traced_comparison.py`
-  after the job picks the scores up automatically and adds a judge row to the report. Caveat: the
-  judge is Qwen-derived like the student, so `--model-id`/`JUDGE=` can swap a non-Qwen judge to
-  rule out self-preference.
+  transformers, no vLLM) that grades each trace **against the ground truth**: it is given the
+  true path direction and goal occlusion (derived from the eval label) plus the model's `<think>`
+  reasoning, and scores `direction_correct` / `occlusion_correct` / `contradicts_gt` (bools) and
+  an overall 1–5 agreement — text-only, no image. Grading against known truth (rather than
+  reference-free "does this sound right about the image") forces discrimination and removes the
+  leniency an unanchored judge shows. The job also judges the zero-shot **base** reasoning as a
+  discrimination check (agreement should drop when zero-shot). Writes
+  `<eval-dir>/<tag>/judge_metrics.json`; resumable; re-running `visualize_traced_comparison.py`
+  after the job folds the scores (traced + base, both sizes) into the report. Caveat: the judge
+  is Qwen-derived like the student, so `JUDGE=<hf-id>` swaps a non-Qwen judge to rule out
+  self-preference.
 
 ## Visualizations — where each one lives
 

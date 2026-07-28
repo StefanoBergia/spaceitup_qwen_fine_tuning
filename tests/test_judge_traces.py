@@ -1,5 +1,5 @@
-"""Pure-Python parts of the VLM-judge script (scripts/judge_traces.py): reasoning extraction,
-verdict parsing, and aggregation. The GPU generation path is not exercised here."""
+"""Pure-Python parts of the ground-truth judge (scripts/judge_traces.py): reasoning extraction,
+GT summary, verdict parsing, and aggregation. The GPU generation path is not exercised here."""
 
 import importlib.util
 import sys
@@ -22,31 +22,50 @@ def test_reasoning_of_splits_on_think_close():
     assert jm.reasoning_of("") == ""
 
 
-def test_parse_verdict_valid_clamps_and_hallucinations():
+def test_gt_summary_direction_and_occlusion():
     jm = _judge_mod()
-    v = jm.parse_verdict('sure: {"faithful": 4, "occlusion": 2, "coherent": 5, '
-                         '"hallucinations": ["sofa"]} done')
-    assert v == {"faithful": 4, "occlusion": 2, "coherent": 5, "hallucinations": ["sofa"]}
-    # out-of-range values are clamped to 1..5; floats rounded
-    v2 = jm.parse_verdict('{"faithful": 9, "occlusion": 0, "coherent": 3.4, "hallucinations": []}')
-    assert v2["faithful"] == 5 and v2["occlusion"] == 1 and v2["coherent"] == 3
+    # goal well to the left of the start, and hidden
+    g = jm.gt_summary({"path": [[0.9, 1.0, 1], [0.5, 0.6, 0]], "goal": [0.3, 0.55, 0]})
+    assert g["direction"] == "to the left" and g["goal_hidden"] is True
+    assert g["n_occluded"] == 1 and g["n_path"] == 2
+    assert "hidden" in g["goalstate"]
+    # straight-ahead, visible goal
+    g2 = jm.gt_summary({"path": [[0.5, 1.0, 1]], "goal": [0.5, 0.6, 1]})
+    assert g2["direction"] == "roughly straight ahead" and g2["goal_hidden"] is False
+    assert jm.gt_summary(None) is None and jm.gt_summary({}) is None
+
+
+def test_parse_verdict_valid_and_bool_coercion():
+    jm = _judge_mod()
+    v = jm.parse_verdict('ok {"direction_correct": true, "occlusion_correct": false, '
+                         '"contradicts_gt": false, "score": 4} end')
+    assert v == {"direction_correct": True, "occlusion_correct": False,
+                 "contradicts_gt": False, "score": 4}
+    # string/int booleans coerce; score clamps
+    v2 = jm.parse_verdict('{"direction_correct": "yes", "occlusion_correct": 0, '
+                          '"contradicts_gt": "false", "score": 9}')
+    assert v2["direction_correct"] is True and v2["occlusion_correct"] is False
+    assert v2["contradicts_gt"] is False and v2["score"] == 5
 
 
 def test_parse_verdict_rejects_bad():
     jm = _judge_mod()
-    assert jm.parse_verdict("no json at all") is None
-    assert jm.parse_verdict('{"faithful": 4}') is None            # missing keys
-    assert jm.parse_verdict('{"faithful": "x", "occlusion": 2, "coherent": 3}') is None
+    assert jm.parse_verdict("no json") is None
+    assert jm.parse_verdict('{"direction_correct": true, "score": 3}') is None       # missing keys
+    assert jm.parse_verdict('{"direction_correct": true, "occlusion_correct": true, '
+                            '"contradicts_gt": false}') is None                       # no score
 
 
-def test_aggregate_scores_and_hallucination_rate():
+def test_aggregate_accuracies_and_contradiction_rate():
     jm = _judge_mod()
     rows = [
-        {"id": "a", "verdict": {"faithful": 4, "occlusion": 2, "coherent": 5, "hallucinations": ["x"]}},
-        {"id": "b", "verdict": {"faithful": 2, "occlusion": 4, "coherent": 3, "hallucinations": []}},
-        {"id": "c", "verdict": None},                              # unparsed
+        {"id": "a", "verdict": {"direction_correct": True, "occlusion_correct": True,
+                                "contradicts_gt": False, "score": 5}},
+        {"id": "b", "verdict": {"direction_correct": True, "occlusion_correct": False,
+                                "contradicts_gt": True, "score": 2}},
+        {"id": "c", "verdict": None},                                                # unparsed
     ]
     a = jm.aggregate(rows)
     assert a["n_total"] == 3 and a["n_scored"] == 2
-    assert abs(a["faithful_mean"] - 3.0) < 1e-9 and abs(a["occlusion_mean"] - 3.0) < 1e-9
-    assert a["hallucination_rate"] == 0.5
+    assert a["direction_accuracy"] == 1.0 and a["occlusion_accuracy"] == 0.5
+    assert a["contradiction_rate"] == 0.5 and a["score_mean"] == 3.5
