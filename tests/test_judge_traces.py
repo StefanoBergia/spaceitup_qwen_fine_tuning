@@ -56,6 +56,27 @@ def test_parse_verdict_rejects_bad():
                             '"contradicts_gt": false}') is None                       # no score
 
 
+def test_judge_slug():
+    jm = _judge_mod()
+    assert jm.judge_slug("google/gemma-3-12b-it") == "gemma-3-12b-it"
+    assert jm.judge_slug("nvidia/Cosmos-Reason2-8B") == "cosmos-reason2-8b"
+    assert jm.judge_slug("bare-model") == "bare-model"
+    assert jm.judge_slug("Org/Weird__Name!!") == "weird-name"
+    assert jm.judge_slug("") == "judge" and jm.judge_slug("///") == "judge"
+
+
+def test_default_out_dir_is_judge_namespaced():
+    jm = _judge_mod()
+    # main() builds: out_dir = args.out_dir or (eval_dir / tag / f"judge_{judge_slug(model_id)}")
+    eval_dir, tag, model = Path("outputs/eval_habitat_v2_traced"), "habitat_train_full_traced", \
+        "google/gemma-3-12b-it"
+    out_dir = eval_dir / tag / f"judge_{jm.judge_slug(model)}"
+    assert out_dir == eval_dir / tag / "judge_gemma-3-12b-it"
+    # a second judge lands in a distinct dir, so results coexist rather than clobber
+    cosmos = eval_dir / tag / f"judge_{jm.judge_slug('nvidia/Cosmos-Reason2-8B')}"
+    assert cosmos != out_dir
+
+
 def test_aggregate_accuracies_and_contradiction_rate():
     jm = _judge_mod()
     rows = [

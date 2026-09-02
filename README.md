@@ -787,10 +787,23 @@ accuracy" is not one thing and lexical overlap is a weak proxy for it:
   reference-free "does this sound right about the image") forces discrimination and removes the
   leniency an unanchored judge shows. The job also judges the zero-shot **base** reasoning as a
   discrimination check (agreement should drop when zero-shot). Writes
-  `<eval-dir>/<tag>/judge_metrics.json`; resumable; re-running `visualize_traced_comparison.py`
-  after the job folds the scores (traced + base, both sizes) into the report. Caveat: the judge
-  is Qwen-derived like the student, so `JUDGE=<hf-id>` swaps a non-Qwen judge to rule out
-  self-preference.
+  `<eval-dir>/<tag>/judge_<judge-slug>/judge_metrics.json` (the slug namespaces each judge so
+  several coexist without clobbering); resumable; re-running `visualize_traced_comparison.py`
+  after the job folds the scores (traced + base, both sizes) into the report — **one table per
+  judge model**.
+- **Ruling out self-preference — a second judge.** The default judge is Qwen-derived like the
+  student, so it may flatter its own family's traces. Run an **independent-lineage** judge with
+  `JUDGE=<hf-id> sbatch slurm/judge_traces.sbatch`; the finding is trustworthy only if the two
+  judges agree. We use `google/gemma-3-12b-it` (multimodal Gemma 3, `Gemma3ForConditionalGeneration`;
+  the text-only judge loads it through the existing `AutoModelForImageTextToText` path; ~24 GB
+  bf16, fits a 3g.40gb slice). It is **gated**: accept the license at
+  <https://huggingface.co/google/gemma-3-12b-it>, then pre-download on the **login node** (the
+  job runs with `HF_HUB_OFFLINE=1`):
+
+  ```bash
+  HF_TOKEN=<token> ~/.local/bin/uv run hf download google/gemma-3-12b-it
+  JUDGE=google/gemma-3-12b-it sbatch slurm/judge_traces.sbatch
+  ```
 
 ## Visualizations — where each one lives
 

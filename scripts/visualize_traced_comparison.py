@@ -96,10 +96,32 @@ def load_run(eval_dir, tag):
     return metrics, preds
 
 
-def load_judge(eval_dir, tag):
-    """VLM-judge aggregate for this run, if scripts/judge_traces.py has been run; else None."""
-    p = eval_dir / tag / "judge_metrics.json"
-    return json.loads(p.read_text()) if p.exists() else None
+def load_judges(eval_dir, tag):
+    """All VLM-judge aggregates for this run, keyed by judge_model. scripts/judge_traces.py now
+    writes <tag>/judge_<slug>/judge_metrics.json (one dir per judge); older runs wrote a single
+    <tag>/judge_metrics.json — both are picked up, so the pre-namespacing Cosmos run still shows
+    up with zero re-run. Returns {judge_model: aggregate dict}, deduped by judge_model."""
+    out = {}
+    base = eval_dir / tag
+    paths = sorted(base.glob("judge_*/judge_metrics.json"))
+    legacy = base / "judge_metrics.json"
+    if legacy.exists():
+        paths.append(legacy)
+    for p in paths:
+        agg = json.loads(p.read_text())
+        model = agg.get("judge_model") or "unknown"
+        out.setdefault(model, agg)  # namespaced dirs (sorted first) win over the legacy file
+    return out
+
+
+def collect_judges(a_dir, b_dir, traced_tag, base_tag):
+    """One entry per distinct judge model, each carrying its four aggregates (a/b × traced/base)
+    so the report can render a separate table per judge. Sorted by model id for a stable order."""
+    at, bt = load_judges(a_dir, traced_tag), load_judges(b_dir, traced_tag)
+    ab, bb = load_judges(a_dir, base_tag), load_judges(b_dir, base_tag)
+    models = sorted(set(at) | set(bt) | set(ab) | set(bb))
+    return [{"model": m, "aJudge": at.get(m), "bJudge": bt.get(m),
+             "aJudgeBase": ab.get(m), "bJudgeBase": bb.get(m)} for m in models]
 
 
 def load_ref_traces(path):
@@ -307,10 +329,7 @@ def main() -> None:
                              {"base": b_base_m, "plain": b_plain_m, "traced": b_traced_m}),
         "tests": tests,
         "traceQuality": {"hasRef": bool(refs), "a": a_tq, "b": b_tq,
-                         "aJudge": load_judge(args.a_dir, TRACED_TAG),
-                         "bJudge": load_judge(args.b_dir, TRACED_TAG),
-                         "aJudgeBase": load_judge(args.a_dir, BASE_TAG),
-                         "bJudgeBase": load_judge(args.b_dir, BASE_TAG)},
+                         "judges": collect_judges(args.a_dir, args.b_dir, TRACED_TAG, BASE_TAG)},
         "gallery": build_gallery(a_traced_p, b_traced_p, a_plain_p, b_plain_p,
                                  refs, a_rouge, b_rouge,
                                  id_to_image, args.a_label, args.per_bucket, args.max_image_px),

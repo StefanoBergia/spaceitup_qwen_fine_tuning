@@ -584,6 +584,65 @@ def test_pred_summary_extracts_reasoning_or_none():
     assert tv._pred_summary(None) is None
 
 
+def test_load_judges_discovers_legacy_and_namespaced(tmp_path):
+    tv = _traced_viz()
+    tag = "habitat_train_full_traced"
+    d = tmp_path / tag
+    (d / "judge_gemma-3-12b-it").mkdir(parents=True)
+    (d / "judge_gemma-3-12b-it" / "judge_metrics.json").write_text(json.dumps(
+        {"judge_model": "google/gemma-3-12b-it", "direction_accuracy": 0.7, "n_scored": 10}))
+    # a legacy unnamespaced file = the pre-namespacing Cosmos run; must still be picked up
+    (d / "judge_metrics.json").write_text(json.dumps(
+        {"judge_model": "nvidia/Cosmos-Reason2-8B", "direction_accuracy": 0.78, "n_scored": 10}))
+    got = tv.load_judges(tmp_path, tag)
+    assert set(got) == {"google/gemma-3-12b-it", "nvidia/Cosmos-Reason2-8B"}
+    assert got["google/gemma-3-12b-it"]["direction_accuracy"] == 0.7
+    assert tv.load_judges(tmp_path, "no_such_tag") == {}          # empty-safe
+
+
+def test_load_judges_namespaced_wins_over_legacy(tmp_path):
+    """If a model has both a namespaced dir and a stale legacy file, the namespaced one wins."""
+    tv = _traced_viz()
+    d = tmp_path / "t"
+    (d / "judge_cosmos-reason2-8b").mkdir(parents=True)
+    (d / "judge_cosmos-reason2-8b" / "judge_metrics.json").write_text(json.dumps(
+        {"judge_model": "nvidia/Cosmos-Reason2-8B", "score_mean": 4.0}))
+    (d / "judge_metrics.json").write_text(json.dumps(
+        {"judge_model": "nvidia/Cosmos-Reason2-8B", "score_mean": 1.0}))
+    got = tv.load_judges(tmp_path, "t")
+    assert list(got) == ["nvidia/Cosmos-Reason2-8B"]
+    assert got["nvidia/Cosmos-Reason2-8B"]["score_mean"] == 4.0
+
+
+def test_collect_judges_groups_by_model(tmp_path):
+    tv = _traced_viz()
+    TRACED, BASE = "habitat_train_full_traced", "habitat_base"
+
+    def wj(root, tag, model, slug, **fields):
+        p = root / tag / f"judge_{slug}"
+        p.mkdir(parents=True)
+        (p / "judge_metrics.json").write_text(json.dumps({"judge_model": model, **fields}))
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for model, slug, acc in [("nvidia/Cosmos-Reason2-8B", "cosmos-reason2-8b", 0.78),
+                             ("google/gemma-3-12b-it", "gemma-3-12b-it", 0.70)]:
+        wj(a, TRACED, model, slug, direction_accuracy=acc, n_scored=5)
+        wj(b, TRACED, model, slug, direction_accuracy=acc, n_scored=5)
+        wj(a, BASE, model, slug, direction_accuracy=0.20, n_scored=5)
+        wj(b, BASE, model, slug, direction_accuracy=0.05, n_scored=5)
+    judges = tv.collect_judges(a, b, TRACED, BASE)
+    # sorted by model id; each carries its four (a/b × traced/base) slots
+    assert [j["model"] for j in judges] == ["google/gemma-3-12b-it", "nvidia/Cosmos-Reason2-8B"]
+    gemma = judges[0]
+    assert gemma["aJudge"]["direction_accuracy"] == 0.70
+    assert gemma["bJudgeBase"]["direction_accuracy"] == 0.05
+    # a judge that only ran on the traced tag still appears, with None base slots
+    wj(a, TRACED, "solo/only-traced", "only-traced", direction_accuracy=0.5, n_scored=5)
+    judges2 = tv.collect_judges(a, b, TRACED, BASE)
+    solo = next(j for j in judges2 if j["model"] == "solo/only-traced")
+    assert solo["aJudge"] is not None and solo["aJudgeBase"] is None and solo["bJudge"] is None
+
+
 def _write_run(d, tag, model_id, err_median, records):
     (d / tag).mkdir(parents=True)
     metrics = {"num_samples": len(records), "parse_rate": 1.0,
@@ -643,3 +702,5 @@ def test_generator_end_to_end_and_escapes_script(tmp_path, monkeypatch):
     assert len(d["table"]) == 6 and {r["variant"] for r in d["table"]} == {"base", "plain", "traced"}
     assert any(c["a"] and c["a"].get("plainErr") is not None for c in d["gallery"])
     assert any("plain SFT vs traced" in t["title"] for t in d["tests"])
+    # no judge files were written -> judges is present and empty (never a crash / missing key)
+    assert d["traceQuality"]["judges"] == []

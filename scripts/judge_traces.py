@@ -13,11 +13,13 @@ tends to hand out uniform high marks; grading against known truth forces discrim
 
 Verdict per frame (strict JSON): direction_correct, occlusion_correct, contradicts_gt (bools)
 and score (1-5 overall agreement). Aggregate: direction/occlusion accuracy, contradiction rate,
-mean score. Writes <out-dir>/<tag>/judge.jsonl (resumable) + judge_metrics.json.
+mean score. Writes <eval-dir>/<tag>/judge_<judge-slug>/judge.jsonl (resumable) + judge_metrics.json
+— the judge slug namespaces the output so several judges' results coexist instead of clobbering.
 
 Judge model: nvidia/Cosmos-Reason2-8B by default (cached, transformers, no vLLM) — a different
 model from both the trace teacher and the student. It is Qwen-derived, so swap a non-Qwen judge
-via --model-id to rule out self-preference. Needs a GPU; iterate with --max-samples.
+via --model-id (e.g. google/gemma-3-12b-it) to rule out self-preference. Needs a GPU; iterate
+with --max-samples.
 """
 
 import argparse
@@ -31,6 +33,14 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_JUDGE = "nvidia/Cosmos-Reason2-8B"
+
+
+def judge_slug(model_id):
+    """Filesystem-safe tag for a judge's output dir: last path segment, lowercased, with runs of
+    non-alphanumerics collapsed to '-' (e.g. 'google/gemma-3-12b-it' -> 'gemma-3-12b-it',
+    'nvidia/Cosmos-Reason2-8B' -> 'cosmos-reason2-8b')."""
+    name = (model_id or "").rstrip("/").split("/")[-1].lower()
+    return re.sub(r"[^a-z0-9]+", "-", name).strip("-") or "judge"
 
 JUDGE_PROMPT = (
     "You are grading a rover's written reasoning about a scene, against the KNOWN ground "
@@ -146,7 +156,8 @@ def main() -> None:
     p.add_argument("--tag", default="habitat_train_full_traced")
     p.add_argument("--model-id", default=DEFAULT_JUDGE)
     p.add_argument("--out-dir", type=Path, default=None,
-                   help="default: <eval-dir>/<tag>/ alongside predictions.json")
+                   help="default: <eval-dir>/<tag>/judge_<judge-slug>/ (namespaced so several "
+                        "judges coexist)")
     p.add_argument("--max-new-tokens", type=int, default=384)
     p.add_argument("--max-samples", type=int, default=None, help="prompt iteration")
     args = p.parse_args()
@@ -155,7 +166,7 @@ def main() -> None:
     if args.max_samples:
         preds = preds[: args.max_samples]
 
-    out_dir = args.out_dir or (args.eval_dir / args.tag)
+    out_dir = args.out_dir or (args.eval_dir / args.tag / f"judge_{judge_slug(args.model_id)}")
     out_dir.mkdir(parents=True, exist_ok=True)
     jpath = out_dir / "judge.jsonl"
     done = load_done(jpath)

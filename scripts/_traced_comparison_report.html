@@ -206,39 +206,50 @@ const impColor=(v,ref,better)=>{
     + (corr!=null?`, and ROUGE-L correlates only <b>${num(corr,2)}</b> with waypoint error`:``)
     + `. On this task the trace reads as largely <b>decorative</b>; the VLM judge `
     + `(scripts/judge_traces.py) is the trustworthy grounding test.`;
+})();
 
-  // Judge tier — grades the reasoning AGAINST THE GROUND TRUTH, as a table. Only shown once
-  // scripts/judge_traces.py has been run (new-schema files carry direction_accuracy).
+/* ---- judge tier: reasoning graded AGAINST THE GROUND TRUTH, one table per judge model ---- */
+(function(){
+  // Independent of the ROUGE tiers above (which need a Cosmos reference): the judge grades against
+  // the label, so it renders whenever any judge_metrics.json exists (new schema: direction_accuracy).
+  const tq=D.traceQuality;
   const has=j=>j && j.direction_accuracy!=null;
-  if([tq.aJudge,tq.bJudge,tq.aJudgeBase,tq.bJudgeBase].some(has)){
+  const judges=(tq.judges||[]).filter(j=>[j.aJudge,j.bJudge,j.aJudgeBase,j.bJudgeBase].some(has));
+  if(judges.length){
     const jcols=[['direction_accuracy','Direction correct','up'],
                  ['occlusion_accuracy','Occlusion correct','up'],
                  ['contradiction_rate','Contradicts GT','down'],
                  ['score_mean','Overall /5','up']];
-    const baseOf={[D.aLabel]:tq.aJudgeBase,[D.bLabel]:tq.bJudgeBase};
-    const rows=[[D.aLabel,'traced',tq.aJudge],[D.aLabel,'base',tq.aJudgeBase],
-                [D.bLabel,'traced',tq.bJudge],[D.bLabel,'base',tq.bJudgeBase]].filter(r=>has(r[2]));
-    const model=(tq.aJudge||tq.aJudgeBase||tq.bJudge||tq.bJudgeBase).judge_model||'';
     const head='<thead><tr><th>Model</th>'+jcols.map(c=>`<th>${c[1]}</th>`).join('')
       +'<th>n</th></tr></thead>';
-    let prev=null;
-    const body='<tbody>'+rows.map(([label,variant,j])=>{
-      const sep=prev!==null&&label!==prev; prev=label;
-      const cls=(variant==='base'?'base':'')+(sep?' sep':'');
-      const name=variant==='traced'?`${esc(label)} · <b>traced</b>`:`${esc(label)} · base`;
-      const ref=variant==='traced'?baseOf[label]:null;   // colour traced vs its own base
-      const cells=jcols.map(c=>{
-        const v=j[c[0]], fmt=c[0]==='score_mean'?num(v,2):pct(v);
-        const color=ref?impColor(v,ref[c[0]],c[2]):'';
-        return `<td style="${color}">${fmt}</td>`;
-      }).join('');
-      return `<tr class="${cls}"><td>${name}</td>${cells}<td>${j.n_scored}</td></tr>`;
-    }).join('')+'</tbody>';
-    $('tqjudge').innerHTML = `<p class="note">A separate judge (${esc(model)}) is given the true `
-      + `path direction and goal occlusion and grades whether each trace agrees — an objective, `
-      + `checkable measure. The <b>base</b> rows are the discrimination check: agreement should `
-      + `drop sharply when the reasoning is zero-shot, and it does. Traced cells are coloured vs `
-      + `their own base.</p><div class="card scroll"><table>${head+body}</table></div>`;
+    const tableFor=jd=>{
+      const baseOf={[D.aLabel]:jd.aJudgeBase,[D.bLabel]:jd.bJudgeBase};
+      const rows=[[D.aLabel,'traced',jd.aJudge],[D.aLabel,'base',jd.aJudgeBase],
+                  [D.bLabel,'traced',jd.bJudge],[D.bLabel,'base',jd.bJudgeBase]].filter(r=>has(r[2]));
+      let prev=null;
+      const body='<tbody>'+rows.map(([label,variant,j])=>{
+        const sep=prev!==null&&label!==prev; prev=label;
+        const cls=(variant==='base'?'base':'')+(sep?' sep':'');
+        const name=variant==='traced'?`${esc(label)} · <b>traced</b>`:`${esc(label)} · base`;
+        const ref=variant==='traced'?baseOf[label]:null;   // colour traced vs its own base
+        const cells=jcols.map(c=>{
+          const v=j[c[0]], fmt=c[0]==='score_mean'?num(v,2):pct(v);
+          const color=ref?impColor(v,ref[c[0]],c[2]):'';
+          return `<td style="${color}">${fmt}</td>`;
+        }).join('');
+        return `<tr class="${cls}"><td>${name}</td>${cells}<td>${j.n_scored}</td></tr>`;
+      }).join('')+'</tbody>';
+      return `<h4 style="margin:1.1em 0 .4em">Judge: ${esc(jd.model)}</h4>`
+        + `<div class="card scroll"><table>${head+body}</table></div>`;
+    };
+    $('tqjudge').innerHTML = `<p class="note">A separate judge is given the true path direction `
+      + `and goal occlusion and grades whether each trace agrees — an objective, checkable `
+      + `measure. The <b>base</b> rows are the discrimination check: agreement should drop sharply `
+      + `when the reasoning is zero-shot, and it does. Traced cells are coloured vs their own base.`
+      + (judges.length>1 ? ` Running <b>independent-lineage</b> judges (Cosmos is Qwen-derived like `
+        + `the student, Gemma is not) tests self-preference: the finding is trustworthy only if the `
+        + `numbers agree across judges.` : ``)
+      + `</p>` + judges.map(tableFor).join('');
   }
 })();
 
