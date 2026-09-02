@@ -23,6 +23,7 @@ import base64
 import io
 import json
 import math
+import re
 import tempfile
 from pathlib import Path
 
@@ -234,6 +235,9 @@ def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, t
         "baseDirect": base["metrics"]["picked_direct_rate"],
         "fullDirect": m["picked_direct_rate"],
         "trainFull": meta["splits"]["train_full"],
+        # the base model this tree was actually produced by, recorded by evaluate.py —
+        # the page must name it, or a 0.8B report is indistinguishable from a 2B one
+        "model": (m.get("model_id") or "Qwen3.5").removeprefix("Qwen/"),
     }
 
 
@@ -258,7 +262,14 @@ def main() -> None:
     out = args.out or (args.eval_dir / "choice_results.html")
     out.parent.mkdir(parents=True, exist_ok=True)
     html = (Path(__file__).parent / "_choice_report.html").read_text()
-    out.write_text(html.replace("/*__DATA__*/null", json.dumps(data)))
+    html = html.replace("/*__DATA__*/null", json.dumps(data))
+    # the <title> must name the model in the file itself, not just at runtime: it is what
+    # names the published artifact, and two models' reports are otherwise indistinguishable
+    html = re.sub(r"<title>.*?</title>",
+                  f"<title>Habitat path classification — {data['model']} LoRA "
+                  f"({data['trainFull']:,} train / {data['nEval']:,} eval)</title>",
+                  html, count=1)
+    out.write_text(html)
     print(f"wrote {out}  ({out.stat().st_size / 1024:.0f} KB, {len(data['gallery'])} gallery samples)")
 
 

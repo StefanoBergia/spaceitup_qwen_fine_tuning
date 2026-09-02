@@ -7,6 +7,8 @@ experiments run on exactly the same frames and can be compared sample by sample.
 
     uv run scripts/prepare_habitat_choice.py
     uv run scripts/prepare_habitat_choice.py --limit 50    # quick subset for testing
+    uv run scripts/prepare_habitat_choice.py \
+        --src-splits data/prepared_habitat_v2 --out-dir data/prepared_habitat_choice_v2
 
 Rendered images go to data/prepared_habitat_choice/images/ (gitignored; the source
 dataset is never written to). Re-running skips images that already exist, so an
@@ -28,11 +30,21 @@ from rover_vlm.habitat_choice import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_SPLITS = REPO_ROOT / "data" / "prepared_habitat"
 OUT_DIR = REPO_ROOT / "data" / "prepared_habitat_choice"
-SPLIT_NAMES = ["eval", "train_500", "train_1000", "train_2000", "train_full"]
 
 
 def sample_dirs_by_id(root: Path) -> dict[str, Path]:
     return {d.name: d for d in root.glob("*/samples/*/") if d.is_dir()}
+
+
+def split_names(src_splits: Path) -> list[str]:
+    """Whatever splits prepare_habitat.py actually wrote, eval first then ascending size.
+
+    Discovered rather than hardcoded so a prep with different sizes (or train_full only)
+    is mirrored exactly — the two experiments must run on the same frames.
+    """
+    trains = [f.stem for f in src_splits.glob("train_*.json")]
+    trains.sort(key=lambda n: float("inf") if n == "train_full" else int(n.removeprefix("train_")))
+    return ["eval", *trains]
 
 
 def main() -> None:
@@ -59,7 +71,7 @@ def main() -> None:
     cache: dict[str, dict | None] = {}   # id -> record, so nested splits render once
     dropped: dict[str, str] = {}
 
-    for name in SPLIT_NAMES:
+    for name in split_names(args.src_splits):
         src = args.src_splits / f"{name}.json"
         if not src.exists():
             print(f"  {name}: missing in {args.src_splits}, skipping")

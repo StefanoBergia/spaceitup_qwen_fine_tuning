@@ -6,6 +6,11 @@
 #   sbatch slurm/run_all_habitat_choice.sbatch          # Qwen3.5-2B (default)
 #   sbatch slurm/run_all_habitat_choice.sbatch 0.8b     # Qwen3.5-0.8B -> *_0.8b trees
 #
+# Two env vars pick the dataset version and which subset sizes to train, e.g. the
+# enlarged (~9.1K sample) dataset with a single full-size run:
+#
+#   VERSION=_v2 SIZES=train_full sbatch slurm/run_all_habitat_choice.sbatch 2b
+#
 # The model argument suffixes the output trees, so each base model's results are
 # self-contained and no run can overwrite another's. Eval tags stay identical
 # across models, which is what lets compare_evals.py --compare-dir overlay them.
@@ -40,10 +45,13 @@ case "${1:-2b}" in
     *)    echo "ERROR: unknown model '$1' (expected: 2b, 0.8b)" >&2; exit 2 ;;
 esac
 
-DATA=data/prepared_habitat_choice
-EVAL_DIR=outputs/eval_habitat_choice$SUFFIX  # separate from the regression eval trees
-RUNS_DIR=outputs/runs$SUFFIX
-SIZES=(train_500 train_1000 train_2000 train_full)
+# ---- dataset version: VERSION suffixes the data dir *and* both output trees together,
+#      so a re-prep on more data can never land in the previous run's results ----
+VERSION="${VERSION:-}"
+DATA="data/prepared_habitat_choice$VERSION"
+EVAL_DIR="outputs/eval_habitat_choice${VERSION}${SUFFIX}"  # separate from the regression eval trees
+RUNS_DIR="outputs/runs${VERSION}${SUFFIX}"
+read -r -a SIZES <<< "${SIZES:-train_500 train_1000 train_2000 train_full}"
 
 banner() { echo; echo "==================== $* ===================="; date; }
 

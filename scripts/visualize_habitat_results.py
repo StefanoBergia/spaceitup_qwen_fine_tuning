@@ -18,6 +18,7 @@ this page and were never committed, so it could not be regenerated.
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from rover_vlm.eval import goal_visibility_confusion
@@ -156,7 +157,14 @@ def main() -> None:
     out = args.out or (args.eval_dir / "habitat_results.html")
     html = (Path(__file__).parent / "_habitat_report.html").read_text()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(html.replace("/*__DATA__*/null", json.dumps(data)))
+    html = html.replace("/*__DATA__*/null", json.dumps(data))
+    # the <title> must name the model in the file itself, not just at runtime: it is what
+    # names the published artifact, and two models' reports are otherwise indistinguishable
+    html = re.sub(r"<title>.*?</title>",
+                  f"<title>Habitat rover path + visibility — {data['label']} LoRA "
+                  f"({data['trainFull']:,} train / {data['nEval']:,} eval)</title>",
+                  html, count=1)
+    out.write_text(html)
     print(f"wrote {out}  ({out.stat().st_size / 1024:.0f} KB, {len(data['gallery'])} gallery frames)")
 
 
