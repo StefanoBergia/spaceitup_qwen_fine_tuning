@@ -805,6 +805,62 @@ accuracy" is not one thing and lexical overlap is a weak proxy for it:
   JUDGE=google/gemma-3-12b-it sbatch slurm/judge_traces.sbatch
   ```
 
+## Real-image eval (does the Habitat training overfit the renderer?)
+
+Scores every Habitat-path model on **real** forward-facing robot frames whose labels come
+from the robot's own future trajectory: for a frame at time *t* the positions the robot
+went on to occupy (until the path is L m long) are dropped onto the floor plane,
+projected into the frame, occlusion-tested against depth where available, and pushed
+through the same clip/resample/format code as the Habitat labels
+(`src/rover_vlm/real_data.py`, geometry in `src/rover_vlm/projection.py`). The eval
+script runs unchanged (`--task habitat --eval-file data/prepared_real/<set>/eval.json`).
+Asset survey and why these two datasets: `docs/real_eval_assets.md`.
+
+| Set | Source | Frames | Camera | Visibility labels |
+|---|---|---|---|---|
+| `tum_pioneer` | TUM RGB-D fr2 `pioneer_{360,slam,slam2,slam3}` (Pioneer robot, Kinect, mocap camera poses) | 91 | 0.60 m (fitted from depth), 63° HFOV, 640×480 | depth occlusion test |
+| `gnd_campus` | GND `GMU_1_2_jcScEn_chunk01` + `GTown2_chunk01` (Jackal, ZED2 rectified, EKF odometry) | 502 | **0.45 m assumed** (not in the bags), 101° HFOV, 640×360 | none (all visible) |
+
+Habitat renders are 0.8 m / 90° / 512×512, so both sets shift geometry as well as
+appearance; the report puts each model's real numbers under its own Habitat numbers.
+
+```bash
+# 1. download (login node): TUM tgz (~5.5 GB) and GND bag chunks (~3 GB each, CC0)
+uv run scripts/download_real_eval.py --tum
+uv run scripts/download_real_eval.py --gnd-list
+uv run scripts/download_real_eval.py --gnd GMU_1_2_jcScEn_chunk01.bag GTown2_chunk01.bag
+
+# 2. label (CPU). TUM drives are short and loopy -> 2-6 m horizons; GND takes the Habitat 3-12 m.
+uv run scripts/prepare_real_eval.py --dataset tum --name tum_pioneer \
+    --source data/real/tum/rgbd_dataset_freiburg2_pioneer_{slam,slam2,slam3,360} \
+    --min-len 2 --max-len 6 --max-window-s 90 --stride-s 0.5
+uv run scripts/prepare_real_eval.py --dataset gnd --name gnd_campus --cam-height 0.45 --stride-s 1.5 \
+    --source data/real/gnd/GMU_1_2_jcScEn_chunk01.bag data/real/gnd/GTown2_chunk01.bag
+
+# 3. look before spending GPU time: outputs/inspection_real/<set>/sheet.png
+uv run scripts/inspect_real_eval.py --set tum_pioneer --num 16
+
+# 4. GPU: base 2B + plain 2B/0.8B + traced 2B/0.8B on one set (idempotent, ~1 h)
+sbatch slurm/run_all_real.sbatch tum_pioneer
+sbatch slurm/run_all_real.sbatch gnd_campus
+#    or a single model: [THINK=1] [MODEL_ID=...] sbatch slurm/eval_real.sbatch <set> <tag> [adapter]
+
+# 5. report (CPU): outputs/eval_real/{comparison.md,real_eval.html}
+uv run scripts/visualize_real_eval.py
+```
+
+Prepare prints a skip histogram; the filters that matter are `endpoint_off_axis` /
+`initial_off_axis` (the goal must be within 45° of the optical axis and the first metre
+of travel within 30°, so the label distribution matches Habitat's "goal ahead, path from
+the rover"), and for TUM `track_too_short` / `too_slow` (mocap coverage ends, or the
+robot idles). `meta.json` records the fitted camera height per set — TUM's 0.60 ± 0.01 m
+agrees with the mocap z, which is the check that the depth-fitted floor plane is right.
+
+Known limits: GND has no depth, so its visibility columns are not meaningful and its
+camera height is an estimate (±0.1 m scales the path rows by ~±10 %); only the first
+chunk of a GND recording carries `tf_static`. OpenLORIS-Scene (indoor service robot at
+~1 m with depth, form-gated) is the planned next indoor set.
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
@@ -820,6 +876,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Cross-round: what more data bought | `uv run scripts/visualize_crossround.py` | `outputs/crossround_report.html` |
 | Trace prompt: how v6 was arrived at | `uv run scripts/visualize_traces.py` | `outputs/traces_report.html` |
 | Traced fine-tune: 2B vs 0.8B + reasoning | `uv run scripts/visualize_traced_comparison.py` | `outputs/eval_habitat_v2_traced/traced_comparison.html` |
+| Real-image eval: Habitat vs real per model | `uv run scripts/visualize_real_eval.py` | `outputs/eval_real/real_eval.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):
