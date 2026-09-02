@@ -7,6 +7,7 @@ from rover_vlm.consistency import (
     per_image_consistency,
     sample_spread,
     spearman,
+    start_edge,
 )
 
 
@@ -15,12 +16,36 @@ def _pred(dx=0.0, goal_v=1):
             "goal": [0.5 + dx, 0.2, goal_v]}
 
 
+def _entering_from(x0, y0):
+    return {"path": [[x0, y0, 1], [0.5, 0.6, 1]], "goal": [0.5, 0.55, 0]}
+
+
 def test_identical_draws_have_zero_spread_and_full_agreement():
     s = sample_spread([_pred(), _pred(), _pred()])
     assert s["n_draws"] == 3 and s["n_parsed"] == 3
     assert s["path_spread"] == 0.0
     assert s["goal_spread"] == 0.0
     assert s["goal_vis_agreement"] == 1.0
+    assert s["start_edge_agreement"] == 1.0
+
+
+def test_start_edge_classifies_borders_with_bottom_winning_corners():
+    assert start_edge(_entering_from(0.0, 0.85)) == "left"
+    assert start_edge(_entering_from(1.0, 0.81)) == "right"
+    assert start_edge(_entering_from(0.5, 1.0)) == "bottom"
+    assert start_edge(_entering_from(0.97, 1.0)) == "bottom"    # corner -> bottom
+    assert start_edge(_entering_from(0.04, 0.7)) == "left"      # within tolerance
+    assert start_edge(_entering_from(0.3, 0.7)) == "none"       # starts mid-image
+    assert start_edge({"path": [], "goal": [0.5, 0.5, 1]}) == "none"
+
+
+def test_route_flip_lowers_edge_agreement_but_jitter_does_not():
+    flip = sample_spread([_entering_from(0.0, 0.85), _entering_from(1.0, 0.85),
+                          _entering_from(0.0, 0.83)])
+    assert flip["start_edge_agreement"] == pytest.approx(2 / 3)
+    jitter = sample_spread([_entering_from(0.0, 0.85), _entering_from(0.02, 0.88)])
+    assert jitter["start_edge_agreement"] == 1.0
+    assert jitter["path_spread"] > 0.0
 
 
 def test_shifted_draw_gives_known_spread():
@@ -96,11 +121,14 @@ def test_spearman_monotone_and_anticorrelated():
 def test_aggregate_reports_medians_parse_rate_and_correlation():
     per_image = {
         1: {"n_draws": 2, "n_parsed": 2, "path_spread": 0.1, "goal_spread": 0.1,
-            "goal_vis_agreement": 1.0, "err_mean": 0.1, "err_std": 0.0, "greedy_err": 0.1},
+            "goal_vis_agreement": 1.0, "start_edge_agreement": 1.0,
+            "err_mean": 0.1, "err_std": 0.0, "greedy_err": 0.1},
         2: {"n_draws": 2, "n_parsed": 2, "path_spread": 0.3, "goal_spread": 0.2,
-            "goal_vis_agreement": 0.5, "err_mean": 0.3, "err_std": 0.1, "greedy_err": 0.3},
+            "goal_vis_agreement": 0.5, "start_edge_agreement": 0.5,
+            "err_mean": 0.3, "err_std": 0.1, "greedy_err": 0.3},
         3: {"n_draws": 2, "n_parsed": 1, "path_spread": None, "goal_spread": None,
-            "goal_vis_agreement": None, "err_mean": 0.9, "err_std": None, "greedy_err": 0.9},
+            "goal_vis_agreement": None, "start_edge_agreement": None,
+            "err_mean": 0.9, "err_std": None, "greedy_err": 0.9},
     }
     agg = aggregate_consistency(per_image)
     assert agg["num_images"] == 3 and agg["num_with_spread"] == 2
@@ -109,6 +137,8 @@ def test_aggregate_reports_medians_parse_rate_and_correlation():
     assert agg["path_spread_mean"] == pytest.approx(0.2)
     assert agg["goal_spread_median"] == pytest.approx(0.15)
     assert agg["goal_vis_agreement_mean"] == pytest.approx(0.75)
+    assert agg["start_edge_agreement_mean"] == pytest.approx(0.75)
+    assert agg["start_edge_flip_rate"] == pytest.approx(0.5)   # image 2 flipped, image 1 did not
     assert agg["err_std_mean"] == pytest.approx(0.05)
     assert agg["spread_vs_greedy_err_spearman"] == pytest.approx(1.0)
 
@@ -119,4 +149,5 @@ def test_aggregate_handles_no_spread_at_all():
                                      "err_mean": None, "err_std": None, "greedy_err": None}})
     assert agg["num_with_spread"] == 0 and agg["path_spread_median"] is None
     assert agg["spread_vs_greedy_err_spearman"] is None
+    assert agg["start_edge_flip_rate"] is None
     assert math.isclose(agg["parse_rate"], 0.0)

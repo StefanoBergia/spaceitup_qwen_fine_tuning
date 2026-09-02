@@ -274,15 +274,19 @@ const impColor=(v,ref,better)=>{
     + `the draws' paths, on the same 10-point resampling as the waypoint error — so a spread of 0.10 is `
     + `“as uncertain as being 0.10 off”. Lower = more stable. The <b>spread ↔ error</b> column is the `
     + `Spearman correlation between an image's spread and the greedy run's error on it: positive means `
-    + `the model is least consistent exactly where it is wrong, i.e. spread is a usable confidence signal.`;
+    + `the model is least consistent exactly where it is wrong, i.e. spread is a usable confidence signal. `
+    + `<b>Route flips</b> is the fraction of images whose draws do not all enter from the same image border `
+    + `(bottom / left / right): the dominant way draws disagree is not jitter around one route but a `
+    + `switch between two routes, which plain spread cannot tell apart from noise.`;
   const cols=[['path_spread_median','Path spread (median)','down','Median over images of the mean pairwise path distance between draws.'],
               ['path_spread_mean','Path spread (mean)','down','Mean over images of the same.'],
               ['goal_spread_median','Goal spread (median)','down','Median pairwise distance between the draws\' goal points.'],
               ['goal_vis_agreement_mean','Goal-vis. agreement','up','Mean fraction of draws agreeing with the majority visible/obstructed call.'],
+              ['start_edge_flip_rate','Route flips','down','Fraction of images whose draws do not all start from the same image border (bottom/left/right).'],
               ['err_std_mean','Error std across draws','down','Mean per-image std of waypoint error vs ground truth across draws.'],
               ['parse_rate','Parse rate (all draws)','up','Fraction of sampled draws that parsed.'],
               ['spread_vs_greedy_err_spearman','Spread ↔ greedy error','up','Spearman correlation between per-image spread and the greedy run\'s error.']];
-  const fmt=(k,v)=>k==='parse_rate'||k.indexOf('agreement')>=0?pct(v):num(v);
+  const fmt=(k,v)=>k==='parse_rate'||k.indexOf('agreement')>=0||k.indexOf('flip_rate')>=0?pct(v):num(v);
   box.innerHTML = sizes.map(([label,c])=>{
     const head='<thead><tr><th>Model</th>'+cols.map(x=>`<th><span class="info" title="${esc(x[3])}">${esc(x[1])} ⓘ</span></th>`).join('')+'<th>images</th></tr></thead>';
     const rows=[['plain SFT (no reasoning)',c.plain,null],['traced',c.traced,c.plain]].filter(r=>r[1]);

@@ -16,9 +16,33 @@ import numpy as np
 from rover_vlm.eval import resample_polyline
 
 
+EDGE_TOL = 0.05
+
+
 def _points(pred):
     pts = pred["path"] if pred["path"] else [pred["goal"]]
     return np.array([[p[0], p[1]] for p in pts], dtype=float)
+
+
+def start_edge(pred, tol=EDGE_TOL):
+    """Which image border the path enters from: "bottom" / "left" / "right", or "none" when
+    the first waypoint is not within `tol` of a border (or the prediction has no path).
+
+    Habitat paths start where the rover is, so the ground truth always begins on a border
+    (bottom ~77%, left/right the rest). The dominant way sampled draws disagree is not
+    jitter but a *route flip* — one draw enters from the left, another from the right — and
+    plain spread cannot tell that apart from small noise, so the edge is tracked on its own.
+    Bottom wins at a corner (e.g. (0.97, 1.0) is a bottom entry)."""
+    if not pred["path"]:
+        return "none"
+    x, y = pred["path"][0][0], pred["path"][0][1]
+    if y >= 1 - tol:
+        return "bottom"
+    if x <= tol:
+        return "left"
+    if x >= 1 - tol:
+        return "right"
+    return "none"
 
 
 def sample_spread(draws, n_resample=10):
@@ -26,11 +50,13 @@ def sample_spread(draws, n_resample=10):
     ({"path": [[x,y,v],...], "goal": [x,y,v]}) or None for an unparseable draw.
 
     path_spread / goal_spread: mean pairwise distance between draws (mean resampled point
-    distance / goal-point distance). goal_vis_agreement: fraction of parsed draws agreeing
-    with the majority visibility flag. All None when fewer than two draws parsed."""
+    distance / goal-point distance). goal_vis_agreement / start_edge_agreement: fraction of
+    parsed draws agreeing with the majority visibility flag / majority entry edge (see
+    start_edge). All None when fewer than two draws parsed."""
     parsed = [d for d in draws if d is not None]
     out = {"n_draws": len(draws), "n_parsed": len(parsed),
-           "path_spread": None, "goal_spread": None, "goal_vis_agreement": None}
+           "path_spread": None, "goal_spread": None, "goal_vis_agreement": None,
+           "start_edge_agreement": None}
     if len(parsed) < 2:
         return out
     paths = [resample_polyline(_points(d), n_resample) for d in parsed]
@@ -41,6 +67,8 @@ def sample_spread(draws, n_resample=10):
     out["goal_spread"] = float(np.mean([np.linalg.norm(goals[i] - goals[j]) for i, j in pairs]))
     flags = [int(d["goal"][2]) for d in parsed]
     out["goal_vis_agreement"] = max(flags.count(0), flags.count(1)) / len(flags)
+    edges = [start_edge(d) for d in parsed]
+    out["start_edge_agreement"] = max(edges.count(e) for e in set(edges)) / len(edges)
     return out
 
 
@@ -104,6 +132,13 @@ def aggregate_consistency(per_image):
         agg[f"{key}_mean"] = float(np.mean(vals)) if vals else None
     agree = [r["goal_vis_agreement"] for r in with_spread]
     agg["goal_vis_agreement_mean"] = float(np.mean(agree)) if agree else None
+    # start_edge_flip_rate: fraction of images whose draws do not all enter from the same
+    # border — the "two competing routes" failure, as opposed to jitter around one route.
+    edge_agree = [r["start_edge_agreement"] for r in with_spread
+                  if r.get("start_edge_agreement") is not None]
+    agg["start_edge_agreement_mean"] = float(np.mean(edge_agree)) if edge_agree else None
+    agg["start_edge_flip_rate"] = (float(np.mean([a < 1.0 for a in edge_agree]))
+                                   if edge_agree else None)
     stds = [r["err_std"] for r in with_spread if r["err_std"] is not None]
     agg["err_std_mean"] = float(np.mean(stds)) if stds else None
     both = [(r["path_spread"], r["greedy_err"]) for r in with_spread if r["greedy_err"] is not None]

@@ -4,7 +4,12 @@
 # output moves for the same image. Idempotent — a seed whose metrics.json exists is skipped,
 # so resubmit to continue after a failure or time limit.
 #
-#   sbatch slurm/eval_seeds.sbatch                       # all four configs, one job (~10 h at 5 seeds)
+# The job runs the *committed* scripts/ and src/ (git HEAD at job start) from a private
+# snapshot, so checking out another branch on the login node during the multi-hour run cannot
+# change the code under it (job 90525 died that way: a checkout removed --seed from
+# evaluate.py between seed 1 and seed 2). Commit before submitting.
+#
+#   sbatch slurm/eval_seeds.sbatch                      # all four configs, one job (~10 h at 5 seeds)
 #   sbatch slurm/eval_seeds.sbatch traced2b              # one config (~2.5 h) — launch four in parallel
 #   sbatch slurm/eval_seeds.sbatch plain2b traced2b      # any subset, in the given order
 #   SEEDS="1 2 3" TEMPERATURE=0.7 sbatch slurm/eval_seeds.sbatch
@@ -23,6 +28,17 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 mkdir -p outputs/slurm
 export HF_HUB_OFFLINE=1
 UV=~/.local/bin/uv
+
+# Snapshot the committed sources (see header). PYTHONPATH wins over the editable install of
+# rover_vlm, so the snapshot's src/ is what gets imported; --no-sync keeps uv from re-syncing
+# the venv against whatever lockfile the working tree has later on.
+SNAP="outputs/slurm/src_snapshot_${SLURM_JOB_ID:-local}"
+rm -rf "$SNAP"; mkdir -p "$SNAP"
+git archive HEAD scripts src | tar -x -C "$SNAP"
+export PYTHONPATH="$PWD/$SNAP/src${PYTHONPATH:+:$PYTHONPATH}"
+trap 'rm -rf "$SNAP"' EXIT
+echo "sources: git $(git rev-parse --short HEAD) snapshot -> $SNAP"
+[ -z "$(git status --porcelain scripts src)" ] || echo "WARNING: uncommitted changes in scripts/ or src/ are NOT in the snapshot"
 
 ALL_CONFIGS="plain2b plain0.8b traced2b traced0.8b"
 CONFIGS="${*:-$ALL_CONFIGS}"
@@ -61,7 +77,7 @@ run_config() {
             continue
         fi
         banner "[$CONFIG] seed $SEED -> $OUT"
-        $UV run scripts/evaluate.py --task habitat \
+        $UV run --no-sync python "$SNAP/scripts/evaluate.py" --task habitat \
             --model-id "$MODEL" --adapter "$ADAPTER" --tag "$TAG" \
             --eval-file "$EVAL_FILE" --out-dir "$EVAL_DIR" \
             --seed "$SEED" --temperature "$TEMPERATURE" --top-p "$TOP_P" --top-k "$TOP_K" \

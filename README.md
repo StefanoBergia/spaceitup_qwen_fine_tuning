@@ -818,6 +818,9 @@ canonical one. Several seeds of the same run are then compared per image by
 - **path spread** — mean pairwise distance between the draws' paths, on the same 10-point
   resampling as the waypoint error, so spread and error share a scale (lower = more stable);
 - **goal spread** and **goal-visibility agreement** (fraction of draws siding with the majority);
+- **route-flip rate** — fraction of images whose draws do not all enter from the same image
+  border (bottom / left / right). The dominant way draws disagree is a switch between two
+  routes (left-edge entry vs right-edge entry), which plain spread blurs with jitter;
 - **error std across draws**, **parse rate over all draws**;
 - **spread ↔ greedy error** — Spearman correlation between an image's spread and the greedy
   run's error on it. Positive = the model is least consistent exactly where it is wrong, i.e.
@@ -826,7 +829,8 @@ canonical one. Several seeds of the same run are then compared per image by
 Run the four configurations (plain / traced × 2B / 0.8B; the base model is skipped — it parses
 only ~63% of the time, so its spread would measure garbage), 5 seeds each (~2.5 h per config).
 One job does all four in sequence; the job skips seeds that already have a `metrics.json`, so
-resubmit after a failure or time limit:
+resubmit after a failure or time limit. The job runs a snapshot of the *committed* `scripts/`
+and `src/`, so commit first — switching branches on the login node mid-job is then safe:
 
 ```bash
 sbatch slurm/eval_seeds.sbatch                                          # all four, one job (~10 h)
