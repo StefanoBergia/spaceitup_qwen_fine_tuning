@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from rover_vlm.eval import goal_visibility_confusion
+from rover_vlm.eval import goal_visibility_confusion, shape_correlation, trivial_baselines
 from rover_vlm.overlay import GT_GREY, draw_goal, draw_path, draw_polyline, embed_jpeg, side_by_side
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +40,7 @@ COLORS = {"base_2b": (213, 94, 0), "plain_2b": (42, 120, 214), "plain_0.8b": (0,
 COLS = [
     ("parse_rate", "Parse rate", "{:.3f}"),
     ("mean_point_error_median", "Median point err", "{:.3f}"),
+    ("shape_rho", "Path\u2194image \u03c1", "{:+.2f}"),
     ("frechet_median", "Median Fréchet", "{:.3f}"),
     ("goal_point_error_median", "Median goal err", "{:.3f}"),
     ("path_visibility_acc_mean", "Waypoint vis. acc", "{:.3f}"),
@@ -55,6 +56,8 @@ def load_run(run_dir):
     preds = json.loads((run_dir / "predictions.json").read_text())
     conf = goal_visibility_confusion(preds)
     m["goal_balanced"] = conf["balanced_accuracy"] if conf["n_visible"] and conf["n_obstructed"] else None
+    rho = shape_correlation(preds)
+    m["shape_rho"] = None if rho != rho else rho  # NaN -> the model gave one shape every frame
     m["_preds"] = preds
     return m
 
@@ -80,7 +83,7 @@ def build_tables(eval_root, sets):
         set_meta = json.loads((REPO_ROOT / "data" / "prepared_real" / s / "meta.json").read_text()) \
             if (REPO_ROOT / "data" / "prepared_real" / s / "meta.json").exists() else {}
         head = ["Model", "Eval set"] + [c[1] for c in COLS]
-        rows = []
+        rows, base_rows = [], []
         any_run = False
         for tag, label, hab_dir in MODELS:
             hab = load_run(REPO_ROOT / hab_dir)
@@ -93,12 +96,22 @@ def build_tables(eval_root, sets):
             rows.append(["", f"{s} ({real['num_samples']})"] + [fmt(real, k, f, vis_ok) for k, _, f in COLS])
         if not any_run:
             continue
+        first = next(load_run(eval_root / s / t) for t, _, _ in MODELS
+                     if (eval_root / s / t / "metrics.json").exists())
+        base = trivial_baselines([r["gt"] for r in first["_preds"]])
+        for key, label in (("straight", "straight line up the middle"),
+                           ("constant", "set-mean constant path")):
+            base_rows.append([label, "image-blind baseline"]
+                             + [fmt(base[key], k, f) if k == "mean_point_error_median" else "–"
+                                for k, _, f in COLS])
+        rows = base_rows + rows
         title = f"{s}: {set_meta.get('kept', '?')} frames, HFOV {set_meta.get('hfov_deg', '?')}°, " \
                 f"camera {set_meta.get('cam_height_m', {}).get('mean', float('nan')):.2f} m"
         md.append(f"### {title}\n\n| " + " | ".join(head) + " |\n|" + "---|" * len(head) + "\n"
                   + "\n".join("| " + " | ".join(r) + " |" for r in rows) + "\n")
         htm.append(f"<h2>{html.escape(title)}</h2><table><tr>" + "".join(f"<th>{html.escape(h)}</th>" for h in head)
-                   + "</tr>" + "".join("<tr class='" + ("hab" if r[1].startswith("Habitat") else "real") + "'>"
+                   + "</tr>" + "".join("<tr class='" + ("base" if r[1].startswith("image-blind")
+                                                        else "hab" if r[1].startswith("Habitat") else "real") + "'>"
                                        + "".join(f"<td>{html.escape(c)}</td>" for c in r) + "</tr>" for r in rows)
                    + "</table>")
     return "\n".join(md), "\n".join(htm)
@@ -166,7 +179,7 @@ h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:28px 0 8px}h3{font-siz
 p.lead{color:var(--muted);margin:0 0 12px}
 table{border-collapse:collapse;font-variant-numeric:tabular-nums;margin-bottom:8px}
 th,td{border-bottom:1px solid var(--line);padding:5px 12px;text-align:right}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
-tr.hab td{background:var(--hab);color:var(--muted)}tr.real td{font-weight:600}
+tr.hab td{background:var(--hab);color:var(--muted)}tr.real td{font-weight:600}\ntr.base td{background:#fdf3e7;color:#8a5a1a;font-style:italic}
 figure{margin:0 0 14px}figure img{max-width:100%;display:block;border:1px solid var(--line)}
 figcaption{font-size:12px;color:var(--muted);margin-top:3px}
 </style>
@@ -186,9 +199,14 @@ def main():
     galleries = "".join(build_gallery(args.eval_root, s, args.gallery) for s in sets)
     (args.eval_root / "comparison.md").write_text("# Habitat vs real-image eval\n\n" + md)
     page = ("<title>Real-image path eval</title>" + STYLE + "<h1>Habitat-trained path models on real robot frames</h1>"
-            "<p class='lead'>Each model's real-set row sits under its own Habitat v2 eval row; normalized-coordinate "
-            "errors are comparable across sets only in that per-model sense (the real sets have different fields of "
-            "view and label distributions). Labels come from the robot's own future trajectory projected into the frame.</p>"
+            "<p class='lead'>Each model's real-set row sits under its own Habitat v2 eval row. Labels come from the "
+            "robot's own future trajectory projected into the frame. Two readings guard against a flattering number. "
+            "The <b>image-blind baselines</b> at the top of each table are what a model scores by ignoring the picture "
+            "entirely, so a row worse than those has not transferred. <b>Path\u2194image \u03c1</b> is the rank "
+            "correlation between how the predicted path bends and how the true route bends; it is positive only if the "
+            "answer depends on the image, and \u2013 means the model gave the same shape on every frame. Habitat's own "
+            "goal sits at x = 0.5 in 100% of its samples by construction, so its goal-error column never tested lateral "
+            "placement.</p>"
             + tables + "<h2>Gallery</h2>" + galleries)
     (args.eval_root / "real_eval.html").write_text(page)
     print(md)

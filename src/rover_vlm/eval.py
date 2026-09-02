@@ -355,3 +355,64 @@ def aggregate_choice_metrics(records):
         str(k): float(np.mean(v)) for k, v in sorted(by_sym.items())
     }
     return summary
+
+
+# --- real-image eval: is a number good, and is the model reading the image? -----------
+
+def _signed_lateral(wps, n=10):
+    """Mean sideways offset of a path from its own first waypoint (+ = drifts right).
+
+    A one-number summary of which way a path bends, used to correlate a prediction's
+    shape against the ground truth's. Sign matters: an unsigned magnitude would score a
+    left turn and a right turn as agreeing.
+    """
+    xy, _ = _resample_flags(wps, n)
+    return float((xy[:, 0] - xy[0, 0]).mean())
+
+
+def spearman(a, b):
+    """Rank correlation; NaN when either side is constant (no ranks to correlate)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if len(a) < 3 or np.std(a) < 1e-12 or np.std(b) < 1e-12:
+        return float("nan")
+    ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
+    return float(np.corrcoef(ra, rb)[0, 1])
+
+
+def shape_correlation(records):
+    """Spearman(predicted path bend, ground-truth path bend) over an eval run.
+
+    The decisive test for an out-of-domain eval: a model that reads the image bends its
+    path the same way the true route bends, so rho is positive. Around zero means the
+    answer is uninformed by the picture, however well-formatted it is.
+    """
+    pairs = [(_signed_lateral(r["parsed"]["path"]), _signed_lateral(r["gt"]["path"]))
+             for r in records
+             if r.get("parsed") and r["parsed"].get("path") and r["gt"].get("path")]
+    if len(pairs) < 3:
+        return float("nan")
+    return spearman([p for p, _ in pairs], [g for _, g in pairs])
+
+
+def trivial_baselines(gts, n=10):
+    """Scores an image-blind predictor would get on this eval set.
+
+    Normalized-coordinate errors have no absolute meaning, so a model's number is only
+    interpretable against what costs nothing to achieve:
+      * `straight`: a vertical line up the middle of the frame, ending at the set's
+        median goal height -- no perception at all.
+      * `constant`: the set's own mean path, i.e. the best possible image-blind answer.
+    A model that does not beat these has not transferred, whatever its error looks like.
+    """
+    paths = [g["path"] or [g["goal"]] for g in gts]
+    resampled = np.stack([_resample_flags(p, n)[0] for p in paths])
+    mean_path = resampled.mean(axis=0)
+    median_goal_y = float(np.median([g["goal"][1] for g in gts]))
+    straight = np.stack([np.full(n, 0.5), np.linspace(1.0, median_goal_y, n)], axis=1)
+    out = {}
+    for name, ref in (("straight", straight), ("constant", mean_path)):
+        errs = [float(np.linalg.norm(ref - r, axis=1).mean()) for r in resampled]
+        out[name] = {"mean_point_error_median": float(np.median(errs)),
+                     "mean_point_error_mean": float(np.mean(errs))}
+    out["constant"]["path"] = mean_path.tolist()
+    return out
