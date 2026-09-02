@@ -11,6 +11,12 @@ Writes to outputs/eval/<tag>/:
     predictions.json — per-sample: prompt id, generated text, parsed waypoints, metrics
     metrics.json     — aggregate: parse rate, in-range rate, waypoint errors (mean/median)
 
+Decoding is greedy by default (deterministic; the canonical result). Pass --seed to draw ONE
+sampled answer per image (temperature/top-p/top-k below) — the run then lands in
+<tag>/seeds/seed<k>/ so the greedy result stays untouched, and several seeds can be compared
+with rover_vlm.consistency to measure how much the output moves for the same image:
+    uv run scripts/evaluate.py --task habitat --tag habitat_train_full --adapter ... --seed 1
+
 All models are evaluated on the same fixed eval split (data/prepared/eval.json), so
 tags are directly comparable; scripts/compare_evals.py builds the scaling table/plot.
 """
@@ -61,7 +67,30 @@ def parse_args() -> argparse.Namespace:
                         "an adapter trained by scripts/prepare_habitat_traces.py; leave off "
                         "for plain (answer-only) adapters and the base model.")
     p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None,
+                   help="draw a SAMPLED answer with this RNG seed (implies do_sample) and write "
+                        "to <tag>/seeds/seed<k>/. Omit for greedy decoding at <tag>/.")
+    # Qwen's recommended non-thinking sampling settings; applied identically to traced and
+    # plain adapters so a spread comparison between them is fair.
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--top-p", type=float, default=0.8)
+    p.add_argument("--top-k", type=int, default=20)
     return p.parse_args()
+
+
+def run_out_dir(out_dir: Path, tag: str, seed: int | None) -> Path:
+    """Greedy runs own <out-dir>/<tag>/; seeded draws nest under it so they never clobber."""
+    base = out_dir / tag
+    return base if seed is None else base / "seeds" / f"seed{seed}"
+
+
+def generation_kwargs(seed, temperature, top_p, top_k) -> dict:
+    """generate() decoding args: greedy unless a seed is given, then sampling."""
+    if seed is None:
+        return {"do_sample": False}
+    if temperature <= 0:
+        raise ValueError("--seed draws a sample, which needs --temperature > 0")
+    return {"do_sample": True, "temperature": temperature, "top_p": top_p, "top_k": top_k}
 
 
 def build_messages(prompt: str, image: Image.Image) -> list[dict]:
@@ -81,7 +110,9 @@ def main() -> None:
     use_cuda = torch.cuda.is_available()
     dtype = torch.bfloat16 if use_cuda else torch.float32
     device = "cuda" if use_cuda else "cpu"
-    print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device}")
+    gen_kwargs = generation_kwargs(args.seed, args.temperature, args.top_p, args.top_k)
+    print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device} "
+          f"seed={args.seed} decoding={gen_kwargs}")
 
     processor = AutoProcessor.from_pretrained(args.model_id)
     processor.tokenizer.padding_side = "left"  # decoder-only batched generation
@@ -120,7 +151,11 @@ def main() -> None:
 
         batch = processor(text=texts, images=images, padding=True, return_tensors="pt").to(device)
         with torch.no_grad():
-            out = model.generate(**batch, max_new_tokens=args.max_new_tokens, do_sample=False)
+            if args.seed is not None:
+                # seed per batch (not once per run) so a draw for a given image does not
+                # depend on how many batches ran before it
+                torch.manual_seed(args.seed * 1_000_003 + start)
+            out = model.generate(**batch, max_new_tokens=args.max_new_tokens, **gen_kwargs)
         new_tokens = out[:, batch["input_ids"].shape[1] :]
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)
 
@@ -166,8 +201,9 @@ def main() -> None:
     summary["tag"] = args.tag
     summary["model_id"] = args.model_id
     summary["adapter"] = str(args.adapter) if args.adapter else None
+    summary["decoding"] = {"seed": args.seed, **gen_kwargs}
 
-    out_dir = args.out_dir / args.tag
+    out_dir = run_out_dir(args.out_dir, args.tag, args.seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "predictions.json").write_text(json.dumps(results, indent=1))
     (out_dir / "metrics.json").write_text(json.dumps(summary, indent=2))

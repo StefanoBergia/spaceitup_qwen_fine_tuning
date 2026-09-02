@@ -121,3 +121,31 @@ def test_embed_jpeg_is_a_self_contained_data_uri():
     raw = base64.b64decode(uri.split(",", 1)[1])
     assert raw[:2] == b"\xff\xd8"                       # JPEG magic
     assert max(Image.open(__import__("io").BytesIO(raw)).size) == 64
+
+
+def test_render_pair_draws_sampled_paths_faintly(tmp_path):
+    """Optional `samples_*` lists (one parsed prediction per sampled draw) are drawn behind
+    the greedy path; passing them must change the panel, and omitting them must not."""
+    import numpy as np
+    from PIL import Image
+    from rover_vlm.overlay import render_pair
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64), "gray").save(img)
+    gt = {"path": [[0.5, 0.9, 1], [0.5, 0.5, 1]], "goal": [0.5, 0.4, 1]}
+    pred = {"path": [[0.5, 0.9, 1], [0.5, 0.5, 1]], "goal": [0.5, 0.4, 1]}
+    # samples far from the greedy path, on the left side of the frame
+    samples = [{"path": [[0.1, 0.9, 1], [0.1, 0.5, 1]], "goal": [0.1, 0.4, 1]},
+               {"path": [[0.15, 0.9, 1], [0.15, 0.5, 0]], "goal": [0.15, 0.4, 0]}]
+    plain = render_pair(img, gt, pred, pred, (0, 0, 255), (255, 128, 0))
+    with_s = render_pair(img, gt, pred, pred, (0, 0, 255), (255, 128, 0),
+                         samples_left=samples, samples_right=None)
+    again = render_pair(img, gt, pred, pred, (0, 0, 255), (255, 128, 0),
+                        samples_left=None, samples_right=None)
+    assert np.array_equal(np.asarray(plain), np.asarray(again))
+    a, b = np.asarray(plain), np.asarray(with_s)
+    assert a.shape == b.shape
+    half = a.shape[1] // 2
+    assert not np.array_equal(a[:, :half], b[:, :half])   # left panel changed
+    assert np.array_equal(a[:, half:], b[:, half:])       # right panel untouched
+    # an unparseable sample (None) is simply skipped
+    render_pair(img, gt, pred, None, (0, 0, 255), (255, 128, 0), samples_left=[None, samples[0]])

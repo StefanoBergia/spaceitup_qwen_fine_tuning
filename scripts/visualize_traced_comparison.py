@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from rover_vlm.compare import paired_bootstrap
+from rover_vlm.consistency import aggregate_consistency, per_image_consistency
 from rover_vlm.overlay import embed_jpeg, render_pair
 from rover_vlm.trace_eval import (
     aggregate_trace_quality,
@@ -122,6 +123,60 @@ def collect_judges(a_dir, b_dir, traced_tag, base_tag):
     models = sorted(set(at) | set(bt) | set(ab) | set(bb))
     return [{"model": m, "aJudge": at.get(m), "bJudge": bt.get(m),
              "aJudgeBase": ab.get(m), "bJudgeBase": bb.get(m)} for m in models]
+
+
+def load_seeds(eval_dir, tag):
+    """Sampled draws for a run: every <tag>/seeds/seed<k>/predictions.json written by
+    scripts/evaluate.py --seed k, as [{"seed": k, "preds": {id: rec}, "decoding": {...}}]
+    in numeric seed order. Empty list when the run was never sampled."""
+    out = []
+    for sd in (eval_dir / tag / "seeds").glob("seed*"):
+        ppath = sd / "predictions.json"
+        m = re.fullmatch(r"seed(\d+)", sd.name)
+        if not (m and ppath.exists()):
+            continue
+        mpath = sd / "metrics.json"
+        decoding = (json.loads(mpath.read_text()).get("decoding") or {}) if mpath.exists() else {}
+        out.append({"seed": int(m.group(1)),
+                    "preds": {r["id"]: r for r in json.loads(ppath.read_text())},
+                    "decoding": decoding})
+    return sorted(out, key=lambda s: s["seed"])
+
+
+def _consistency_for(eval_dir, tag):
+    """(aggregate, per-image, n_seeds, decoding) for one run, or None if it has no seeds."""
+    seeds = load_seeds(eval_dir, tag)
+    if not seeds:
+        return None
+    _, greedy = load_run(eval_dir, tag)
+    per_image = per_image_consistency([s["preds"] for s in seeds], greedy)
+    return aggregate_consistency(per_image), per_image, len(seeds), seeds[0]["decoding"]
+
+
+def consistency_block(plain_dir, plain_tag, traced_dir, traced_tag):
+    """Sampling consistency for one model size: plain vs traced aggregates plus a paired
+    bootstrap on per-image path spread (lower = more stable), over the images where both
+    have a spread. None when neither run was sampled; a missing side is None and the
+    test is skipped. `perImagePlain` / `perImageTraced` are {id: per-image row} for the
+    gallery, and are stripped before the payload is written."""
+    plain, traced = _consistency_for(plain_dir, plain_tag), _consistency_for(traced_dir, traced_tag)
+    if plain is None and traced is None:
+        return None
+    test = None
+    if plain and traced:
+        as_recs = lambda per: {i: {"metrics": {"path_spread": r["path_spread"]}}
+                               for i, r in per.items() if r["path_spread"] is not None}
+        s = paired_bootstrap(as_recs(plain[1]), as_recs(traced[1]), "path_spread")
+        if s:
+            test = {**s, "aName": "plain SFT", "bName": "traced",
+                    "significant": s["lo"] > 0 or s["hi"] < 0,
+                    "better": "plain SFT" if s["diff"] < 0 else "traced"}
+    src = traced or plain
+    return {"nSeeds": src[2], "decoding": src[3],
+            "plain": plain[0] if plain else None, "traced": traced[0] if traced else None,
+            "test": test,
+            "perImagePlain": plain[1] if plain else None,
+            "perImageTraced": traced[1] if traced else None}
 
 
 def load_ref_traces(path):
@@ -216,12 +271,28 @@ def _plain_err(preds, sid):
     return None
 
 
+def _draws(seeds, sid):
+    """Parsed prediction per sampled draw for one image (None for unparseable draws)."""
+    return [(s["preds"].get(sid) or {}).get("parsed") for s in seeds]
+
+
+def _spread_fields(per_image, sid, n_seeds):
+    row = (per_image or {}).get(sid)
+    return {"spread": (round(row["path_spread"], 3)
+                       if row and row["path_spread"] is not None else None),
+            "nDraws": n_seeds if per_image else None}
+
+
 def build_gallery(a_traced, b_traced, a_plain, b_plain, refs, a_rouge, b_rouge,
-                  id_to_image, a_label, per_bucket, max_px):
+                  id_to_image, a_label, per_bucket, max_px,
+                  a_seeds=(), b_seeds=(), a_per_image=None, b_per_image=None):
     """Rank eval ids into easy/medium/hard terciles by the A traced waypoint error, pick
     `per_bucket` from each, and render both models' reasoning + paths for the same frame. Each
     model's per-sample PLAIN error and ROUGE-L vs the Cosmos reference are attached, and the
-    reference trace itself is shown, so a card is a full student-vs-teacher-vs-truth view."""
+    reference trace itself is shown, so a card is a full student-vs-teacher-vs-truth view.
+
+    `*_seeds` (load_seeds output for the traced runs) draw each sampled path faintly under
+    the greedy one, and `*_per_image` supplies that frame's spread number."""
     scored = sorted((r["metrics"]["mean_point_error"], sid)
                     for sid, r in a_traced.items()
                     if r.get("metrics") and sid in id_to_image)
@@ -245,14 +316,17 @@ def build_gallery(a_traced, b_traced, a_plain, b_plain, refs, a_rouge, b_rouge,
             img = render_pair(path, gt,
                               ar.get("parsed") if ar else None,
                               br.get("parsed") if br else None,
-                              COLOR_A, COLOR_B)
+                              COLOR_A, COLOR_B,
+                              samples_left=_draws(a_seeds, sid), samples_right=_draws(b_seeds, sid))
             sa, sb = _pred_summary(ar), _pred_summary(br)
             if sa:
                 sa["plainErr"] = _plain_err(a_plain, sid)
                 sa["rouge"] = round(a_rouge[sid], 3) if sid in a_rouge else None
+                sa.update(_spread_fields(a_per_image, sid, len(a_seeds)))
             if sb:
                 sb["plainErr"] = _plain_err(b_plain, sid)
                 sb["rouge"] = round(b_rouge[sid], 3) if sid in b_rouge else None
+                sb.update(_spread_fields(b_per_image, sid, len(b_seeds)))
             out.append({
                 "id": sid, "bucket": key, "bucketTitle": title,
                 "img": embed_jpeg(img, max_px * 2),
@@ -318,6 +392,14 @@ def main() -> None:
                     a_traced_p, b_traced_p, args.a_label, args.b_label),
     ) if t]
 
+    # Sampling consistency: how much each model's answer moves between sampled draws of the
+    # same image (slurm/eval_seeds.sbatch). Optional — None per size until seeds exist.
+    a_cons = consistency_block(args.a_plain_dir, PLAIN_TAG, args.a_dir, TRACED_TAG)
+    b_cons = consistency_block(args.b_plain_dir, PLAIN_TAG, args.b_dir, TRACED_TAG)
+    a_seeds, b_seeds = load_seeds(args.a_dir, TRACED_TAG), load_seeds(args.b_dir, TRACED_TAG)
+    strip = lambda blk: ({k: v for k, v in blk.items() if not k.startswith("perImage")}
+                         if blk else None)
+
     data = {
         "aLabel": args.a_label, "bLabel": args.b_label,
         "nEval": a_traced_m["num_samples"],
@@ -330,9 +412,13 @@ def main() -> None:
         "tests": tests,
         "traceQuality": {"hasRef": bool(refs), "a": a_tq, "b": b_tq,
                          "judges": collect_judges(args.a_dir, args.b_dir, TRACED_TAG, BASE_TAG)},
+        "consistency": {"a": strip(a_cons), "b": strip(b_cons)},
         "gallery": build_gallery(a_traced_p, b_traced_p, a_plain_p, b_plain_p,
                                  refs, a_rouge, b_rouge,
-                                 id_to_image, args.a_label, args.per_bucket, args.max_image_px),
+                                 id_to_image, args.a_label, args.per_bucket, args.max_image_px,
+                                 a_seeds, b_seeds,
+                                 a_cons and a_cons["perImageTraced"],
+                                 b_cons and b_cons["perImageTraced"]),
     }
 
     out = args.out or (args.a_dir / "traced_comparison.html")

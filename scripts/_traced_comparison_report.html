@@ -86,6 +86,10 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--grid);color:v
   <div class="callout" id="tqcaveat"></div>
   <div id="tqjudge"></div>
 
+  <h2>Sampling consistency — how much does the answer move for the same image?</h2>
+  <p class="note" id="csnote"></p>
+  <div id="cs"></div>
+
   <h2>Per-sample reasoning — what each size actually said</h2>
   <p class="note" id="ghint"></p>
   <div class="legend">
@@ -253,13 +257,59 @@ const impColor=(v,ref,better)=>{
   }
 })();
 
+/* ---- sampling consistency: per size, plain vs traced, spread across sampled draws ---- */
+(function(){
+  const C=D.consistency||{}, note=$('csnote'), box=$('cs');
+  const sizes=[[D.aLabel,C.a],[D.bLabel,C.b]].filter(([,c])=>c);
+  if(!sizes.length){
+    note.textContent='No sampled draws yet — run slurm/eval_seeds.sbatch for each configuration, '
+      + 'then regenerate this report.';
+    box.style.display='none'; return;
+  }
+  const dec=sizes[0][1].decoding||{};
+  note.innerHTML = `Greedy decoding gives one answer per image, which says nothing about how <i>sure</i> the `
+    + `model is. Here each model instead draws <b>${sizes[0][1].nSeeds}</b> sampled answers per image `
+    + `(temperature ${num(dec.temperature,2)}, top-p ${num(dec.top_p,2)}, top-k ${dec.top_k??'—'}; same `
+    + `settings for every model) and we measure the <b>spread</b>: the mean pairwise distance between `
+    + `the draws' paths, on the same 10-point resampling as the waypoint error — so a spread of 0.10 is `
+    + `“as uncertain as being 0.10 off”. Lower = more stable. The <b>spread ↔ error</b> column is the `
+    + `Spearman correlation between an image's spread and the greedy run's error on it: positive means `
+    + `the model is least consistent exactly where it is wrong, i.e. spread is a usable confidence signal.`;
+  const cols=[['path_spread_median','Path spread (median)','down','Median over images of the mean pairwise path distance between draws.'],
+              ['path_spread_mean','Path spread (mean)','down','Mean over images of the same.'],
+              ['goal_spread_median','Goal spread (median)','down','Median pairwise distance between the draws\' goal points.'],
+              ['goal_vis_agreement_mean','Goal-vis. agreement','up','Mean fraction of draws agreeing with the majority visible/obstructed call.'],
+              ['err_std_mean','Error std across draws','down','Mean per-image std of waypoint error vs ground truth across draws.'],
+              ['parse_rate','Parse rate (all draws)','up','Fraction of sampled draws that parsed.'],
+              ['spread_vs_greedy_err_spearman','Spread ↔ greedy error','up','Spearman correlation between per-image spread and the greedy run\'s error.']];
+  const fmt=(k,v)=>k==='parse_rate'||k.indexOf('agreement')>=0?pct(v):num(v);
+  box.innerHTML = sizes.map(([label,c])=>{
+    const head='<thead><tr><th>Model</th>'+cols.map(x=>`<th><span class="info" title="${esc(x[3])}">${esc(x[1])} ⓘ</span></th>`).join('')+'<th>images</th></tr></thead>';
+    const rows=[['plain SFT (no reasoning)',c.plain,null],['traced',c.traced,c.plain]].filter(r=>r[1]);
+    const body='<tbody>'+rows.map(([name,agg,ref])=>{
+      const cells=cols.map(x=>{const v=agg[x[0]];
+        return `<td style="${ref?impColor(v,ref[x[0]],x[2]):''}">${fmt(x[0],v)}</td>`;}).join('');
+      return `<tr><td>${esc(label)} · ${name==='traced'?'<b>traced</b>':esc(name)}</td>${cells}<td>${agg.num_with_spread}/${agg.num_images}</td></tr>`;
+    }).join('')+'</tbody>';
+    const t=c.test;
+    const verdict=!t?'':`<div class="callout"><div class="test"><b>${esc(label)}: which is more stable?</b> Mean path spread `
+      + `plain SFT <b>${num(t.a,4)}</b> vs traced <b>${num(t.b,4)}</b> over ${t.n.toLocaleString()} images with a spread on both `
+      + `— paired diff ${num(t.diff,4)} (95% CI ${num(t.lo,4)} to ${num(t.hi,4)}); `
+      + (t.significant?`<b>${esc(t.better)} is significantly more consistent</b>`:`the gap is <b>not significant</b>`)+`.</div></div>`;
+    return `<h4 style="margin:1.1em 0 .4em">${esc(label)}</h4><div class="card scroll"><table>${head+body}</table></div>${verdict}`;
+  }).join('');
+})();
+
 /* ---- gallery: reasoning + paths, both sizes, per frame ---- */
 (function(){
   const tone={easy:'var(--good)',medium:'var(--warn)',hard:'var(--crit)'};
   const g={}; D.gallery.forEach(o=>(g[o.bucket]=g[o.bucket]||[]).push(o));
   $('ghint').innerHTML = `Frames grouped by how hard they were for the <i>${esc(D.aLabel)}</i> traced model `
     + `(its own waypoint error). Each card: the frame with both sizes' predicted paths over the grey `
-    + `ground-truth corridor, then the reasoning each size generated before answering.`;
+    + `ground-truth corridor, then the reasoning each size generated before answering.`
+    + ((D.consistency&&(D.consistency.a||D.consistency.b))
+       ? ` Faint thin lines in a model's colour are its <b>sampled draws</b> for that frame — the `
+         + `wider they fan out, the less sure the model is; the card quotes the spread.` : '');
 
   const pane=(label,color,p)=>{
     if(!p) return `<div class="pane"><h4><span class="sw" style="background:${color}"></span>${esc(label)}</h4>`
@@ -269,10 +319,11 @@ const impColor=(v,ref,better)=>{
       ` <span style="color:${p.err<=p.plainErr?'var(--good)':'var(--crit)'}">`
       + `(plain SFT ${num(p.plainErr)} — reasoning ${p.err<=p.plainErr?'helped':'hurt'} here)</span>`;
     const rouge = p.rouge==null ? '' : ` · <span title="ROUGE-L vs Cosmos teacher">ROUGE ${num(p.rouge)}</span>`;
+    const spread = p.spread==null ? '' : ` · <span title="mean pairwise path distance across ${p.nDraws} sampled draws">spread ${num(p.spread)} over ${p.nDraws} draws</span>`;
     return `<div class="pane"><h4><span class="sw" style="background:${color}"></span>${esc(label)}</h4>`
       + `<div class="metrics">traced err <b>${num(p.err)}</b>${pcmp} · Fréchet ${num(p.frechet)} · vis ${pct(p.vis)} · `
       + `goal ${p.goalOk?'<b style="color:var(--good)">right</b>':'<b style="color:var(--crit)">wrong</b>'}${rouge} · `
-      + `${p.nWaypoints} waypoints → goal ${goal}</div>`
+      + `${p.nWaypoints} waypoints → goal ${goal}${spread}</div>`
       + `<div class="reason">${esc(p.reasoning)||'<span class="none">empty</span>'}</div></div>`;
   };
 
