@@ -824,11 +824,13 @@ canonical one. Several seeds of the same run are then compared per image by
   spread works as a confidence signal.
 
 Run the four configurations (plain / traced × 2B / 0.8B; the base model is skipped — it parses
-only ~63% of the time, so its spread would measure garbage) in parallel on four 3g.40gb slices,
-5 seeds each (~2.5 h per config); the job skips seeds that already have a `metrics.json`:
+only ~63% of the time, so its spread would measure garbage), 5 seeds each (~2.5 h per config).
+One job does all four in sequence; the job skips seeds that already have a `metrics.json`, so
+resubmit after a failure or time limit:
 
 ```bash
-for c in plain2b plain0.8b traced2b traced0.8b; do sbatch slurm/eval_seeds.sbatch $c; done
+sbatch slurm/eval_seeds.sbatch                                          # all four, one job (~10 h)
+for c in plain2b plain0.8b traced2b traced0.8b; do sbatch slurm/eval_seeds.sbatch $c; done  # or parallel
 SEEDS="1 2 3" TEMPERATURE=0.5 sbatch slurm/eval_seeds.sbatch traced2b   # override
 uv run scripts/visualize_traced_comparison.py                           # login node
 ```
