@@ -69,20 +69,36 @@ def side_by_side(left, right, gap=8):
     return out
 
 
-def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, max_px=520):
+def faint(color, mix=0.55):
+    """The model's colour blended towards white — for sampled draws behind the greedy path."""
+    return tuple(int(c + (255 - c) * mix) for c in color)
+
+
+def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, max_px=520,
+                samples_left=None, samples_right=None):
     """One frame rendered twice — ground truth plus each model's prediction — joined.
 
     Returns a PIL image. `pred_*` may be None (the model produced nothing parseable),
     in which case that panel shows ground truth alone rather than being dropped, so the
     failure stays visible instead of silently vanishing from the gallery.
+
+    `samples_*` (optional) are parsed predictions from sampled draws of the same model;
+    they are drawn as thin, faint lines UNDER the greedy path so the panel shows how much
+    the answer moves between draws. None entries (unparseable draws) are skipped.
     """
     panels = []
-    for pred, color in ((pred_left, color_left), (pred_right, color_right)):
+    for pred, color, samples in ((pred_left, color_left, samples_left),
+                                 (pred_right, color_right, samples_right)):
         img = Image.open(image_path).convert("RGB")
         W, H = img.size
         d = ImageDraw.Draw(img)
         if gt and gt.get("path"):
             draw_polyline(d, [(p[0], p[1]) for p in gt["path"]], GT_GREY, W, H, width=9)
+        for s in samples or ():
+            pts = (s.get("path") or [s["goal"]]) if s else None
+            if pts:
+                draw_polyline(d, [(p[0], p[1]) for p in pts], faint(color), W, H,
+                              width=2, underlay=False)
         if pred and pred.get("path"):
             draw_path(d, pred["path"], color, W, H)
         if pred and pred.get("goal"):

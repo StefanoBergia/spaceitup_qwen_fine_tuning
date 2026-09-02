@@ -805,6 +805,41 @@ accuracy" is not one thing and lexical overlap is a weak proxy for it:
   JUDGE=google/gemma-3-12b-it sbatch slurm/judge_traces.sbatch
   ```
 
+### Sampling consistency — how much does the answer move for the same image?
+
+Every eval above decodes **greedily**, which yields one answer per image and says nothing
+about how *sure* the model is. `scripts/evaluate.py --seed <k>` instead draws ONE sampled
+answer per image (`--temperature 0.7 --top-p 0.8 --top-k 20` by default — Qwen's recommended
+non-thinking settings, applied identically to plain and traced adapters so the comparison is
+fair) and writes it to `<eval-dir>/<tag>/seeds/seed<k>/` so the greedy result stays the
+canonical one. Several seeds of the same run are then compared per image by
+`src/rover_vlm/consistency.py`:
+
+- **path spread** — mean pairwise distance between the draws' paths, on the same 10-point
+  resampling as the waypoint error, so spread and error share a scale (lower = more stable);
+- **goal spread** and **goal-visibility agreement** (fraction of draws siding with the majority);
+- **error std across draws**, **parse rate over all draws**;
+- **spread ↔ greedy error** — Spearman correlation between an image's spread and the greedy
+  run's error on it. Positive = the model is least consistent exactly where it is wrong, i.e.
+  spread works as a confidence signal.
+
+Run the four configurations (plain / traced × 2B / 0.8B; the base model is skipped — it parses
+only ~63% of the time, so its spread would measure garbage), 5 seeds each (~2.5 h per config).
+One job does all four in sequence; the job skips seeds that already have a `metrics.json`, so
+resubmit after a failure or time limit:
+
+```bash
+sbatch slurm/eval_seeds.sbatch                                          # all four, one job (~10 h)
+for c in plain2b plain0.8b traced2b traced0.8b; do sbatch slurm/eval_seeds.sbatch $c; done  # or parallel
+SEEDS="1 2 3" TEMPERATURE=0.5 sbatch slurm/eval_seeds.sbatch traced2b   # override
+uv run scripts/visualize_traced_comparison.py                           # login node
+```
+
+The traced report gains a **Sampling consistency** section (per size: plain vs traced table
+plus a paired bootstrap on path spread), and each gallery card draws the sampled paths as
+faint thin lines under the greedy one and quotes that frame's spread. Both stay hidden until
+seed dirs exist.
+
 ## Real-image eval (does the Habitat training overfit the renderer?)
 
 Scores every Habitat-path model on **real** forward-facing robot frames whose labels come
