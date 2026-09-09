@@ -26,8 +26,12 @@ from pathlib import Path
 
 import numpy as np
 
-from rover_vlm.projection import backproject_depth, fit_floor_plane
-from rover_vlm.real_data import TumSequence, build_real_record, window_end_index
+from rover_vlm.real_data import (
+    TumSequence,
+    WindowParams,
+    iter_gnd_frames,
+    iter_tum_frames,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_ROOT = REPO_ROOT / "data" / "prepared_real"
@@ -51,94 +55,53 @@ def parse_args():
                    help="goal must lie within this many degrees of the optical axis")
     p.add_argument("--max-initial-angle", type=float, default=30.0,
                    help="first metre of travel must be within this many degrees of the optical axis")
+    p.add_argument("--goal-from-path", action="store_true",
+                   help="choose the goal as the farthest point of the recorded route that is "
+                        "actually straight ahead (within --max-goal-angle, on screen, at least "
+                        "--min-goal-dist-m along the track), instead of taking the fixed "
+                        "--horizon-m endpoint wherever it lands. The training prompt says the "
+                        "goal IS straight ahead, so without this the label contradicts the "
+                        "prompt -- real endpoints sit a median 37 deg off axis")
+    p.add_argument("--min-goal-dist-m", type=float, default=1.0,
+                   help="with --goal-from-path, reject a goal nearer than this along the route")
+    p.add_argument("--goal-tail-m", type=float, default=0.0,
+                   help="with --goal-from-path, draw the goal uniformly from the qualifying "
+                        "route points within this many metres of the last one (seeded by "
+                        "--seed), instead of always taking the last one. Metres rather than "
+                        "sample count because TUM mocap and GND odometry differ by ~10x in rate")
     p.add_argument("--max-samples", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--cam-height", type=float, default=None,
                    help="GND: camera height above ground (m); the bags do not record it")
+    p.add_argument("--tf-static-from", type=Path, default=None,
+                   help="GND: bag to borrow /tf_static from (only chunk01 of a recording "
+                        "carries it, but the camera mount is static for the whole recording, "
+                        "so chunk01's tree is correct for chunk02..NN)")
+    p.add_argument("--depth-tol-s", type=float, default=0.0,
+                   help="TUM label recovery: when a frame has no depth image inside the strict "
+                        "association window, use the nearest one within this many seconds "
+                        "(0 = off, and the frame is dropped as no_depth). Every TUM colour frame "
+                        "has depth within 0.07 s, so 0.08 recovers all of them")
+    p.add_argument("--interp-pose", action="store_true",
+                   help="label recovery: interpolate the trajectory at the frame timestamp "
+                        "instead of requiring a sample inside the association tolerance "
+                        "(TUM mocap runs at 300 Hz, so the true pose is bracketed)")
+    p.add_argument("--min-horizon-m", type=float, default=None,
+                   help="label recovery: keep a window that ends before --horizon-m as long as "
+                        "it is at least this long, instead of dropping it as track_too_short")
     return p.parse_args()
 
 
-def iter_tum(seq: TumSequence, args, rng, skipped: Counter):
-    """Yield records from one TUM sequence."""
-    last_plane = None
-    next_t = -np.inf
-    for k, frame in enumerate(seq.frames):
-        if frame.t < next_t:
-            continue
-        next_t = frame.t + args.stride_s
-        T_w_c = seq.camera_pose(frame.t)
-        if T_w_c is None:
-            skipped["no_gt"] += 1
-            continue
-        L = args.horizon_m if args.horizon_m else rng.uniform(args.min_len, args.max_len)
-        i0 = seq.traj.index_at(frame.t, seq.pose_tol_s)
-        i1 = window_end_index(seq.traj, i0, L, args.max_window_s, args.max_gap_s)
-        if isinstance(i1, str):
-            skipped[i1] += 1
-            continue
-        depth = seq.load_depth(frame)
-        if depth is None:
-            skipped["no_depth"] += 1
-            continue
-        plane = fit_floor_plane(backproject_depth(depth, seq.K), seed=args.seed + k)
-        plane_source = "depth"
-        if plane is None:
-            if last_plane is None:
-                skipped["plane_fit_failed"] += 1
-                continue
-            plane, plane_source = last_plane, "previous_frame"
-        else:
-            last_plane = plane
-        future_w = seq.traj.positions[i0:i1 + 1]
-        rec, reason = build_real_record(
-            f"{seq.root.name}_{frame.image.stem}", frame.image, seq.K, T_w_c, future_w, plane,
-            depth_m=depth, max_goal_angle_deg=args.max_goal_angle,
-            max_initial_angle_deg=args.max_initial_angle,
-            meta={"dataset": "tum", "sequence": seq.root.name, "timestamp": frame.t,
-                  "horizon_m": round(L, 2), "plane_source": plane_source,
-                  "gt_tz_m": round(float(T_w_c[2, 3]), 3)},
-        )
-        if rec is None:
-            skipped[reason] += 1
-            continue
-        yield rec
-
-
-def iter_gnd(bag_path: Path, out_images: Path, args, rng, skipped: Counter):
+def open_source(dataset, src, out_dir, args):
+    """Build the dataset adapter for one --source and return (adapter, frame walk)."""
+    if dataset == "tum":
+        seq = TumSequence(src)
+        return seq, iter_tum_frames
     from rover_vlm.real_data import GndBag  # rosbags import kept local
 
-    bag = GndBag(bag_path, out_images, cam_height=args.cam_height)
-    print(f"[gnd] {bag_path.name}: {len(bag.frames)} frames, {len(bag.traj.t)} odom poses, "
-          f"K fx={bag.K.fx:.1f} hfov={bag.K.hfov_deg:.1f} deg, floor normal from "
-          f"{bag.extrinsic_source}, cam height {bag.cam_height:.3f} m (assumed)")
-    next_t = -np.inf
-    for frame in bag.frames:
-        if frame.t < next_t:
-            continue
-        next_t = frame.t + args.stride_s
-        T_w_c = bag.camera_pose(frame.t)
-        if T_w_c is None:
-            skipped["no_odom"] += 1
-            continue
-        L = args.horizon_m if args.horizon_m else rng.uniform(args.min_len, args.max_len)
-        i0 = bag.traj.index_at(frame.t, bag.pose_tol_s)
-        i1 = window_end_index(bag.traj, i0, L, args.max_window_s, args.max_gap_s)
-        if isinstance(i1, str):
-            skipped[i1] += 1
-            continue
-        future_w = bag.ground_positions(i0, i1)
-        plane = bag.floor_plane(frame.t)
-        rec, reason = build_real_record(
-            f"{bag_path.stem}_{frame.image.stem}", bag.materialize(frame), bag.K, T_w_c, future_w,
-            plane, depth_m=None, max_goal_angle_deg=args.max_goal_angle,
-            max_initial_angle_deg=args.max_initial_angle,
-            meta={"dataset": "gnd", "sequence": bag_path.stem, "timestamp": frame.t,
-                  "horizon_m": round(L, 2), "plane_source": bag.extrinsic_source},
-        )
-        if rec is None:
-            skipped[reason] += 1
-            continue
-        yield rec
+    bag = GndBag(src, out_dir / "images", cam_height=args.cam_height,
+                 tf_static_from=args.tf_static_from)
+    return bag, iter_gnd_frames
 
 
 def main():
@@ -148,16 +111,16 @@ def main():
     rng = random.Random(args.seed)
     skipped = Counter()
     records = []
+    params = WindowParams.from_args(args)
     for src in args.source:
-        if args.dataset == "tum":
-            seq = TumSequence(src)
-            print(f"[tum] {src.name}: {len(seq.frames)} frames, {len(seq.traj.t)} poses")
-            gen = iter_tum(seq, args, rng, skipped)
-        else:
-            gen = iter_gnd(src, out_dir / "images", args, rng, skipped)
+        adapter, walk = open_source(args.dataset, src, out_dir, args)
+        print(adapter.summary())
         n_before = len(records)
-        for rec in gen:
-            records.append(rec)
+        for res in walk(adapter, params, rng):
+            if res.record is None:
+                skipped[res.reason] += 1
+                continue
+            records.append(res.record)
             if args.max_samples and len(records) >= args.max_samples:
                 break
         print(f"  kept {len(records) - n_before} from {src.name}")

@@ -7,9 +7,9 @@
 #   sbatch slurm/run_all_habitat.sbatch 0.8b     # Qwen3.5-0.8B -> *_0.8b trees
 #
 # Two env vars pick the dataset version and which subset sizes to train, e.g. the
-# enlarged (~9.1K sample) dataset with a single full-size run:
+# yaw-augmented round-3 dataset (~23.8K samples) with a single full-size run:
 #
-#   VERSION=_v2 SIZES=train_full sbatch slurm/run_all_habitat.sbatch 2b
+#   VERSION=_v3 SIZES=train_full sbatch slurm/run_all_habitat.sbatch 2b
 #
 # The model argument suffixes the output trees, so each base model's results are
 # self-contained and no run can overwrite another's. Eval tags stay identical
@@ -17,11 +17,13 @@
 #
 # Idempotent: completed stages are skipped (adapter / metrics.json already
 # present), so if the job dies or hits the time limit, just resubmit it and it
-# continues where it left off. Expected total: ~2-3 h on a 3g.40gb slice
-# (train_full is 3,660 samples).
+# continues where it left off. Expected total scales with the round: ~2-3 h on a
+# 3g.40gb slice for round 1 (train_full 3,660), ~4 h for round 3 (train_full
+# 23,770 + a 2,591-sample eval set), at a measured ~4.6 samples/s.
 #
-# Prereq: run `uv run scripts/prepare_habitat.py` on the login node first so
-# data/prepared_habitat/ exists.
+# Prereq: run the matching prep on the login node first, so $DATA exists --
+# round 3 is:
+#   uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v3 --goal-in-prompt
 #
 #SBATCH --job-name=qwen-habitat-all
 #SBATCH --partition=A100

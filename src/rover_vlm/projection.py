@@ -74,6 +74,34 @@ def invert_pose(T):
     return Ti
 
 
+def interpolate_pose(T0, T1, u):
+    """Rigid pose a fraction `u` of the way from T0 to T1: lerp the translation, slerp the
+    rotation. Works straight off the 4x4s (the source quaternions are not kept), by taking
+    the relative rotation to axis-angle, scaling the angle, and composing it back on.
+    """
+    u = float(u)
+    T = np.eye(4)
+    T[:3, 3] = (1.0 - u) * T0[:3, 3] + u * T1[:3, 3]
+    R_rel = T0[:3, :3].T @ T1[:3, :3]
+    cos = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+    angle = np.arccos(cos)
+    if angle < 1e-9:  # no rotation between the samples
+        T[:3, :3] = T0[:3, :3]
+        return T
+    axis = np.array([R_rel[2, 1] - R_rel[1, 2],
+                     R_rel[0, 2] - R_rel[2, 0],
+                     R_rel[1, 0] - R_rel[0, 1]])
+    n = np.linalg.norm(axis)
+    if n < 1e-9:  # 180 deg: the off-diagonal trick degenerates, fall back to the nearer end
+        T[:3, :3] = T0[:3, :3] if u < 0.5 else T1[:3, :3]
+        return T
+    axis, a = axis / n, angle * u
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    R_u = np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)  # Rodrigues
+    T[:3, :3] = T0[:3, :3] @ R_u
+    return T
+
+
 def transform_points(T, pts):
     """Apply 4x4 T to (N,3) points."""
     pts = np.asarray(pts, dtype=float).reshape(-1, 3)

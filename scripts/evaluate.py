@@ -146,6 +146,11 @@ def main() -> None:
             # choice scoring needs the accepted set, which the answer string can't carry
             if args.task == "choice":
                 gts.append(rec["choice_meta"])
+            elif args.task == "habitat":
+                # through the same parser as the prediction, so a round-3 answer (path
+                # only, goal = path[-1]) and a round-1/2 one (explicit goal key) both
+                # arrive as {"path", "goal"} and every metric stays field-for-field
+                gts.append(parse_path_answer(rec["conversations"][1]["value"]))
             else:
                 gts.append(json.loads(rec["conversations"][1]["value"]))
 
@@ -179,16 +184,18 @@ def main() -> None:
                     metrics = trajectory_metrics(scored, gt)
                 else:
                     metrics, rescaled = None, False
-            results.append(
-                {
-                    "id": rec["id"],
-                    "generated": text,
-                    "parsed": parsed,
-                    "rescaled": rescaled,
-                    "gt": gt,
-                    "metrics": metrics,
-                }
-            )
+            row = {
+                "id": rec["id"],
+                "generated": text,
+                "parsed": parsed,
+                "rescaled": rescaled,
+                "gt": gt,
+                "metrics": metrics,
+            }
+            # carried through so results can be sliced by source/scene downstream
+            if "habitat_meta" in rec:
+                row["habitat_meta"] = rec["habitat_meta"]
+            results.append(row)
         done = start + len(chunk)
         print(f"  {done}/{len(records_in)} ({(time.time() - t0) / done:.2f}s/sample)", flush=True)
 

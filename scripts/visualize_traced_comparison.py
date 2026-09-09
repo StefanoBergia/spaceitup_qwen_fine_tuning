@@ -30,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
+from rover_vlm.trace_eval import reasoning_and_answer
 from rover_vlm.compare import paired_bootstrap
 from rover_vlm.consistency import aggregate_consistency, per_image_consistency
 from rover_vlm.overlay import embed_jpeg, render_pair
@@ -70,21 +71,6 @@ TABLE_COLS = [
     ("goal_visibility_accuracy", "Goal vis. acc",
      "Accuracy of the goal's visible-vs-obstructed call.", "up"),
 ]
-
-
-def reasoning_and_answer(generated):
-    """Split a `generated` string into (reasoning, answer) on the first </think>.
-
-    The --enable-thinking prompt supplies the opening <think>, so the decoded text begins
-    INSIDE the reasoning; everything up to the first </think> is the trace and the rest is
-    the emitted answer. A string with no </think> (typical base-model ramble) is treated as
-    all-reasoning with an empty answer. Only the FIRST </think> splits, so a stray tag in the
-    answer body cannot re-split it."""
-    marker = "</think>"
-    i = generated.find(marker)
-    if i == -1:
-        return generated.strip(), ""
-    return generated[:i].strip(), generated[i + len(marker):].strip()
 
 
 def load_run(eval_dir, tag):

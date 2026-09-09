@@ -17,7 +17,8 @@ import json
 import random
 from pathlib import Path
 
-from rover_vlm.habitat_choice import DATASET_ROOT, build_choice_record, render_choice_image
+from rover_vlm.habitat_data import DATASET_ROOTS, sample_dirs_by_id
+from rover_vlm.habitat_choice import build_choice_record, render_choice_image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "outputs" / "inspection_habitat_choice"
@@ -25,7 +26,7 @@ OUT_DIR = REPO_ROOT / "outputs" / "inspection_habitat_choice"
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--dataset-root", type=Path, nargs="*", default=list(DATASET_ROOTS))
     p.add_argument("--num", type=int, default=12)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--render-size", type=int, default=768)
@@ -35,7 +36,7 @@ def main() -> None:
                    help="draw occluded stretches solid, exactly as the training composites are")
     args = p.parse_args()
 
-    dirs = sorted(args.dataset_root.glob("*/samples/*/"))
+    dirs = sorted(sample_dirs_by_id(args.dataset_root).values())
     random.Random(args.seed).shuffle(dirs)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 

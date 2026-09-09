@@ -7,6 +7,7 @@ number of points before comparing.
 
 import ast
 import re
+from collections import Counter
 
 import numpy as np
 
@@ -141,23 +142,29 @@ _OBJ_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
 def parse_path_answer(text):
-    """Parse a {"path":[[x,y,v],...],"goal":[x,y,v]} answer; None if unusable.
+    """Parse a path answer; None if unusable.
 
-    Scans brace groups and accepts the first that JSON-parses and has both "path"
-    and "goal" keys (so triples in surrounding reasoning text are ignored). Only if
-    no such object exists does it fall back to scraping [x, y, v] triples from the
-    whole text (path = all but the last, goal = the last) — a best-effort net for
-    genuinely malformed output."""
+    Accepts both answer shapes: rounds 1-2 emit
+    {"path":[[x,y,v],...],"goal":[x,y,v]}, round 3 (goal handed in the prompt) emits
+    {"path":[[x,y,v],...]} whose final waypoint *is* the goal. When "goal" is absent
+    it is taken to be path[-1], so every downstream metric keeps working unchanged and
+    old prediction files re-aggregate identically.
+
+    Scans brace groups and accepts the first that JSON-parses and carries a usable
+    "path" (so triples in surrounding reasoning text are ignored). Only if no such
+    object exists does it fall back to scraping [x, y, v] triples from the whole text
+    (path = all but the last, goal = the last) — a best-effort net for genuinely
+    malformed output."""
     for match in _OBJ_RE.finditer(text):
         try:
             obj = _json.loads(match.group(0))
         except ValueError:
             continue
-        if not isinstance(obj, dict) or "path" not in obj or "goal" not in obj:
+        if not isinstance(obj, dict) or "path" not in obj:
             continue
         try:
             path = [[float(a), float(b), int(round(float(c)))] for a, b, c in obj["path"]]
-            g = obj["goal"]
+            g = obj["goal"] if "goal" in obj else (path[-1] if path else None)
             goal = [float(g[0]), float(g[1]), int(round(float(g[2])))]
         except (ValueError, KeyError, TypeError, IndexError):
             continue
@@ -182,8 +189,20 @@ def _resample_flags(wps, n):
     return rs, vis[nearest]
 
 
+#: |pred goal - gt goal| under which the goal counts as reproduced (round 3 copy check).
+GOAL_COPY_TOL = 0.02
+
+
 def habitat_metrics(pred, gt, n_resample=10):
-    """Per-sample position + visibility metrics for the path and goal."""
+    """Per-sample position + visibility metrics for the path and goal.
+
+    From round 3 the goal is handed to the model in the prompt, so `goal_point_error`,
+    `goal_visibility_correct` and `goal_copy_correct` stop measuring inference and
+    become a copy-fidelity check: did the model reproduce the endpoint it was given.
+    They are kept (and read that way) rather than dropped, so round-1/2 numbers stay
+    comparable field-for-field. `mean_point_error` and `frechet` -- the route between
+    two known endpoints -- are what the round is actually scored on.
+    """
     pred_pts = pred["path"] if pred["path"] else [pred["goal"]]
     gt_pts = gt["path"] if gt["path"] else [gt["goal"]]
     pred_xy, pred_v = _resample_flags(pred_pts, n_resample)
@@ -199,6 +218,7 @@ def habitat_metrics(pred, gt, n_resample=10):
         "path_visibility_acc": float((pred_v == gt_v).mean()),
         "goal_point_error": float(np.linalg.norm(pg - gg)),
         "goal_visibility_correct": int(pred["goal"][2] == gt["goal"][2]),
+        "goal_copy_correct": int(float(np.linalg.norm(pg - gg)) <= GOAL_COPY_TOL),
     }
 
 
@@ -218,6 +238,10 @@ def aggregate_habitat_metrics(records):
     goal_v = [r["metrics"]["goal_visibility_correct"] for r in parsed if r.get("metrics")]
     if goal_v:
         summary["goal_visibility_accuracy"] = float(np.mean(goal_v))
+    copied = [r["metrics"]["goal_copy_correct"] for r in parsed
+              if r.get("metrics") and "goal_copy_correct" in r["metrics"]]
+    if copied:
+        summary["goal_copy_rate"] = float(np.mean(copied))
     return summary
 
 
@@ -394,6 +418,32 @@ def shape_correlation(records):
     return spearman([p for p, _ in pairs], [g for _, g in pairs])
 
 
+def endpoint_spread(records, decimals=3):
+    """How much a model's path *terminus* varies across an eval run.
+
+    The Habitat generator yaws the camera onto the goal, so every training label ends at
+    x = 0.5 exactly. A model fine-tuned on it learns to funnel every path into the frame
+    centre and can no longer express a route that ends off-axis -- `pred_end_x_sd` near
+    zero while `gt_end_x_sd` is not is that collapse, and it makes the prediction
+    degenerate whatever its point error says. `mode_frac`, the share of samples sitting on
+    the single most common x, reads more directly than a standard deviation once the
+    collapse is total (sd 0.0, mode_frac 1.0).
+    """
+    pairs = [(r["parsed"]["path"][-1][0], r["gt"]["path"][-1][0])
+             for r in records
+             if r.get("parsed") and r["parsed"].get("path") and r["gt"].get("path")]
+    if not pairs:
+        nan = float("nan")
+        return {"n": 0, "pred_end_x_sd": nan, "pred_end_x_mode_frac": nan,
+                "gt_end_x_sd": nan, "gt_end_x_mode_frac": nan}
+    out = {"n": len(pairs)}
+    for key, values in (("pred", [p for p, _ in pairs]), ("gt", [g for _, g in pairs])):
+        counts = Counter(round(v, decimals) for v in values)
+        out[f"{key}_end_x_sd"] = float(np.std(values))
+        out[f"{key}_end_x_mode_frac"] = counts.most_common(1)[0][1] / len(values)
+    return out
+
+
 def trivial_baselines(gts, n=10):
     """Scores an image-blind predictor would get on this eval set.
 
@@ -402,7 +452,13 @@ def trivial_baselines(gts, n=10):
       * `straight`: a vertical line up the middle of the frame, ending at the set's
         median goal height -- no perception at all.
       * `constant`: the set's own mean path, i.e. the best possible image-blind answer.
-    A model that does not beat these has not transferred, whatever its error looks like.
+      * `to_goal`: a straight line from each sample's own start to its own goal.
+
+    `straight` and `constant` are set-level, and stop being honest floors once the goal
+    is handed to the model in the prompt (round 3 onward): a blind predictor gets the
+    endpoint for free, so the bar it has to clear is the straight line to that endpoint.
+    `to_goal` is that bar -- per-sample, and by far the hardest of the three. A model
+    that does not beat it has not used the image at all.
     """
     paths = [g["path"] or [g["goal"]] for g in gts]
     resampled = np.stack([_resample_flags(p, n)[0] for p in paths])
@@ -415,4 +471,15 @@ def trivial_baselines(gts, n=10):
         out[name] = {"mean_point_error_median": float(np.median(errs)),
                      "mean_point_error_mean": float(np.mean(errs))}
     out["constant"]["path"] = mean_path.tolist()
+
+    # per-sample: start of this sample's own path -> this sample's own goal
+    errs = []
+    for gt, r in zip(gts, resampled):
+        start = np.array(r[0], dtype=float)
+        goal = np.array(gt["goal"][:2], dtype=float)
+        ref = np.stack([np.linspace(start[0], goal[0], n),
+                        np.linspace(start[1], goal[1], n)], axis=1)
+        errs.append(float(np.linalg.norm(ref - r, axis=1).mean()))
+    out["to_goal"] = {"mean_point_error_median": float(np.median(errs)),
+                      "mean_point_error_mean": float(np.mean(errs))}
     return out

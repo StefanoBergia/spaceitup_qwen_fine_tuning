@@ -29,10 +29,10 @@ from pathlib import Path
 
 from PIL import Image
 
+from rover_vlm.habitat_data import DATASET_ROOTS, sample_dirs_by_id
 from rover_vlm.habitat_choice import (
     CANDIDATE_COLORS,
     CHOICE_PROMPT,
-    DATASET_ROOT,
     candidate_polylines,
     render_choice_image,
 )
@@ -103,7 +103,7 @@ def build_gallery(full_run, eval_records, per_bucket, max_px, dataset_root, dash
     stretches solid, so the model itself gets no occlusion cue; `--solid` reproduces them.
     """
     by_id = {r["id"]: r for r in eval_records}
-    sample_dirs = {d.name: d for d in dataset_root.glob("*/samples/*/")} if dashed else {}
+    sample_dirs = sample_dirs_by_id(dataset_root) if dashed else {}
     rows = [r for r in full_run["preds"] if r["gt"].get("margin") is not None and r["id"] in by_id]
     rows.sort(key=lambda r: r["gt"]["margin"])
     n, third = len(rows), len(rows) // 3
@@ -223,7 +223,7 @@ def build_data(meta, runs, per_bucket, max_px, data_dir, dataset_root, dashed, t
                                  dataset_root, dashed, tmp_dir),
         "dashed": dashed,
         "task": task_example(full, eval_records, max_px,
-                             {d.name: d for d in dataset_root.glob("*/samples/*/")}),
+                             sample_dirs_by_id(dataset_root)),
         "colors": ["#%02x%02x%02x" % c for c in CANDIDATE_COLORS],
         "nEval": m["num_samples"],
         "nWrong": sum(1 for r in full["preds"] if not r["metrics"]["accepted_correct"]),
@@ -248,7 +248,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--per-bucket", type=int, default=4, help="gallery samples per margin bucket")
     p.add_argument("--max-image-px", type=int, default=420)
-    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--dataset-root", type=Path, nargs="*", default=list(DATASET_ROOTS))
     p.add_argument("--solid", action="store_true",
                    help="show the training composites verbatim instead of re-rendering "
                         "the gallery with occluded stretches dashed")

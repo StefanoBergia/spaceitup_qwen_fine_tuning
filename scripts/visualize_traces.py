@@ -36,7 +36,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from rover_vlm.habitat_choice import DATASET_ROOT, render_choice_image
+from rover_vlm.habitat_data import DATASET_ROOTS, sample_dirs_by_id
+from rover_vlm.habitat_choice import render_choice_image
 from rover_vlm.overlay import draw_goal, draw_path, embed_jpeg
 from rover_vlm.traces import PROMPT_VERSION, build_prompt, leakage_spans
 
@@ -356,7 +357,7 @@ def main() -> None:
     p.add_argument("--max-px", type=int, default=560, help="long side of the embedded frames")
     p.add_argument("--quality", type=int, default=80, help="JPEG quality for the frames")
     p.add_argument("--no-images", action="store_true", help="metrics and text only, much smaller")
-    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT,
+    p.add_argument("--dataset-root", type=Path, nargs="*", default=list(DATASET_ROOTS),
                    help="Habitat source samples, for re-rendering choice frames dashed")
     p.add_argument("--solid", action="store_true",
                    help="show the choice training composites verbatim instead of dashing "
@@ -377,7 +378,7 @@ def main() -> None:
             "metricDefs": METRIC_DEFS, "dashed": not args.solid, "tasks": {}, "prompts": {}}
 
     dashed = not (args.solid or args.no_images)
-    sample_dirs = ({d.name: d for d in args.dataset_root.glob("*/samples/*/")}
+    sample_dirs = (sample_dirs_by_id(args.dataset_root)
                    if dashed else {})
     if dashed and not sample_dirs:
         print(f"  no samples under {args.dataset_root} — choice frames stay solid")

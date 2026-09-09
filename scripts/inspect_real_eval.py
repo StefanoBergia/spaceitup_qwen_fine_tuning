@@ -20,27 +20,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from rover_vlm.overlay import draw_goal, draw_path, GT_GREY
-from PIL import ImageDraw
+from rover_vlm.overlay import draw_label
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-VIS, OBS = (42, 120, 214), (214, 74, 42)
 
 
 def overlay(rec):
-    obj = json.loads(rec["conversations"][1]["value"])
-    img = Image.open(rec["image"][0]).convert("RGB")
-    W, H = img.size
-    d = ImageDraw.Draw(img)
-    pts = obj["path"]
-    # one polyline in grey, markers coloured by visibility (matches inspect_habitat.py)
-    draw_path(d, [[p[0], p[1], 1] for p in pts], GT_GREY, W, H, r=0, width=3)
-    for x, y, v in pts:
-        r = 5
-        d.ellipse([x * W - r, y * H - r, x * W + r, y * H + r],
-                  fill=VIS if v == 1 else OBS, outline=(255, 255, 255), width=1)
-    draw_goal(d, obj["goal"], W, H)
-    return img
+    """Ground truth on its own frame (grey polyline, markers coloured by visibility)."""
+    return draw_label(Image.open(rec["image"][0]).convert("RGB"),
+                      json.loads(rec["conversations"][1]["value"]))
 
 
 def main():

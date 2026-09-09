@@ -16,6 +16,8 @@ WHITE = (255, 255, 255)
 VIS_GREEN = (0, 160, 0)
 OBS_RED = (208, 59, 59)
 GT_GREY = (105, 105, 105)
+VIS_BLUE = (42, 120, 214)   # ground-truth waypoint, visible
+OBS_ORANGE = (214, 74, 42)  # ground-truth waypoint, obstructed
 
 
 def embed_jpeg(img, max_px=480, quality=80):
@@ -58,6 +60,26 @@ def draw_goal(draw, goal, W, H, r=9):
     draw.ellipse([x - r - 3, y - r - 3, x + r + 3, y + r + 3], fill=WHITE)
     draw.ellipse([x - r, y - r, x + r, y + r],
                  fill=VIS_GREEN if goal[2] == 1 else OBS_RED, outline=WHITE, width=2)
+
+
+def draw_label(img, obj, r=5, width=3):
+    """Draw a ground-truth label {"path": [[x,y,v],...], "goal": [x,y,v]} onto `img`.
+
+    One grey polyline with markers coloured by *label* visibility (blue visible, orange
+    obstructed) -- unlike `draw_path`, which encodes a model's *predicted* visibility by
+    fill so colour can mean "which model". Shared by the still contact sheets
+    (scripts/inspect_real_eval.py) and the ground-truth videos
+    (scripts/render_real_video.py) so the two can never drift apart.
+    """
+    W, H = img.size
+    d = ImageDraw.Draw(img)
+    pts = obj["path"]
+    draw_path(d, [[x, y, 1] for x, y, _ in pts], GT_GREY, W, H, r=0, width=width)
+    for x, y, v in pts:
+        d.ellipse([x * W - r, y * H - r, x * W + r, y * H + r],
+                  fill=VIS_BLUE if v == 1 else OBS_ORANGE, outline=WHITE, width=1)
+    draw_goal(d, obj["goal"], W, H)
+    return img
 
 
 def side_by_side(left, right, gap=8):

@@ -1,11 +1,22 @@
 """Habitat rover-navigation data: select correct path, normalize, clip, resample,
 format the path+visibility conversation record.
 
-Source layout: <dataset_root>/<scene>/samples/<scene>_cNNN/ with fpv_enhanced.png,
-fpv_paths.json, meta.json. See docs/superpowers/specs/2026-07-17-habitat-path-visibility-design.md.
+Source layout: <root>/<split>/<scene>/samples/<scene>_cNNN/ with fpv_enhanced.png,
+fpv_paths.json, meta.json, where <root> is one of DATASET_ROOTS and <split> is
+train/val. See docs/superpowers/specs/2026-07-17-habitat-path-visibility-design.md.
 
 Coordinates normalize to [0,1] by fpv_paths["image_size"]; visibility v is
 1 = visible, 0 = obstructed (v = 0 if the run/goal is "hidden").
+
+Two prompt variants live side by side rather than one being edited in place:
+
+* HABITAT_PROMPT (rounds 1-2) asserts "the goal is located straight ahead", true of
+  the un-augmented renders and false everywhere else. Frozen, because
+  data/prepared_real/* and every prediction under outputs/eval_real* was built with
+  it -- editing it would silently reinterpret those artifacts.
+* HABITAT_PROMPT_GOAL (round 3) hands the model the goal as [x, y, v] and asks only
+  for the route to it; the answer's final waypoint is that goal. See
+  docs/endpoint_collapse.md for why the first framing had to go.
 """
 
 import json
@@ -13,7 +24,12 @@ from pathlib import Path
 
 import numpy as np
 
-DATASET_ROOT = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/dataset")
+_DATA_BASE = Path("/nfs/projects/spaceitup/rover_navigation/data")
+#: Both render trees: the original yaw-0 samples and the yaw-jittered re-render.
+DATASET_ROOTS = (_DATA_BASE / "habitat_generated", _DATA_BASE / "habitat_generated_aug")
+DATASET_ROOT = DATASET_ROOTS[0]  # back-compat alias for single-root callers
+MANIFEST_TRAIN = _DATA_BASE / "manifest_train.jsonl"
+MANIFEST_VAL = _DATA_BASE / "manifest_val.jsonl"
 IMAGE_NAME = "fpv_enhanced.png"
 MAX_WAYPOINTS = 10
 HARD_CAP = 12
@@ -27,6 +43,46 @@ HABITAT_PROMPT = (
     "(hidden behind an obstacle). Then give the goal as [x, y, v]. Answer as JSON: "
     '{"path": [[x, y, v], ...], "goal": [x, y, v]}.'
 )
+
+HABITAT_PROMPT_GOAL = (
+    "<image>\n"
+    "You are a rover navigating an indoor environment. The goal is at [{gx}, {gy}] in "
+    "normalized image coordinates, where x runs right and y runs down, and it is "
+    "{vis}. Predict the traversable path from the rover to that goal as a list of "
+    "waypoints. Each waypoint is [x, y, v] where x and y are normalized image "
+    "coordinates in [0,1] and v is 1 if the point is on visible, unobstructed ground "
+    "or 0 if it is obstructed (hidden behind an obstacle). The final waypoint must be "
+    'the goal itself. Answer as JSON: {{"path": [[x, y, v], ...]}}.'
+)
+
+
+def goal_prompt(goal_wp):
+    """Render HABITAT_PROMPT_GOAL for one (x, y, v) goal waypoint."""
+    return HABITAT_PROMPT_GOAL.format(
+        gx=goal_wp[0],
+        gy=goal_wp[1],
+        vis="visible" if goal_wp[2] else "hidden behind an obstacle",
+    )
+
+
+def sample_dirs_by_id(roots=DATASET_ROOTS):
+    """{sample_id: sample_dir} across every render tree.
+
+    Accepts one root or several. Globs the current
+    <root>/<split>/<scene>/samples/<id>/ depth and the older
+    <root>/<scene>/samples/<id>/, so a caller pointed at a single scene tree still
+    works. Sample ids are unique across the trees (augmented ones carry a _yN
+    suffix), so one flat dict is safe.
+    """
+    if isinstance(roots, (str, Path)):
+        roots = (roots,)
+    out = {}
+    for root in roots:
+        for pattern in ("*/samples/*/", "*/*/samples/*/"):
+            for d in Path(root).glob(pattern):
+                if d.is_dir():
+                    out[d.name] = d
+    return out
 
 
 def normalize_points(raw, w, h):
@@ -154,30 +210,85 @@ def format_answer(path_wps, goal_wp):
     return json.dumps(obj, separators=(",", ":"))
 
 
-def build_record(sample_dir):
-    """Habitat sample dir -> conversation record, or None if filtered/invalid."""
+def format_answer_goal(path_wps):
+    """Round-3 answer: path only, its final waypoint being the goal handed in the prompt."""
+    obj = {"path": [[x, y, v] for x, y, v in path_wps]}
+    return json.dumps(obj, separators=(",", ":"))
+
+
+#: build_record rejection reasons, counted by the prep script so a drop is never silent.
+SKIP_REASONS = (
+    "not_in_fov",
+    "no_path",
+    "path_clipped_away",
+    "goal_offscreen",
+)
+
+
+def build_record(sample_dir, *, goal_in_prompt=False, meta_extra=None, reasons=None):
+    """Habitat sample dir -> conversation record, or None if filtered/invalid.
+
+    `goal_in_prompt` selects the round-3 framing: the goal goes into the prompt as
+    [x, y, v] and the answer carries only the path, whose final waypoint is forced to
+    that goal. The candidate polyline already terminates exactly at goal.uv (verified
+    across the whole dataset), so the assignment is a guard, not a correction.
+
+    `meta_extra` is merged into a `habitat_meta` sidecar on the record -- invisible to
+    TrajectoryDataset, carried through eval so results can be sliced by source/scene.
+    `reasons` is an optional dict-like counter that records why a sample was dropped.
+    """
+    def _skip(reason):
+        if reasons is not None:
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return None
+
     sample_dir = Path(sample_dir)
     fpv = json.loads((sample_dir / "fpv_paths.json").read_text())
     meta = json.loads((sample_dir / "meta.json").read_text())
     if not meta.get("correct_path_in_fov"):
-        return None
+        return _skip("not_in_fov")
     raw = select_correct_path(fpv, meta)
     if not raw or len(raw) < 2:
-        return None
+        return _skip("no_path")
     w, h = fpv["image_size"]
     clipped = clip_polyline_unit(normalize_points(raw, w, h))
     if len(clipped) < 2:
-        return None
+        return _skip("path_clipped_away")
     path_wps = resample_with_transitions(clipped)
     g = fpv["goal"]
-    goal_wp = (_clamp01(g["uv"][0] / w), _clamp01(g["uv"][1] / h), 0 if g["hidden"] else 1)
-    answer = format_answer(path_wps, goal_wp)
-    image_abs = str(sample_dir / IMAGE_NAME)
-    return {
+    gx_raw, gy_raw = g["uv"][0] / w, g["uv"][1] / h
+    goal_wp = (_clamp01(gx_raw), _clamp01(gy_raw), 0 if g["hidden"] else 1)
+
+    if goal_in_prompt:
+        # A goal outside the frame cannot be named in the prompt as an image coordinate,
+        # and the clipped path would not reach it. None exist today; count if that changes.
+        if not (0.0 <= gx_raw <= 1.0 and 0.0 <= gy_raw <= 1.0):
+            return _skip("goal_offscreen")
+        path_wps = [*path_wps[:-1], goal_wp]
+        prompt, answer = goal_prompt(goal_wp), format_answer_goal(path_wps)
+    else:
+        prompt, answer = HABITAT_PROMPT, format_answer(path_wps, goal_wp)
+
+    record = {
         "id": sample_dir.name,
-        "image": [image_abs],
+        "image": [str(sample_dir / IMAGE_NAME)],
         "conversations": [
-            {"from": "human", "value": HABITAT_PROMPT},
+            {"from": "human", "value": prompt},
             {"from": "gpt", "value": answer},
         ],
     }
+    sidecar = {
+        "scene_id": meta.get("scene_id"),
+        "flavor": meta.get("flavor"),
+        "goal_uv_norm": [goal_wp[0], goal_wp[1]],
+        "goal_visible": goal_wp[2],
+        "goal_in_prompt": bool(goal_in_prompt),
+    }
+    aug = meta.get("aug") or {}
+    sidecar["source"] = "augmented" if aug else "original"
+    sidecar["yaw_deg"] = aug.get("yaw_deg")
+    sidecar["parent_sample_id"] = aug.get("parent_sample_id")
+    if meta_extra:
+        sidecar.update(meta_extra)
+    record["habitat_meta"] = sidecar
+    return record

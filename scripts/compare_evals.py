@@ -51,6 +51,7 @@ TRAJECTORY_COLUMNS = [
     ("path_visibility_acc_mean", "Vis. acc"),
     ("goal_point_error_mean", "Goal err"),
     ("goal_visibility_accuracy", "Goal vis. acc"),
+    ("goal_copy_rate", "Goal copied"),
 ]
 
 CHOICE_COLUMNS = [
@@ -161,6 +162,125 @@ def write_table(groups: list[tuple[str, dict | None, list[tuple[int, dict]]]],
     return "\n".join([header, sep, *rows]) + "\n"
 
 
+def _load_predictions(eval_dir: Path, tag: str) -> list[dict] | None:
+    f = eval_dir / tag / "predictions.json"
+    if not f.exists():
+        return None
+    return json.loads(f.read_text())
+
+
+def baselines_section(eval_dir: Path, tags: list[str]) -> str:
+    """What an image-blind predictor scores on this eval set.
+
+    `to_goal` is the one that matters from round 3 on: once the goal is handed to the
+    model in the prompt, a blind straight line to that goal costs nothing, so a model
+    that does not beat it has not used the image at all. `straight` and `constant` are
+    kept for continuity with the earlier rounds' tables.
+    """
+    from rover_vlm.eval import trivial_baselines
+
+    for tag in tags:
+        preds = _load_predictions(eval_dir, tag)
+        if not preds:
+            continue
+        gts = [r["gt"] for r in preds if r.get("gt")]
+        if not gts:
+            continue
+        b = trivial_baselines(gts)
+        rows = [
+            "| Image-blind baseline | Mean point err | Median point err |",
+            "|---|---|---|",
+        ]
+        for name, blurb in (("to_goal", "straight line to the given goal"),
+                            ("straight", "centre line, set median goal height"),
+                            ("constant", "the set's own mean path")):
+            if name in b:
+                rows.append(f"| `{name}` — {blurb} | {b[name]['mean_point_error_mean']:.3f} "
+                            f"| {b[name]['mean_point_error_median']:.3f} |")
+        section = ("\n### Image-blind floors (computed from ground truth, model-independent)\n\n"
+                   + "\n".join(rows) + "\n")
+
+        # the same floor per detour bucket, so a model row can be read against the bar
+        # for its own bucket rather than against the set average
+        buckets: dict[str, list[dict]] = {}
+        for r in preds:
+            b = _detour_bucket((r.get("habitat_meta") or {}).get("detour_ratio"))
+            if b and r.get("gt"):
+                buckets.setdefault(b, []).append(r["gt"])
+        names = [n for _, _, n in DETOUR_BUCKETS if n in buckets]
+        if names:
+            brows = ["| Detour | n | `to_goal` mean | `to_goal` median |", "|---|---|---|---|"]
+            for name in names:
+                tb = trivial_baselines(buckets[name])["to_goal"]
+                brows.append(f"| {name} | {len(buckets[name]):,} "
+                             f"| {tb['mean_point_error_mean']:.3f} "
+                             f"| {tb['mean_point_error_median']:.3f} |")
+            section += "\n" + "\n".join(brows) + "\n"
+        return section
+    return ""
+
+
+DETOUR_BUCKETS = [(0.0, 1.05, "near-straight"), (1.05, 1.15, "slight"),
+                  (1.15, 1.35, "moderate"), (1.35, 1e9, "strong detour")]
+
+
+def _detour_bucket(v):
+    if v is None:
+        return None
+    for lo, hi, name in DETOUR_BUCKETS:
+        if lo <= v < hi:
+            return name
+    return None
+
+
+def _slice_table(eval_dir: Path, tags: list[str], key: str, order=None) -> list[str]:
+    """Rows of `| tag | bucket | n | mean | median |` for one habitat_meta key."""
+    import numpy as np
+
+    rows = []
+    for tag in tags:
+        preds = _load_predictions(eval_dir, tag)
+        if not preds:
+            continue
+        groups: dict[str, list[float]] = {}
+        for r in preds:
+            hm = r.get("habitat_meta") or {}
+            bucket = _detour_bucket(hm.get("detour_ratio")) if key == "detour" else hm.get(key)
+            if bucket and r.get("metrics"):
+                groups.setdefault(bucket, []).append(r["metrics"]["mean_point_error"])
+        names = [n for n in order if n in groups] if order else sorted(groups)
+        for name in names:
+            v = groups[name]
+            rows.append(f"| {tag} | {name} | {len(v):,} | {float(np.mean(v)):.3f} "
+                        f"| {float(np.median(v)):.3f} |")
+    return rows
+
+
+def source_slice_section(eval_dir: Path, tags: list[str]) -> str:
+    """Split each run's error by sample source and by how much the route bends.
+
+    Source: the round-3 training mix is 38% yaw-0 originals, whose goal sits at x=0.5
+    exactly. If that pinned mode still costs the model anything, the augmented slice
+    scores worse than the original one.
+
+    Detour: with the goal given, a straight line to it is already a strong answer on a
+    near-straight route, so the bending routes are the only place a model can show it
+    read the image. Read the model's number here against `to_goal` in the same bucket.
+    """
+    out = []
+    src_rows = _slice_table(eval_dir, tags, "source")
+    if src_rows:
+        out.append("\n### Error by sample source (original = yaw 0, goal pinned at x=0.5)\n\n"
+                   + "\n".join(["| Run | Source | n | Mean point err | Median point err |",
+                                "|---|---|---|---|---|", *src_rows]) + "\n")
+    det_rows = _slice_table(eval_dir, tags, "detour", order=[n for _, _, n in DETOUR_BUCKETS])
+    if det_rows:
+        out.append("\n### Error by route detour (how far the true route bows off the straight shot)\n\n"
+                   + "\n".join(["| Run | Detour | n | Mean point err | Median point err |",
+                                "|---|---|---|---|---|", *det_rows]) + "\n")
+    return "".join(out)
+
+
 def plot(groups: list[tuple[str, dict | None, list[tuple[int, dict]]]], out_path: Path,
          task: str = "trajectory", title: str | None = None) -> None:
     """Scaling curves for one or more eval trees.
@@ -263,6 +383,10 @@ def main() -> None:
         title = TASK_TITLES[args.task].format(models=" vs. ".join(label for label, _, _ in groups))
 
     table = write_table(groups, args.task)
+    if args.task == "trajectory":
+        tags = [m["tag"] for _, b, sc in groups for m in ([b] if b else []) + [x for _, x in sc]]
+        table += baselines_section(args.eval_dir, tags)
+        table += source_slice_section(args.eval_dir, tags)
     (args.eval_dir / "comparison.md").write_text(table)
     print(table)
 

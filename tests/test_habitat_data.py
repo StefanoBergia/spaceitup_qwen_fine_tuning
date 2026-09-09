@@ -10,7 +10,7 @@ from rover_vlm.habitat_data import (
     select_correct_path,
     format_answer,
     build_record,
-    DATASET_ROOT,
+    sample_dirs_by_id,
 )
 
 
@@ -127,9 +127,10 @@ def test_format_answer_is_parseable_json():
 
 
 def test_build_record_on_live_sample():
-    if not DATASET_ROOT.exists():
+    live = sample_dirs_by_id()
+    if not live:
         pytest.skip("dataset not mounted")
-    sample = next(DATASET_ROOT.glob("*/samples/*/"))
+    sample = live[min(live)]
     rec = build_record(sample)
     if rec is None:
         pytest.skip("first sample filtered out; covered by unit tests")

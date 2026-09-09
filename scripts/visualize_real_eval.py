@@ -20,7 +20,12 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from rover_vlm.eval import goal_visibility_confusion, shape_correlation, trivial_baselines
+from rover_vlm.eval import (
+    endpoint_spread,
+    goal_visibility_confusion,
+    shape_correlation,
+    trivial_baselines,
+)
 from rover_vlm.overlay import GT_GREY, draw_goal, draw_path, draw_polyline, embed_jpeg, side_by_side
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +46,7 @@ COLS = [
     ("parse_rate", "Parse rate", "{:.3f}"),
     ("mean_point_error_median", "Median point err", "{:.3f}"),
     ("shape_rho", "Path\u2194image \u03c1", "{:+.2f}"),
+    ("end_x_sd", "Endpoint x spread", "{:.3f}"),
     ("frechet_median", "Median Fréchet", "{:.3f}"),
     ("goal_point_error_median", "Median goal err", "{:.3f}"),
     ("path_visibility_acc_mean", "Waypoint vis. acc", "{:.3f}"),
@@ -58,6 +64,9 @@ def load_run(run_dir):
     m["goal_balanced"] = conf["balanced_accuracy"] if conf["n_visible"] and conf["n_obstructed"] else None
     rho = shape_correlation(preds)
     m["shape_rho"] = None if rho != rho else rho  # NaN -> the model gave one shape every frame
+    ends = endpoint_spread(preds)
+    m["end_x_sd"] = ends["pred_end_x_sd"] if ends["n"] else None
+    m["_ends"] = ends
     m["_preds"] = preds
     return m
 
@@ -79,6 +88,9 @@ def fmt(m, key, spec, vis_ok=True):
 SET_BLURB = {
     "tum_pioneer": "Indoor. Pioneer wheeled robot, Kinect, mocap camera poses, depth-derived visibility.",
     "gnd_campus": "Outdoor. Clearpath Jackal, ZED2, EKF odometry; no depth, so every label is “visible”.",
+    "real_clips": "The hard slices of the TUM sequences — frames where the route bends or the "
+                  "goal is hidden — cut into clips by scripts/find_clips.py, so the models are "
+                  "judged on the cases a straight-ahead guess should fail.",
 }
 
 
@@ -101,6 +113,11 @@ def transfer_state(real, base):
         chips.append("below baseline")
     if rho is None or abs(rho) < 0.15:
         chips.append("image-blind")
+    ends = real.get("_ends") or {}
+    # Habitat pins every label's terminus at x = 0.5; a model that inherited that cannot
+    # reach an off-axis endpoint at all, so flag it separately from being merely wrong
+    if ends.get("n") and ends["pred_end_x_sd"] < 0.01 <= ends["gt_end_x_sd"]:
+        chips.append("endpoint pinned")
     return chips
 
 
