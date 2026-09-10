@@ -163,7 +163,7 @@ def test_records_from_manifest_carries_manifest_fields(tmp_path):
     d = make_sample(tmp_path, "a_c000", "scene_a")
     reasons = {}
     recs = prepare_habitat.records_from_manifest(
-        [row(d, "a_c000")], goal_in_prompt=True, reasons=reasons)
+        [row(d, "a_c000")], framing="goal", reasons=reasons)
     assert len(recs) == 1
     hm = recs[0]["habitat_meta"]
     assert hm["source"] == "original" and hm["decidability"] == 0.5
@@ -188,3 +188,77 @@ def test_read_manifest_rejects_empty(tmp_path):
     f.write_text("\n")
     with pytest.raises(SystemExit):
         prepare_habitat.read_manifest(f)
+
+
+# --- round 4: both endpoints handed over ---------------------------------------------
+
+def test_endpoints_framing_names_both_ends(tmp_path):
+    d = make_sample(tmp_path, "s_c000", "scene_a", goal_uv=(128.0, 320.0),
+                    path_uv=[[400.0, 500.0], [200.0, 400.0], [128.0, 320.0]])
+    rec = build_record(d, framing="endpoints")
+    prompt = rec["conversations"][0]["value"]
+    path = json.loads(rec["conversations"][1]["value"])["path"]
+    assert "enters the frame at [0.781, 0.977]" in prompt
+    assert "goal at [0.25, 0.625]" in prompt
+    # first and last waypoints are exactly the two points named in the prompt
+    assert path[0] == [0.781, 0.977, 1]
+    assert path[-1] == [0.25, 0.625, 1]
+
+
+def test_endpoints_framing_states_each_end_visibility(tmp_path):
+    d = make_sample(tmp_path, "s_c000", "scene_a", goal_hidden=True)
+    prompt = build_record(d, framing="endpoints")["conversations"][0]["value"]
+    assert "where it is visible, and ends at the goal" in prompt
+    assert "where it is hidden behind an obstacle" in prompt
+
+
+def test_sidecar_records_start_and_entry_edge(tmp_path):
+    """entry_edge must come from consistency.start_edge, whose corner handling
+    (bottom wins at a corner) differs from the obvious left/right-first version."""
+    from rover_vlm.consistency import start_edge
+
+    bottom = build_record(make_sample(tmp_path / "b", "a_c000", "sc",
+                                      path_uv=[[500.0, 511.0], [300.0, 400.0], [256.0, 300.0]]),
+                          framing="endpoints")
+    left = build_record(make_sample(tmp_path / "l", "a_c001", "sc",
+                                    path_uv=[[0.0, 400.0], [128.0, 350.0], [256.0, 300.0]]),
+                        framing="endpoints")
+    assert bottom["habitat_meta"]["entry_edge"] == "bottom"
+    assert left["habitat_meta"]["entry_edge"] == "left"
+    assert left["habitat_meta"]["start_uv_norm"] == [0.0, 0.781]
+    for rec in (bottom, left):
+        path = json.loads(rec["conversations"][1]["value"])["path"]
+        assert rec["habitat_meta"]["entry_edge"] == start_edge({"path": path})
+
+
+def test_corner_start_is_bottom_not_side(tmp_path):
+    """(0.98, 1.0) is a bottom entry; the naive left/right-first test would call it right."""
+    rec = build_record(make_sample(tmp_path, "a_c000", "sc",
+                                   path_uv=[[502.0, 512.0], [300.0, 400.0], [256.0, 300.0]]),
+                       framing="endpoints")
+    assert rec["habitat_meta"]["entry_edge"] == "bottom"
+
+
+def test_goal_in_prompt_alias_still_reproduces_round_3(tmp_path):
+    """The v3 prep must stay byte-reproducible after the framing refactor."""
+    d = make_sample(tmp_path, "s_c000", "scene_a", goal_uv=(128.0, 320.0))
+    assert build_record(d, goal_in_prompt=True) == build_record(d, framing="goal")
+    assert build_record(d, goal_in_prompt=False) == build_record(d, framing="legacy")
+
+
+def test_unknown_framing_is_rejected(tmp_path):
+    d = make_sample(tmp_path, "s_c000", "scene_a")
+    with pytest.raises(ValueError, match="unknown framing"):
+        build_record(d, framing="both-ends")
+
+
+def test_split_stats_reports_entry_edge_distribution(tmp_path):
+    recs = []
+    for i, uv in enumerate(([[256.0, 511.0], [256.0, 300.0]],
+                            [[0.0, 400.0], [256.0, 300.0]],
+                            [[511.0, 400.0], [256.0, 300.0]])):
+        recs.append(build_record(
+            make_sample(tmp_path / f"s{i}", f"a_c00{i}", "scene_a", path_uv=uv),
+            framing="endpoints", meta_extra={"source": "original"}))
+    assert prepare_habitat.split_stats(recs)["by_entry_edge"] == {
+        "bottom": 1, "left": 1, "right": 1}

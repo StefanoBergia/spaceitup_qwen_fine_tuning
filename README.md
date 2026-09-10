@@ -393,6 +393,72 @@ mix is still yaw-0 originals whose goal sits at x=0.5 exactly; if that pinned mo
 the model anything, the augmented slice scores worse than the original one, and the
 follow-up is an augmented-only rerun.
 
+## Results — round 3 (job 91272, 2026-09-10, 8h01m)
+
+| | base | LoRA (23,770) |
+|---|---|---|
+| parse rate | 0.955 | **1.000** |
+| mean point err | 0.359 | 0.072 |
+| median point err | 0.338 | **0.025** |
+| visibility acc | 0.726 | **0.923** |
+| `shape_correlation` | +0.124 | **+0.730** |
+| `endpoint_spread` pred sd | 0.231 | **0.1396** (gt 0.1396) |
+| beats `to_goal` | 0.3% | **53.0%** |
+
+**The collapse is fixed.** Predicted endpoint spread now matches the ground truth's
+(was sd 0.0000, 100% at x=0.5), and `shape_correlation` +0.730 is the first real evidence
+a model here reads the image — the pinned models scored −0.017 overall and −0.114 on the
+curve clips, i.e. bending *against* the true route.
+
+> **Read the win rate, not the mean.** The set mean (0.072) is above the `to_goal` floor
+> (0.044), which reads as "the model lost". It didn't: it beats the straight line on 53.0%
+> of samples and its median error (0.025) is well under the floor's (0.042). The mean is
+> carried by a small number of catastrophic misses — the worst 10% of samples hold **59.4%**
+> of all error. `win_vs_to_goal` in `comparison.md` is the honest summary.
+
+Sliced by `consistency.start_edge`, the whole story is the route's *start*:
+
+| gt entry edge | n | model mean | model median | `to_goal` | model wins | wrong edge |
+|---|---|---|---|---|---|---|
+| bottom | 2,013 (77.7%) | 0.0507 | 0.0240 | 0.0529 | **63.4%** | 7.1% |
+| left | 294 (11.3%) | 0.1211 | 0.0302 | 0.0146 | 20.1% | 27.9% |
+| right | 284 (11.0%) | 0.1684 | 0.0407 | 0.0130 | 13.4% | **48.6%** |
+
+On the 77.7% of routes that start where the rover actually is, **the model beats the
+image-blind baseline** on mean *and* win rate. All of the apparent loss comes from the
+22.3% of routes clipped to enter from a side edge, where a straight line is nearly exact
+(0.013) and the model picks the wrong edge up to half the time, at ~0.5–0.6 per miss.
+
+## Round 4 — hand over the route's start as well
+
+The side-entry failure is an ambiguity, not a training failure. Train and eval entry-edge
+distributions match (75.3% / 75.9% bottom) and left ≈ right in training (12.0% / 12.8%),
+so nothing in the labels teaches a side preference — but for a side-entry route the
+rover's own position is off-frame, and the prompt never said where it was. Same class of
+under-specification as "the goal is located straight ahead".
+
+`HABITAT_PROMPT_ENDPOINTS` names both ends; the model supplies only the route between them.
+Framings are now explicit (`FRAMINGS = legacy | goal | endpoints`), with `--goal-in-prompt`
+kept as an alias so round 3 still reproduces.
+
+```bash
+uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v4 --framing endpoints
+uv run scripts/inspect_habitat.py --num 12 --split data/prepared_habitat_v4/eval.json \
+    --out-dir outputs/inspection_habitat_v4
+VERSION=_v4 SIZES=train_full sbatch slurm/run_all_habitat.sbatch 2b
+```
+
+> **Headroom is thin, so pick the metric first.** With both ends given, `to_goal` *is* the
+> connect-the-dots answer. Round 4 passes if `win_vs_to_goal` rises above round 3's 53.0%
+> and the entry-edge slice flattens (side-entry mean down from 0.144, wrong-edge rate down
+> from 27.9% / 48.6%). If instead the win rate sits near 50% with mean ≈ `to_goal`, handing
+> over both endpoints has saturated the task, and the next move is a *coarser* goal cue — a
+> bearing or a quadrant — rather than exact coordinates.
+
+Round 3 peaked at 30 GB RSS against a 64 GB request, so `run_all_habitat.sbatch` now asks
+for 40 GB: on a shared box where a single 900 GB job can block the partition, over-reserving
+delays your own job behind other users.
+
 ## Results — round 1 vs. round 2
 
 Round 1: 3,660 train / 500 eval (jobs 87428, 87657, 87773, 87794).

@@ -52,6 +52,8 @@ TRAJECTORY_COLUMNS = [
     ("goal_point_error_mean", "Goal err"),
     ("goal_visibility_accuracy", "Goal vis. acc"),
     ("goal_copy_rate", "Goal copied"),
+    ("start_copy_rate", "Start copied"),
+    ("win_vs_to_goal", "Beats to_goal"),
 ]
 
 CHOICE_COLUMNS = [
@@ -245,7 +247,10 @@ def _slice_table(eval_dir: Path, tags: list[str], key: str, order=None) -> list[
         groups: dict[str, list[float]] = {}
         for r in preds:
             hm = r.get("habitat_meta") or {}
-            bucket = _detour_bucket(hm.get("detour_ratio")) if key == "detour" else hm.get(key)
+            if key == "detour":
+                bucket = _detour_bucket(hm.get("detour_ratio"))
+            else:
+                bucket = hm.get(key)
             if bucket and r.get("metrics"):
                 groups.setdefault(bucket, []).append(r["metrics"]["mean_point_error"])
         names = [n for n in order if n in groups] if order else sorted(groups)
@@ -273,6 +278,17 @@ def source_slice_section(eval_dir: Path, tags: list[str]) -> str:
         out.append("\n### Error by sample source (original = yaw 0, goal pinned at x=0.5)\n\n"
                    + "\n".join(["| Run | Source | n | Mean point err | Median point err |",
                                 "|---|---|---|---|---|", *src_rows]) + "\n")
+    edge_rows = _slice_table(eval_dir, tags, "entry_edge",
+                             order=["bottom", "left", "right", "none"])
+    if edge_rows:
+        out.append("\n### Error by route entry edge (where the route enters the frame)\n\n"
+                   "Side entries are routes clipped to start off the bottom of the frame: the\n"
+                   "rover's own position is out of view, so which edge the route comes in from\n"
+                   "is undetermined from the image unless the prompt says. This is the slice\n"
+                   "round 4 exists to fix.\n\n"
+                   + "\n".join(["| Run | Entry edge | n | Mean point err | Median point err |",
+                                "|---|---|---|---|---|", *edge_rows]) + "\n")
+
     det_rows = _slice_table(eval_dir, tags, "detour", order=[n for _, _, n in DETOUR_BUCKETS])
     if det_rows:
         out.append("\n### Error by route detour (how far the true route bows off the straight shot)\n\n"

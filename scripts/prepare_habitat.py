@@ -1,9 +1,14 @@
 """Convert the Habitat dataset into conversation-format splits for training/eval.
 
-Login node (CPU-only). Round 3 (manifest mode, the current one) — the generator ships
-its own scene-disjoint train/val manifests, so no split is invented here:
+Login node (CPU-only). Round 4 (manifest mode, the current one) — the generator ships
+its own scene-disjoint train/val manifests, so no split is invented here, and the prompt
+hands over both the route's entry point and its goal:
 
-    uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v3 --goal-in-prompt
+    uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v4 --framing endpoints
+
+Round 3 (goal only in the prompt; --goal-in-prompt is the older spelling) is reproduced by:
+
+    uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v3 --framing goal
 
 Rounds 1-2 (glob mode, kept for reproducibility) — scan every sample dir and build a
 fixed-seed split locally:
@@ -32,6 +37,7 @@ from pathlib import Path
 from rover_vlm.data import make_splits
 from rover_vlm.habitat_data import (
     DATASET_ROOTS,
+    FRAMINGS,
     MANIFEST_TRAIN,
     MANIFEST_VAL,
     build_record,
@@ -57,7 +63,7 @@ def read_manifest(path: Path) -> list[dict]:
     return rows
 
 
-def records_from_manifest(rows, *, goal_in_prompt, reasons):
+def records_from_manifest(rows, *, framing, reasons):
     """Manifest rows -> conversation records, carrying the manifest's own fields through."""
     records = []
     for row in rows:
@@ -74,7 +80,7 @@ def records_from_manifest(rows, *, goal_in_prompt, reasons):
             "detour_ratio": row.get("detour_ratio"),
         }
         rec = build_record(
-            row["dir"], goal_in_prompt=goal_in_prompt, meta_extra=extra, reasons=reasons
+            row["dir"], framing=framing, meta_extra=extra, reasons=reasons
         )
         if rec is not None:
             records.append(rec)
@@ -115,10 +121,14 @@ def split_stats(records):
         return round(statistics.pstdev(v), 4) if len(v) > 1 else 0.0
 
     by_source = Counter(r["habitat_meta"].get("source") or "unknown" for r in records)
+    # the class round 4 targets: routes clipped to enter from a side edge are the ones
+    # whose start is undetermined from the image alone
+    by_edge = Counter(r["habitat_meta"].get("entry_edge") or "unknown" for r in records)
     stats = {
         "n": len(records),
         "scenes": len(_scenes(records)),
         "by_source": dict(sorted(by_source.items())),
+        "by_entry_edge": dict(sorted(by_edge.items())),
         "terminus_x_sd": sd(ends_x),
         "goal_x_sd": sd(goals_x),
         "frac_terminus_at_0.5": round(sum(abs(x - 0.5) < 0.002 for x in ends_x) / len(ends_x), 4),
@@ -145,12 +155,20 @@ def main() -> None:
                    help=f"manifest mode: train split (use {MANIFEST_TRAIN} for round 3)")
     p.add_argument("--manifest-val", type=Path, default=None,
                    help=f"manifest mode: eval split (use {MANIFEST_VAL} for round 3)")
+    p.add_argument("--framing", choices=FRAMINGS, default=None,
+                   help="what the prompt hands over: 'legacy' (rounds 1-2), 'goal' "
+                        "(round 3), 'endpoints' (round 4, start + goal)")
     p.add_argument("--goal-in-prompt", action="store_true",
-                   help="round-3 framing: hand the goal to the model, answer is path only")
+                   help="deprecated spelling of --framing goal")
     args = p.parse_args()
 
-    # --goal-in-prompt implies the round-3 manifests unless they were named explicitly
-    if args.goal_in_prompt and args.manifest_train is None and args.manifest_val is None:
+    if args.framing is None:
+        args.framing = "goal" if args.goal_in_prompt else "legacy"
+    elif args.goal_in_prompt and args.framing != "goal":
+        raise SystemExit(f"--goal-in-prompt conflicts with --framing {args.framing}")
+
+    # a goal-bearing framing implies the round-3+ manifests unless named explicitly
+    if args.framing != "legacy" and args.manifest_train is None and args.manifest_val is None:
         args.manifest_train, args.manifest_val = MANIFEST_TRAIN, MANIFEST_VAL
     manifest_mode = args.manifest_train is not None or args.manifest_val is not None
     if manifest_mode and not (args.manifest_train and args.manifest_val):
@@ -164,14 +182,14 @@ def main() -> None:
         print(f"  manifest rows: {len(train_rows)} train, {len(val_rows)} val")
         splits = {
             "train_full": records_from_manifest(
-                train_rows, goal_in_prompt=args.goal_in_prompt, reasons=reasons),
+                train_rows, framing=args.framing, reasons=reasons),
             "eval": records_from_manifest(
-                val_rows, goal_in_prompt=args.goal_in_prompt, reasons=reasons),
+                val_rows, framing=args.framing, reasons=reasons),
         }
         check_split_integrity(splits["train_full"], splits["eval"])
         meta = {
             "mode": "manifest",
-            "goal_in_prompt": args.goal_in_prompt,
+            "framing": args.framing,
             "manifests": {"train": str(args.manifest_train), "val": str(args.manifest_val)},
             "splits": {k: len(v) for k, v in splits.items()},
             "skipped": reasons,
@@ -187,7 +205,7 @@ def main() -> None:
         records = []
         for i, d in enumerate(sample_dirs):
             try:
-                rec = build_record(d, goal_in_prompt=args.goal_in_prompt, reasons=reasons)
+                rec = build_record(d, framing=args.framing, reasons=reasons)
             except Exception as e:  # noqa: BLE001
                 print(f"  ERROR {d.name}: {e}")
                 reasons["error"] = reasons.get("error", 0) + 1
@@ -209,7 +227,7 @@ def main() -> None:
                 assert not (eval_ids & {r["id"] for r in recs}), f"{name} overlaps eval!"
         meta = {
             "mode": "glob",
-            "goal_in_prompt": args.goal_in_prompt,
+            "framing": args.framing,
             "splits": {k: len(v) for k, v in splits.items()},
             "kept": len(records),
             "skipped": skipped,

@@ -193,3 +193,77 @@ def test_to_goal_is_not_zero_on_a_bent_route():
     from rover_vlm.eval import trivial_baselines
     gts = [{"path": [[0.5, 1.0, 1], [0.9, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}]
     assert trivial_baselines(gts)["to_goal"]["mean_point_error_mean"] > 0.05
+
+
+# --- round 4: both endpoints given ---------------------------------------------------
+
+def test_start_copy_correct_flags_a_reproduced_entry_point():
+    gt = {"path": [[0.9, 1.0, 1], [0.5, 0.7, 1], [0.35, 0.62, 0]], "goal": [0.35, 0.62, 0]}
+    copied = habitat_metrics({"path": [[0.9, 1.0, 1], [0.6, 0.8, 1], [0.35, 0.62, 0]],
+                              "goal": [0.35, 0.62, 0]}, gt)
+    flipped = habitat_metrics({"path": [[0.1, 1.0, 1], [0.2, 0.8, 1], [0.35, 0.62, 0]],
+                               "goal": [0.35, 0.62, 0]}, gt)
+    assert copied["start_copy_correct"] == 1 and copied["start_point_error"] == 0.0
+    # the round-3 failure mode: right-edge route started from the left
+    assert flipped["start_copy_correct"] == 0
+    assert flipped["start_point_error"] > 0.5
+
+
+def test_baseline_win_rate_counts_per_sample_wins():
+    from rover_vlm.eval import baseline_win_rate
+
+    # a bowed route: the straight chord is a poor answer, so a model tracing the bow wins
+    gt = {"path": [[0.5, 1.0, 1], [0.9, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    good = {"path": [[0.5, 1.0, 1], [0.88, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    bad = {"path": [[0.5, 1.0, 1], [0.5, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    recs = [{"gt": gt, "parsed": good, "metrics": habitat_metrics(good, gt)},
+            {"gt": gt, "parsed": bad, "metrics": habitat_metrics(bad, gt)}]
+    assert baseline_win_rate(recs) == pytest.approx(0.5)
+    assert baseline_win_rate(recs[:1]) == pytest.approx(1.0)
+    assert baseline_win_rate(recs[1:]) == pytest.approx(0.0)
+
+
+def test_baseline_win_rate_is_none_without_scored_samples():
+    from rover_vlm.eval import baseline_win_rate
+
+    assert baseline_win_rate([]) is None
+    assert baseline_win_rate([{"gt": {"path": [[0.5, 1.0, 1]]}, "metrics": None}]) is None
+
+
+def test_win_rate_and_mean_can_disagree():
+    """Round 3 in miniature: the model beats the chord on most samples but one
+    catastrophic miss puts its mean above the baseline's. The mean is the misleading
+    number here, which is why win_vs_to_goal exists."""
+    from rover_vlm.eval import baseline_win_rate, to_goal_error
+    import numpy as np
+
+    # a gently bowed route: the chord is slightly wrong, so a model tracing the bow beats
+    # it -- until one sample starts from the mirrored edge, the real round-3 failure
+    gt = {"path": [[0.5, 1.0, 1], [0.58, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    good = {"path": [[0.5, 1.0, 1], [0.575, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    flipped = {"path": [[0.0, 1.0, 1], [0.0, 0.75, 1], [0.5, 0.5, 0]], "goal": [0.5, 0.5, 0]}
+    recs = [{"gt": gt, "parsed": good, "metrics": habitat_metrics(good, gt)} for _ in range(9)]
+    recs.append({"gt": gt, "parsed": flipped, "metrics": habitat_metrics(flipped, gt)})
+
+    model_mean = float(np.mean([r["metrics"]["mean_point_error"] for r in recs]))
+    baseline_mean = float(np.mean([to_goal_error(r["gt"]) for r in recs]))
+    assert baseline_win_rate(recs) == pytest.approx(0.9)
+    assert model_mean > baseline_mean
+
+
+def test_aggregate_exposes_the_new_rates():
+    gt = {"path": [[0.9, 1.0, 1], [0.5, 0.7, 1], [0.35, 0.62, 0]], "goal": [0.35, 0.62, 0]}
+    rec = {"gt": gt, "parsed": gt, "metrics": habitat_metrics(gt, gt)}
+    out = aggregate_habitat_metrics([rec])
+    assert out["start_copy_rate"] == 1.0 and out["goal_copy_rate"] == 1.0
+    assert out["win_vs_to_goal"] == 1.0
+
+
+def test_aggregate_omits_start_copy_for_legacy_records():
+    """Round-1/3 predictions.json have no start_copy_correct; the column must stay absent
+    rather than defaulting to something that looks like a measurement."""
+    gt = {"path": [[0.5, 1.0, 1], [0.4, 0.6, 0]], "goal": [0.4, 0.6, 0]}
+    old = {k: v for k, v in habitat_metrics(gt, gt).items() if k != "start_copy_correct"}
+    out = aggregate_habitat_metrics([{"gt": gt, "parsed": gt, "metrics": old}])
+    assert "start_copy_rate" not in out
+    assert out["goal_copy_rate"] == 1.0
