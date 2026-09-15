@@ -126,6 +126,69 @@ def test_path_prompt_says_so_when_nothing_is_occluded():
     assert "From waypoint" not in p
 
 
+# --- v7: endpoints framing (round-4 records carry a path-only answer) ----------------
+
+
+def _endpoints_record(path):
+    """A data/prepared_habitat_v4 record: the answer is {"path": ...} with no "goal" field."""
+    return {
+        "id": "scene_c000",
+        "image": ["/nfs/x.png"],
+        "conversations": [{"from": "human", "value": "<image>\n..."},
+                          {"from": "gpt", "value": json.dumps({"path": path})}],
+    }
+
+
+def test_prompt_version_is_v7():
+    from rover_vlm.traces import PROMPT_VERSION
+    assert PROMPT_VERSION == "v7"
+
+
+def test_path_prompt_accepts_a_path_only_answer_and_uses_its_last_waypoint_as_goal():
+    p = path_trace_prompt(_endpoints_record([[0.229, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.616, 0]]))
+    assert "[0.5, 0.616]" in p
+    answer_block = re.search(r"<answer>(.*?)</answer>", p, re.S).group(1)
+    assert '"goal": [0.5, 0.616, 0]' in answer_block
+
+
+def test_path_prompt_hands_over_both_endpoints_with_their_visibility():
+    """At inference Qwen is told the entry point and the goal, so the trace may use them."""
+    p = path_trace_prompt(_endpoints_record([[0.229, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.616, 0]]))
+    assert "enters the frame at [0.229, 1.0]" in p
+    assert "goal at [0.5, 0.616]" in p
+    assert "hidden" in p.split("goal at [0.5, 0.616]")[1][:80]
+
+
+@pytest.mark.parametrize("start, edge", [
+    ([0.229, 1.0, 1], "bottom edge"),
+    ([0.0, 0.806, 0], "left edge"),
+    ([1.0, 0.75, 1], "right edge"),
+])
+def test_path_prompt_names_the_actual_entry_edge(start, edge):
+    """v6 claimed every route "starts at the bottom of the frame"; side entries do not."""
+    p = path_trace_prompt(_endpoints_record([start, [0.5, 0.6, 1]]))
+    assert edge in p
+    assert "bottom of the frame" not in p
+
+
+def test_path_prompt_forbids_handed_route_language():
+    """The v6 full run leaked on ~5% of traces via "the planned path"; v7 bans it up front."""
+    p = path_trace_prompt(_endpoints_record([[0.5, 1.0, 1], [0.5, 0.6, 1]]))
+    assert "has decided nothing" in p
+    assert "planned" in p
+
+
+def test_path_prompt_still_works_on_a_legacy_record_with_a_goal_field():
+    p = path_trace_prompt(_path_record([[0.5, 1.0, 1], [0.5, 0.8, 1]], [0.5, 0.7, 1]))
+    assert "goal at [0.5, 0.7]" in p
+
+
+def test_answer_matches_path_falls_back_to_the_last_waypoint_without_a_goal_field():
+    rec = _endpoints_record([[0.5, 1.0, 1], [0.5, 0.8, 0], [0.5, 0.7, 0]])
+    assert answer_matches("path", json.dumps({"reasoning": "x", "goal": [0.5, 0.7, 0]}), rec) is True
+    assert answer_matches("path", json.dumps({"reasoning": "x", "goal": [0.5, 0.8, 0]}), rec) is False
+
+
 # --- parsing ------------------------------------------------------------------------
 
 
@@ -517,6 +580,22 @@ def test_filter_drop_priority_and_non_destructive(tmp_path):
     assert counts == {"error": 1, "no-trace": 1, "truncated": 1, "leak": 1, "drift": 1}
     # the shipped set must be leak-free by the detector that defines the gate
     assert not [r for r in out if r["keep"] and leakage_spans(r["trace"])]
+
+
+def test_filter_gate_flags_leak_rate_and_keep_rate():
+    """The n=200 gate that fronts label_full_path.sbatch: fail on leaks or on a low keep rate."""
+    fm = _filter_mod()
+    counts = {"error": 0, "no-trace": 0, "truncated": 0, "leak": 0, "drift": 0}
+    assert fm.gate_failures(n=200, kept=198, counts={**counts, "leak": 2},
+                            max_leak_rate=0.01, min_keep_rate=0.95) == []
+    leaky = fm.gate_failures(n=200, kept=194, counts={**counts, "leak": 6},
+                             max_leak_rate=0.01, min_keep_rate=0.95)
+    assert len(leaky) == 1 and "leak" in leaky[0]
+    lossy = fm.gate_failures(n=200, kept=180, counts={**counts, "no-trace": 20},
+                             max_leak_rate=0.01, min_keep_rate=0.95)
+    assert len(lossy) == 1 and "keep" in lossy[0]
+    assert fm.gate_failures(n=0, kept=0, counts=counts,
+                            max_leak_rate=0.01, min_keep_rate=0.95) == ["no rows"]
 
 
 # --- the traced 2B-vs-0.8B report (scripts/visualize_traced_comparison.py) -----------

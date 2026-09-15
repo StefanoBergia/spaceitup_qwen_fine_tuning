@@ -1,10 +1,10 @@
 """Merge Cosmos3 reasoning traces into the prepared Habitat path-regression training set.
 
-    uv run scripts/prepare_habitat_traces.py            # default v2 train split
+    uv run scripts/prepare_habitat_traces.py            # default: v4 train split, v7 traces
     uv run scripts/prepare_habitat_traces.py \
         --prepared data/prepared_habitat_v2/train_full.json \
         --traces   outputs/traces_full/path_v6_train_full.filtered.jsonl \
-        --out      data/prepared_habitat_v2/train_full_traced.json
+        --out      data/prepared_habitat_v2/train_full_traced.json   # the round-2 set
 
 CPU-only, deterministic, no network. Joins each prepared conversation record to its kept
 trace BY ID and attaches the reasoning as a top-level "reasoning" field. Downstream,
@@ -72,11 +72,11 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--prepared", type=Path,
-                   default=REPO_ROOT / "data/prepared_habitat_v2/train_full.json")
+                   default=REPO_ROOT / "data/prepared_habitat_v4/train_full.json")
     p.add_argument("--traces", type=Path,
-                   default=REPO_ROOT / "outputs/traces_full/path_v6_train_full.filtered.jsonl")
+                   default=REPO_ROOT / "outputs/traces_full/path_v7_train_full.filtered.jsonl")
     p.add_argument("--out", type=Path,
-                   default=REPO_ROOT / "data/prepared_habitat_v2/train_full_traced.json")
+                   default=REPO_ROOT / "data/prepared_habitat_v4/train_full_traced.json")
     p.add_argument("--keep-untraced", action="store_true",
                    help="include prepared records that have no kept trace (answer-only), "
                         "instead of dropping them")

@@ -705,8 +705,11 @@ v6 cleared the gate, so the whole path-regression dataset gets labelled with it 
 `train_full` + 1,000 `eval` = **9,140 samples**:
 
 ```bash
-sbatch slurm/label_full_path.sbatch
+DATA=data/prepared_habitat_v2 VERSION=v6 sbatch slurm/label_full_path.sbatch
 ```
+
+(The sbatch now defaults to the round-4 relabel, `DATA=data/prepared_habitat_v4 VERSION=v7`
+— see below; the two variables reproduce this run.)
 
 One job serves the model *and* runs the client against localhost, so there is no second
 terminal to keep alive — the 2026-07-22 server was started under `srun` and died with its
@@ -827,14 +830,50 @@ with removing the illustrative furniture example, but the diffs show that landed
 one run later — so the v2 *and* v3 labels were both produced with `"the sofa and the
 kitchen counter"` still in the prompt.
 
+#### Round-4 relabel (prompt v7, `data/prepared_habitat_v4`)
+
+Round 4 moved Qwen to the *endpoints* framing (entry point and goal named in the prompt,
+path-only answer) and 62% of its 23,770 training records are yaw-augmented frames the v6
+run never saw — only 7,613 v4 train ids carry a v6 trace. So the whole v4 dataset is
+relabelled with **v7** (`PROMPT_VERSION` in `src/rover_vlm/traces.py`), which:
+
+- hands Cosmos the same two facts Qwen will see at inference — where the route enters the
+  frame and where the goal is, each with its visibility — so the trace may reason from them;
+- names the real entry edge (bottom / left / right) instead of v6's "starts at the bottom of
+  the frame", which was false for side entries;
+- derives the goal from the last waypoint when the answer has no `"goal"` field (v4 answers
+  are path-only; legacy v2 records still work);
+- bans the handed-route vocabulary up front ("planned / designated / given route", "follows
+  / trusts / sticks to") — the family the v6 run leaked on and only the filter caught.
+
+The v6 files (`path_v6_*`) stay untouched. **One job does the gate and the full run**:
+
+```bash
+sbatch slurm/label_full_path.sbatch
+```
+
+Stage 0 labels `GATE_N` (default 200) eval samples into `outputs/traces/path_v7_gate.jsonl`
+and scores them with `scripts/filter_traces.py --max-leak-rate 0.01 --min-keep-rate 0.95`
+under the current detector. The n=20 gate missed a 5% leak last time, which is why this one
+is 200 and why it runs unattended in front of the full run: a failing gate exits the job
+before any full-run sample is spent (`GATE_N=0` skips it for a prompt that already passed).
+Then 23,770 `train_full` + 2,591 `eval` = **26,361 samples**, ~10–11 h at the measured 43/min,
+`--time` 16 h, resumable, into `outputs/traces_full/path_v7_{train_full,eval}.jsonl`. After it:
+
+```bash
+uv run scripts/filter_traces.py                   # both path_v7 splits -> *.filtered.jsonl
+uv run scripts/prepare_habitat_traces.py          # -> data/prepared_habitat_v4/train_full_traced.json
+```
+
 #### Training on the traces (`<think>` block)
 
 The kept traces are wired into training as Qwen3.5's native reasoning. Two steps:
 
 ```bash
-# 1. Merge kept traces into the prepared split (CPU, no GPU)
+# 1. Merge kept traces into the prepared split (CPU, no GPU). Defaults are now v4 + v7;
+#    the round-2 set was built with --prepared/--traces/--out pointed at v2 + v6.
 uv run scripts/prepare_habitat_traces.py
-#    -> data/prepared_habitat_v2/train_full_traced.json   (7,768 records)
+#    -> data/prepared_habitat_v4/train_full_traced.json
 
 # 2. Fine-tune BOTH sizes (2B + 0.8B) and eval each, in one GPU job (recommended).
 #    Sequential on one 3g.40gb slice, idempotent/resumable; evals pass --enable-thinking.

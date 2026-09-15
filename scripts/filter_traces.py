@@ -1,7 +1,9 @@
 """Filter a full trace-labelling run down to a clean training set.
 
-    uv run scripts/filter_traces.py                       # both path_v6 splits
+    uv run scripts/filter_traces.py                       # both path_v7 splits
     uv run scripts/filter_traces.py outputs/traces_full/path_v6_eval.jsonl
+    uv run scripts/filter_traces.py outputs/traces/path_v7_gate.jsonl \
+        --max-leak-rate 0.01 --min-keep-rate 0.95          # the gate: exit 2 on failure
 
 CPU-only, deterministic, no network. Reads the raw outputs/traces_full/*.jsonl produced by
 scripts/label_traces.py, re-scores leakage with the CURRENT rover_vlm.traces.leakage_spans
@@ -39,7 +41,7 @@ from pathlib import Path
 from rover_vlm.traces import answer_payload, leakage_spans
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT = [REPO_ROOT / "outputs" / "traces_full" / f"path_v6_{s}.jsonl"
+DEFAULT = [REPO_ROOT / "outputs" / "traces_full" / f"path_v7_{s}.jsonl"
            for s in ("train_full", "eval")]
 
 REASONS = ["error", "no-trace", "truncated", "leak", "drift"]
@@ -86,12 +88,36 @@ def filter_file(path):
     return rows, out, out_path, kept, counts
 
 
+def gate_failures(*, n, kept, counts, max_leak_rate, min_keep_rate):
+    """Why a labelled sample fails the pre-full-run gate — an empty list is a pass.
+
+    Two numbers, checked per file: the leak rate (the thing the v6 full run got wrong at
+    ~5%, invisible at n=20) and the keep rate (no-trace / truncated / drift together).
+    """
+    if not n:
+        return ["no rows"]
+    failures = []
+    leak_rate = counts["leak"] / n
+    if leak_rate > max_leak_rate:
+        failures.append(f"leak rate {leak_rate:.1%} > {max_leak_rate:.1%}")
+    keep_rate = kept / n
+    if keep_rate < min_keep_rate:
+        failures.append(f"keep rate {keep_rate:.1%} < {min_keep_rate:.1%}")
+    return failures
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("files", nargs="*", type=Path, default=DEFAULT,
-                   help="raw *.jsonl to filter (default: both path_v6 splits)")
+                   help="raw *.jsonl to filter (default: both path_v7 splits)")
+    p.add_argument("--max-leak-rate", type=float, default=None,
+                   help="gate: exit 2 if any file's leak rate exceeds this fraction")
+    p.add_argument("--min-keep-rate", type=float, default=None,
+                   help="gate: exit 2 if any file's keep rate is below this fraction")
     args = p.parse_args()
+    gating = args.max_leak_rate is not None or args.min_keep_rate is not None
+    gate_problems = []
 
     grand_kept = grand_n = 0
     for path in args.files:
@@ -109,6 +135,11 @@ def main() -> None:
         print(f"   TOTAL DROP {dropped}  ({100 * dropped / n:.1f}%)"
               f"   ->  KEEP {kept}  ({100 * kept / n:.1f}%)")
         print(f"   wrote {out_path.name}  ({len(out)} rows, same as input)")
+        if gating:
+            gate_problems += [f"{path.name}: {why}" for why in gate_failures(
+                n=n, kept=kept, counts=counts,
+                max_leak_rate=args.max_leak_rate if args.max_leak_rate is not None else 1.0,
+                min_keep_rate=args.min_keep_rate if args.min_keep_rate is not None else 0.0)]
 
     if len(args.files) > 1:
         print(f"\ntotal: KEEP {grand_kept}/{grand_n}  ({100 * grand_kept / grand_n:.1f}%)")
@@ -119,6 +150,13 @@ def main() -> None:
     print(f"\nresidual leaks in the kept set: {residual}  (must be 0)")
     if residual:
         raise SystemExit("kept set is not leak-free — filter logic is wrong")
+    if gating:
+        if gate_problems:
+            print("\nGATE FAILED:")
+            for why in gate_problems:
+                print(f"   {why}")
+            raise SystemExit(2)
+        print("\nGATE PASSED")
 
 
 if __name__ == "__main__":
