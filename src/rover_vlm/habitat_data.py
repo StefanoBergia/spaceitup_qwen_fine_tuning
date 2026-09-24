@@ -75,6 +75,13 @@ HABITAT_PROMPT_ENDPOINTS = (
     'goal. Answer as JSON: {{"path": [[x, y, v], ...]}}.'
 )
 
+# Instruction-conditioned framing (2026-09-24): the round-4 prompt plus one sentence naming
+# the route in words. Derived from the endpoints template rather than copied, so the two
+# can never drift apart -- the only difference a model sees is the instruction.
+HABITAT_PROMPT_INSTRUCTION = HABITAT_PROMPT_ENDPOINTS.replace(
+    " Coordinates are", ' Drive it as this instruction says: "{instr}". Coordinates are', 1
+)
+
 #: Prompt/answer framings. "legacy" is rounds 1-2, "goal" round 3, "endpoints" round 4.
 FRAMINGS = ("legacy", "goal", "endpoints")
 
@@ -95,6 +102,20 @@ def endpoints_prompt(start_wp, goal_wp):
     return HABITAT_PROMPT_ENDPOINTS.format(
         sx=start_wp[0], sy=start_wp[1], svis=_vis_phrase(start_wp),
         gx=goal_wp[0], gy=goal_wp[1], gvis=_vis_phrase(goal_wp),
+    )
+
+
+def instruction_endpoints_prompt(start_wp, goal_wp, instruction):
+    """HABITAT_PROMPT_INSTRUCTION for two endpoints and a route instruction.
+
+    The instruction arrives from Cosmos, so it is flattened to one line and its double
+    quotes turned into single ones -- otherwise it would close the quoted span early.
+    A trailing full stop is normalized to exactly one, inside the quotes.
+    """
+    text = " ".join(str(instruction).split()).replace('"', "'").rstrip(".")
+    return HABITAT_PROMPT_INSTRUCTION.format(
+        sx=start_wp[0], sy=start_wp[1], svis=_vis_phrase(start_wp),
+        gx=goal_wp[0], gy=goal_wp[1], gvis=_vis_phrase(goal_wp), instr=text + ".",
     )
 
 
@@ -231,10 +252,10 @@ def resample_with_transitions(clipped, target=MAX_WAYPOINTS, cap=HARD_CAP):
     ]
 
 
-def select_correct_path(fpv_paths, meta):
-    """Concatenate the runs of the correct candidate (meta['label']) into
-    (u, v, hidden) points. None if the label is missing/misaligned."""
-    label = meta.get("label")
+def select_correct_path(fpv_paths, meta, index=None):
+    """Concatenate one candidate's runs into (u, v, hidden) points: the correct one
+    (meta['label']) unless `index` names another. None if missing/misaligned."""
+    label = meta.get("label") if index is None else index
     cands = fpv_paths.get("candidates", [])
     if label is None or not (0 <= label < len(cands)) or len(cands) != len(meta.get("candidates", [])):
         return None
@@ -270,7 +291,7 @@ SKIP_REASONS = (
 
 
 def build_record(sample_dir, *, framing="legacy", goal_in_prompt=None,
-                 meta_extra=None, reasons=None):
+                 meta_extra=None, reasons=None, candidate=None, instruction=None):
     """Habitat sample dir -> conversation record, or None if filtered/invalid.
 
     `framing` picks what the prompt hands over and what the answer therefore has to
@@ -295,11 +316,17 @@ def build_record(sample_dir, *, framing="legacy", goal_in_prompt=None,
     `meta_extra` is merged into a `habitat_meta` sidecar on the record -- invisible to
     TrajectoryDataset, carried through eval so results can be sliced by source/scene.
     `reasons` is an optional dict-like counter that records why a sample was dropped.
+
+    `candidate` builds the record from that candidate index instead of meta['label'];
+    `instruction` (endpoints framing only) adds a route instruction to the prompt. Both
+    serve the instruction-conditioned pairs in rover_vlm.instructions.
     """
     if goal_in_prompt is not None:
         framing = "goal" if goal_in_prompt else "legacy"
     if framing not in FRAMINGS:
         raise ValueError(f"unknown framing {framing!r} (expected one of {FRAMINGS})")
+    if instruction is not None and framing != "endpoints":
+        raise ValueError("an instruction is only defined on the endpoints framing")
     def _skip(reason):
         if reasons is not None:
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -310,7 +337,7 @@ def build_record(sample_dir, *, framing="legacy", goal_in_prompt=None,
     meta = json.loads((sample_dir / "meta.json").read_text())
     if not meta.get("correct_path_in_fov"):
         return _skip("not_in_fov")
-    raw = select_correct_path(fpv, meta)
+    raw = select_correct_path(fpv, meta, candidate)
     if not raw or len(raw) < 2:
         return _skip("no_path")
     w, h = fpv["image_size"]
@@ -333,7 +360,8 @@ def build_record(sample_dir, *, framing="legacy", goal_in_prompt=None,
         if framing == "goal":
             prompt = goal_prompt(goal_wp)
         else:
-            prompt = endpoints_prompt(path_wps[0], goal_wp)
+            prompt = (endpoints_prompt(path_wps[0], goal_wp) if instruction is None
+                      else instruction_endpoints_prompt(path_wps[0], goal_wp, instruction))
         answer = format_answer_goal(path_wps)
 
     start_wp = path_wps[0]
@@ -354,6 +382,8 @@ def build_record(sample_dir, *, framing="legacy", goal_in_prompt=None,
         "entry_edge": start_edge({"path": [list(w) for w in path_wps]}),
         "framing": framing,
         "goal_in_prompt": framing != "legacy",
+        "candidate_index": meta.get("label") if candidate is None else candidate,
+        "instruction": instruction,
     }
     aug = meta.get("aug") or {}
     sidecar["source"] = "augmented" if aug else "original"

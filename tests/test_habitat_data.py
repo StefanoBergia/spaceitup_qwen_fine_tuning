@@ -140,3 +140,50 @@ def test_build_record_on_live_sample():
     assert "path" in obj and "goal" in obj
     for x, y, v in obj["path"] + [obj["goal"]]:
         assert 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and v in (0, 1)
+
+
+from rover_vlm.habitat_data import instruction_endpoints_prompt
+
+
+def test_select_correct_path_index_overrides_label():
+    fpv = {"candidates": [
+        {"runs": [{"hidden": False, "uv": [[1.0, 2.0]]}]},
+        {"runs": [{"hidden": True, "uv": [[5.0, 6.0]]}]},
+    ]}
+    meta = {"label": 0, "candidates": [{}, {}]}
+    assert select_correct_path(fpv, meta) == [(1.0, 2.0, False)]
+    assert select_correct_path(fpv, meta, index=1) == [(5.0, 6.0, True)]
+    assert select_correct_path(fpv, meta, index=2) is None
+
+
+def test_instruction_prompt_extends_endpoints_prompt():
+    p = instruction_endpoints_prompt((0.5, 1.0, 1), (0.5, 0.6, 1), "Pass left of the sofa.")
+    assert p.startswith("<image>\n")
+    assert 'Drive it as this instruction says: "Pass left of the sofa."' in p
+    assert "[0.5, 1.0]" in p and "[0.5, 0.6]" in p
+    assert p.count("Coordinates are") == 1
+
+
+def test_instruction_prompt_sanitizes_quotes_and_newlines():
+    p = instruction_endpoints_prompt((0.5, 1.0, 1), (0.5, 0.6, 1), ' Go "left"\n of it. ')
+    assert "\"Go 'left' of it.\"" in p
+    assert "\n of" not in p
+
+
+def test_build_record_with_candidate_and_instruction(two_sided_sample):
+    left = build_record(two_sided_sample, framing="endpoints", instruction="Go left.")
+    right = build_record(two_sided_sample, framing="endpoints", candidate=1,
+                         instruction="Go right.")
+    pl = json.loads(left["conversations"][1]["value"])["path"]
+    pr = json.loads(right["conversations"][1]["value"])["path"]
+    assert pl[0] == pr[0] and pl[-1] == pr[-1]
+    assert min(x for x, _, _ in pl) < 0.5 < max(x for x, _, _ in pr)
+    assert '"Go right."' in right["conversations"][0]["value"]
+    assert right["habitat_meta"]["candidate_index"] == 1
+    assert left["habitat_meta"]["candidate_index"] == 0
+    assert right["habitat_meta"]["instruction"] == "Go right."
+
+
+def test_build_record_instruction_requires_endpoints(two_sided_sample):
+    with pytest.raises(ValueError):
+        build_record(two_sided_sample, framing="goal", instruction="Go left.")
