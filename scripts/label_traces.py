@@ -30,7 +30,6 @@ The prompts themselves live in src/rover_vlm/traces.py — edit there, not here.
 
 import argparse
 import json
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -44,22 +43,11 @@ from rover_vlm.traces import (
     parse_trace,
     trace_from_answer,
 )
+from rover_vlm.labelling_io import connect, prepare_output, resolve_endpoint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENDPOINT_FILE = REPO_ROOT / "outputs" / "cosmos3_endpoint.txt"
 OUT_DIR = REPO_ROOT / "outputs" / "traces"
-
-
-def resolve_endpoint(explicit):
-    if explicit:
-        return explicit
-    if not ENDPOINT_FILE.exists():
-        raise SystemExit(
-            f"No endpoint at {ENDPOINT_FILE}.\n"
-            "Start the server with 'sbatch slurm/serve_cosmos3.sbatch' and wait for it to\n"
-            "report READY, or pass --endpoint http://<host>:<port>/v1 explicitly."
-        )
-    return ENDPOINT_FILE.read_text().strip()
 
 
 def main() -> None:
@@ -109,48 +97,16 @@ def main() -> None:
 
     # A full run is hours of GPU time; silently truncating its output would be the most
     # expensive mistake this script can make.
-    done = set()
-    if out_path.exists() and out_path.stat().st_size:
-        if args.resume:
-            kept = [json.loads(line) for line in out_path.open() if line.strip()]
-            # A failed request is unfinished work, not a result — resume retries it. The
-            # file is rewritten without those rows first, so a retried sample ends up with
-            # one line rather than an error line shadowed by a later success.
-            failed = sum(1 for r in kept if r.get("error"))
-            kept = [r for r in kept if not r.get("error")]
-            done = {r["id"] for r in kept}
-            tmp = out_path.with_suffix(".jsonl.tmp")
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in kept))
-            os.replace(tmp, out_path)          # atomic: never leaves a half-written file
-            records = [r for r in records if r["id"] not in done]
-            print(f"resume:   {len(done)} done in {out_path.name}"
-                  + (f", {failed} failed rows dropped for retry" if failed else "")
-                  + f", {len(records)} left")
-        elif not args.overwrite:
-            raise SystemExit(
-                f"{out_path} exists and is not empty. Pass --resume to continue it, or "
-                f"--overwrite to replace it.")
+    done, mode = prepare_output(out_path, resume=args.resume, overwrite=args.overwrite)
+    records = [r for r in records if r["id"] not in done]
     print(f"split:    {args.split} ({len(records)} to label, task={args.task}, "
           f"concurrency={args.concurrency})\n")
     if not records:
         print("nothing left to do")
         return
 
-    try:
-        import openai
-    except ImportError:
-        raise SystemExit("openai not installed — run 'uv sync' (it is a project dependency).")
-
-    base_url = resolve_endpoint(args.endpoint)
-    client = openai.OpenAI(api_key="EMPTY", base_url=base_url, timeout=600)
-    try:
-        model = args.model or client.models.list().data[0].id
-    except Exception as e:  # noqa: BLE001 — a dead endpoint should read as one line, not a stack
-        raise SystemExit(
-            f"Cannot reach the server at {base_url} ({type(e).__name__}: {e}).\n"
-            "Check the serve job is still RUNNING (squeue) and that\n"
-            "outputs/cosmos3_endpoint.txt points at the node it is actually on."
-        )
+    base_url = resolve_endpoint(args.endpoint, ENDPOINT_FILE)
+    client, model = connect(base_url, args.model)
     print(f"endpoint: {base_url}\nmodel:    {model}")
 
 
@@ -195,7 +151,6 @@ def main() -> None:
     n_ok = n_leak = n_match = n_err = n_unverifiable = 0
     word_counts = []
     n, started = len(records), time.time()
-    mode = "a" if (args.resume and done) else "w"
 
     with out_path.open(mode) as f:
         with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
