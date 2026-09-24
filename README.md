@@ -1316,6 +1316,36 @@ camera height is an estimate (±0.1 m scales the path rows by ~±10 %); only the
 chunk of a GND recording carries `tf_static`. OpenLORIS-Scene (indoor service robot at
 ~1 m with depth, form-gated) is the planned next indoor set.
 
+## Instruction-conditioned paths (2026-09-24)
+
+The route instruction becomes an *input*: the round-4 prompt (entry point + goal) plus one
+sentence such as "pass left of the grey sofa", and the answer is the path that obeys it.
+Only frames with a feasible left AND right route entering the frame at the same point are
+used, so the instruction alone decides the side — with the entry point and goal handed over,
+any other frame's path is already pinned and the instruction would be ignorable. Spec:
+`docs/superpowers/specs/2026-09-24-instruction-conditioned-paths-design.md`.
+
+Two arms on identical frames: `template` ("Go around to the left.") and `cosmos`
+(Cosmos3-Nano's landmark-grounded instruction, kept only if a second, independent Cosmos call
+picks the right route from it). Headline metric: **pair success** — both instructions of a
+frame followed; an instruction-blind model scores 0 by construction.
+
+1. Pairs + overlays (CPU, ~10 min): `uv run scripts/prepare_habitat_instr.py pairs` →
+   `data/prepared_habitat_instr_v1/pairs_{train,eval}.json`, `overlays/`, `pairs_meta.json`
+2. Cosmos endpoint: `sbatch slurm/serve_cosmos3.sbatch`, wait for READY
+3. Gate (100 eval pairs; exits 2 on failure — drawing references must be 0, pair survival ≥ 0.8):
+   `uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json --limit-pairs 100 --out outputs/instr_labels/gate_i1.jsonl --concurrency 8 --gate`
+4. Full labels (`--resume` safe): the same script on `pairs_train.json` → `outputs/instr_labels/train_i1.jsonl`
+   and on `pairs_eval.json` → `outputs/instr_labels/eval_i1.jsonl`
+5. Finalize: `uv run scripts/prepare_habitat_instr.py finalize --instructions outputs/instr_labels/train_i1.jsonl outputs/instr_labels/eval_i1.jsonl`
+   → `{train,eval}_{template,cosmos}.json` (same ids in both arms)
+6. Train both arms (~1.3 h each):
+   `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v1/train_template.json outputs/runs_instr_v1/template --epochs 3`
+   and the same with `train_cosmos.json` → `outputs/runs_instr_v1/cosmos`
+7. Eval every cell: `sbatch slurm/eval_instruction.sbatch` → `outputs/eval_instr_v1/<set>/<tag>/metrics.json`
+   (`instruction.pair_success`, `follow_rate`, `follow_rate_by_side`, `identical_output_rate`)
+8. Report: `uv run scripts/visualize_instruction_results.py` → `outputs/instruction_results.html`
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
@@ -1332,6 +1362,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Trace prompt: how v6 was arrived at | `uv run scripts/visualize_traces.py` | `outputs/traces_report.html` |
 | Traced fine-tune: 2B vs 0.8B + reasoning | `uv run scripts/visualize_traced_comparison.py` | `outputs/eval_habitat_v2_traced/traced_comparison.html` |
 | Real-image eval: Habitat vs real per model | `uv run scripts/visualize_real_eval.py` | `outputs/eval_real/real_eval.html` |
+| Instruction-conditioned paths | `uv run scripts/visualize_instruction_results.py` | `outputs/instruction_results.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):

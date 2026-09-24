@@ -173,3 +173,22 @@ def test_assert_scene_disjoint(two_sided_sample):
     with pytest.raises(AssertionError):
         assert_scene_disjoint([left], [right])
 
+
+import importlib.util
+from pathlib import Path as _P
+
+
+def _load_report():
+    path = _P(__file__).resolve().parent.parent / "scripts" / "visualize_instruction_results.py"
+    spec = importlib.util.spec_from_file_location("vir", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_collect_cells(tmp_path):
+    d = tmp_path / "cosmos" / "instr_cosmos"
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text(json.dumps({"parse_rate": 1.0, "instruction": {"pair_success": 0.7}}))
+    cells = _load_report().collect_cells(tmp_path)
+    assert cells[("instr_cosmos", "cosmos")]["instruction"]["pair_success"] == 0.7
