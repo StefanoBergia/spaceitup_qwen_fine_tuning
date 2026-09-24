@@ -53,6 +53,12 @@ round-4 prompt's entry point already reveals the side, and the instruction is by
 | train | 973 | 1,946 | 548 / 425 |
 | eval | 125 | 250 | 75 / 50 |
 
+**Revised at implementation (final review):** pairs whose two routes are within 0.05 Fréchet
+of each other are also dropped (`routes_too_similar`, 183 pairs — one route drawn twice, where
+following the instruction cannot be measured), and the start snap compares the full `[x, y, v]`
+so the start's visibility flag cannot leak the side. Final set: **813 train / 102 eval pairs
+(1,626 / 204 records)**; `label` side left/right 458/355 train, 59/43 eval.
+
 Yaw-augmented frames are excluded because the candidate projections belong to the unrotated camera.
 
 ## 1. Dataset
