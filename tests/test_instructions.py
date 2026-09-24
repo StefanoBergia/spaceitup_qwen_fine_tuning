@@ -192,3 +192,34 @@ def test_collect_cells(tmp_path):
     (d / "metrics.json").write_text(json.dumps({"parse_rate": 1.0, "instruction": {"pair_success": 0.7}}))
     cells = _load_report().collect_cells(tmp_path)
     assert cells[("instr_cosmos", "cosmos")]["instruction"]["pair_success"] == 0.7
+
+
+def test_build_pair_drops_near_identical_routes(tmp_path):
+    d = write_sample(tmp_path / "s_c010",
+                     left_uv=[(256, 512), (250, 400), (256, 300)],
+                     right_uv=[(256, 512), (258, 400), (256, 300)])   # ~0.016 apart
+    reasons = {}
+    assert build_pair(d, reasons=reasons) is None
+    assert reasons == {"routes_too_similar": 1}
+
+
+def test_build_pair_snaps_start_visibility_flag(tmp_path):
+    import json as _json
+    d = write_sample(tmp_path / "s_c011",
+                     left_uv=[(256, 512), (140, 400), (256, 300)],
+                     right_uv=[(256, 512), (370, 400), (256, 300)])
+    fpv = _json.loads((d / "fpv_paths.json").read_text())
+    # right route starts hidden at the same xy: the prompt's "visible/hidden" would leak the side
+    fpv["candidates"][1]["runs"] = [{"hidden": True, "uv": [[256, 512], [300, 450]]},
+                                    {"hidden": False, "uv": [[370, 400], [256, 300]]}]
+    (d / "fpv_paths.json").write_text(_json.dumps(fpv))
+    left, right = build_pair(d)
+    assert _path(left)[0] == _path(right)[0]
+    pl, pr = left["conversations"][0]["value"], right["conversations"][0]["value"]
+    assert pl.replace(TEMPLATE_INSTRUCTIONS["left"], "X") == pr.replace(TEMPLATE_INSTRUCTIONS["right"], "X")
+
+
+def test_build_pair_given_texts_with_quotes(two_sided_sample):
+    left, right = build_pair(two_sided_sample,
+                             texts={"left": 'Pass the "big" lamp on its left side.', "right": "Keep right of the lamp stand."})
+    assert "'big'" in left["conversations"][0]["value"]

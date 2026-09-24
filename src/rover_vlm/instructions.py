@@ -20,6 +20,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from .habitat_choice import _draw_badge, _font, _point_at_fraction
+from .eval import frechet_distance
 from .habitat_data import build_record, format_answer_goal, instruction_endpoints_prompt
 from .overlay import draw_polyline
 from .traces import SCENE_INTRO, SCRATCH_NOTE, answer_payload, parse_trace
@@ -28,7 +29,16 @@ SIDES = ("left", "right")
 #: Max distance between the two routes' entry points. Beyond it the entry point handed in
 #: the prompt already reveals the side (57% of two-sided frames enter 0.5-1.0 apart).
 SHARED_ENTRY_TOL = 0.05
+#: Min Fréchet distance between the two routes. Below it the pair is one route drawn twice:
+#: whether a prediction lands nearer the instructed side is prediction noise (18% of pairs
+#: fell under 0.05 on the first build, 3 were byte-identical), so it could only add label
+#: noise to training and cap pair success in eval.
+MIN_ROUTE_SEPARATION = 0.05
 TEMPLATE_INSTRUCTIONS = {"left": "Go around to the left.", "right": "Go around to the right."}
+
+
+# the quoted instruction inside a prompt (its own double quotes are made single on render)
+_INSTR_SPAN = re.compile(r'instruction says: "[^"]*"')
 
 
 def _skip(reasons, reason):
@@ -96,10 +106,17 @@ def build_pair(sample_dir, *, texts=None, meta_extra=None, reasons=None):
     gap = math.dist(paths["left"][0][:2], paths["right"][0][:2])
     if gap > SHARED_ENTRY_TOL:
         return _skip(reasons, "entry_differs")
-    if gap > 0:
+    xy = {s: [w[:2] for w in p] for s, p in paths.items()}
+    if frechet_distance(xy["left"], xy["right"]) < MIN_ROUTE_SEPARATION:
+        return _skip(reasons, "routes_too_similar")
+    # Compare the whole [x, y, v] start, not just xy: identical coordinates with a different
+    # visibility flag would still tell the prompt's reader which side it is on.
+    if paths["right"][0] != paths["left"][0]:
         paths["right"][0] = list(paths["left"][0])
         _set_path(recs["right"], paths["right"], texts["right"])
         recs["right"]["habitat_meta"]["start_uv_norm"] = paths["right"][0][:2]
+    masked = {s: _INSTR_SPAN.sub("", recs[s]["conversations"][0]["value"]) for s in SIDES}
+    assert masked["left"] == masked["right"], f"{sample_dir.name}: prompts differ beyond the instruction"
 
     out = []
     for side, other in (("left", "right"), ("right", "left")):
