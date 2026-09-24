@@ -70,17 +70,25 @@ each with its own instruction and its own path.
   - `instr_template` — fixed text from the candidate's side label, e.g. "Go around the obstacle
     on its left." No Cosmos.
   - `instr_cosmos` — Cosmos3-Nano's landmark-grounded description (section 2).
-- **Entry point:** `scripts/prepare_habitat.py --framing instruction [--instructions <jsonl>]`
-  (no `--instructions` → template). Writes `data/prepared_habitat_instr_v1/`
-  (`train_template.json`, `train_cosmos.json`, `eval_template.json`, `eval_cosmos.json`, `meta.json`).
+- **Entry point:** a separate `scripts/prepare_habitat_instr.py` (revised during planning: it
+  derives from the already integrity-checked `data/prepared_habitat_v4` splits, the way
+  `prepare_habitat_traces.py` derives from a prepared split, instead of adding a pair-producing
+  mode to the manifest-driven `prepare_habitat.py`). Two stages:
+  - `pairs` — build both records per kept frame (template text) + the Cosmos overlay images →
+    `pairs_train.json`, `pairs_eval.json`, `overlays/`. This is the labelling input.
+  - `finalize --instructions <train.jsonl> <eval.jsonl>` — keep pairs whose two records both
+    passed, write `train_template.json`, `train_cosmos.json`, `eval_template.json`,
+    `eval_cosmos.json` (identical ids across template/cosmos) and `meta.json`.
 - **Asserts:** eval ∩ train = ∅ by scene; every pair has both records or neither.
 
 ## 2. Cosmos instruction labelling
 
 New module `src/rover_vlm/instructions.py` holds prompts, parser and the reference detector —
-kept apart from `traces.py`, whose leakage machinery is trace-specific. `scripts/label_traces.py`
-gets two new `--task` values, `instruction` and `instruction_check`, reusing its endpoint,
-`--resume` and `--concurrency` handling.
+kept apart from `traces.py`, whose leakage machinery is trace-specific. Labelling
+runs from a new `scripts/label_instructions.py` (revised during planning: each record needs two
+chained calls with two different images, which does not fit `label_traces.py`'s one-call
+trace loop). The endpoint/resume/output-guard logic it shares with `label_traces.py` moves
+into `src/rover_vlm/labelling_io.py`, used by both.
 
 **Generation (one call per record).**
 - Image: frame with **both** routes drawn — target bold, the other thin and faded — so Cosmos
@@ -96,8 +104,9 @@ gets two new `--task` values, `instruction` and `instruction_check`, reusing its
 - A record is kept if the choice is correct; **a pair is kept only if both of its records pass**,
   preserving left/right balance.
 
-**Automatic rejection** (`instruction_rejects()`): references to the drawing ("the orange line",
-"path 1", "the marked route"), coordinates, or no object named. Also *counted, not rejected*:
+**Automatic rejection** (`instruction_rejects()`): references to the drawing ("the pink line",
+"path 1", "the marked route"), coordinates, or length outside 6–25 words. ("No object named" was
+dropped during planning — not detectable by pattern; the verifier and the side-only count cover it.) Also *counted, not rejected*:
 instructions whose only content is a side word — a high share means Cosmos adds nothing.
 
 **Gate before the full run.** 100 eval frames first. Pass = drawing references 0, pair survival
@@ -119,12 +128,14 @@ if self-agreement looks inflated.
   ~1.3 h each on a 3g.40gb slice at round 4's measured 11.7 s/step).
 - Not initialised from the round-4 adapter: it has learned that the endpoints determine the path
   and to always emit the shortest feasible side.
-- `slurm/train_instruction.sbatch` with `ARM=template|cosmos`; two submissions (MaxJobs=3).
-  Outputs `outputs/runs_instr_v1/<arm>/`. `train.py` and the loader are unchanged.
+- The existing `slurm/train_habitat.sbatch <train-file> <output-dir> --epochs 3`, submitted
+  twice (MaxJobs=3). Outputs `outputs/runs_instr_v1/<arm>/`. `train.py` and the loader are
+  unchanged.
 
 ## 4. Evaluation
 
-**Metrics** (new function in `src/rover_vlm/eval.py`, used by `evaluate.py --task instruction`):
+**Metrics** (new functions in `src/rover_vlm/eval.py`; `evaluate.py --task habitat` adds an `instruction`
+block to `metrics.json` whenever the records carry `alt_path`, so no new task is needed):
 
 | metric | definition | instruction-blind model scores |
 |---|---|---|
