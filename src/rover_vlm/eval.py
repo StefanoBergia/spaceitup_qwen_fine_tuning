@@ -514,3 +514,46 @@ def baseline_win_rate(records, n=10):
     wins = [r["metrics"]["mean_point_error"] < to_goal_error(r["gt"], n)
             for r in records if r.get("metrics") and r.get("gt")]
     return float(np.mean(wins)) if wins else None
+
+
+def instruction_follow(pred_path, gt_path, alt_path):
+    """Is the prediction closer (Fréchet) to the instructed route than to the other side?"""
+    def xy(p):
+        return np.array([q[:2] for q in p], dtype=float)
+    f_t = frechet_distance(xy(pred_path), xy(gt_path))
+    f_a = frechet_distance(xy(pred_path), xy(alt_path))
+    return {"frechet_target": f_t, "frechet_alt": f_a, "follows": int(f_t < f_a)}
+
+
+def aggregate_instruction_metrics(records):
+    """Instruction-following summary for records carrying habitat_meta.alt_path, else None.
+
+    Pair success is the headline: both records of a frame share image and endpoints and
+    differ only in the instruction, so a model that ignores it returns the same path twice
+    and wins at most one of the two -- 0% pair success by construction. An unparseable
+    prediction counts as not following; it is never dropped from the denominator.
+    """
+    rows = [r for r in records if "alt_path" in (r.get("habitat_meta") or {})]
+    if not rows:
+        return None
+    follows, by_pair, by_side = {}, {}, {}
+    for r in rows:
+        hm = r["habitat_meta"]
+        ok = 0
+        if r.get("parsed") and r["parsed"].get("path"):
+            ok = instruction_follow(r["parsed"]["path"], r["gt"]["path"], hm["alt_path"])["follows"]
+        follows[r["id"]] = ok
+        by_pair.setdefault(hm["pair_id"], []).append(r)
+        by_side.setdefault(hm["side"], []).append(ok)
+    pairs = [p for p in by_pair.values() if len(p) == 2]
+    return {
+        "n_records": len(rows),
+        "n_pairs": len(pairs),
+        "follow_rate": float(np.mean(list(follows.values()))),
+        "pair_success": (float(np.mean([all(follows[r["id"]] for r in p) for p in pairs]))
+                         if pairs else 0.0),
+        "identical_output_rate": (float(np.mean(
+            [p[0].get("generated", "").strip() == p[1].get("generated", "").strip() for p in pairs]))
+            if pairs else 0.0),
+        "follow_rate_by_side": {s: float(np.mean(v)) for s, v in sorted(by_side.items())},
+    }

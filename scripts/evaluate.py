@@ -17,6 +17,9 @@ sampled answer per image (temperature/top-p/top-k below) — the run then lands 
 with rover_vlm.consistency to measure how much the output moves for the same image:
     uv run scripts/evaluate.py --task habitat --tag habitat_train_full --adapter ... --seed 1
 
+Instruction-conditioned sets (data/prepared_habitat_instr_v1/eval_*.json) get an "instruction"
+block in metrics.json: pair success (both instructions of a frame followed) and follow rate.
+
 All models are evaluated on the same fixed eval split (data/prepared/eval.json), so
 tags are directly comparable; scripts/compare_evals.py builds the scaling table/plot.
 """
@@ -34,6 +37,7 @@ from rover_vlm.eval import (
     aggregate_choice_metrics,
     aggregate_metrics,
     aggregate_habitat_metrics,
+    aggregate_instruction_metrics,
     choice_metrics,
     habitat_metrics,
     normalize_prediction,
@@ -205,6 +209,12 @@ def main() -> None:
         "sharerobot": aggregate_metrics,
     }
     summary = aggregators[args.task](results)
+    if args.task == "habitat":
+        # instruction-conditioned eval sets (prepare_habitat_instr.py) carry the other
+        # side's route; score whether the model followed the instruction it was given
+        instr = aggregate_instruction_metrics(results)
+        if instr is not None:
+            summary["instruction"] = instr
     summary["tag"] = args.tag
     summary["model_id"] = args.model_id
     summary["adapter"] = str(args.adapter) if args.adapter else None

@@ -1,3 +1,4 @@
+import json
 import pytest
 
 from rover_vlm.eval import parse_path_answer, habitat_metrics, aggregate_habitat_metrics
@@ -267,3 +268,38 @@ def test_aggregate_omits_start_copy_for_legacy_records():
     out = aggregate_habitat_metrics([{"gt": gt, "parsed": gt, "metrics": old}])
     assert "start_copy_rate" not in out
     assert out["goal_copy_rate"] == 1.0
+
+
+from rover_vlm.eval import aggregate_instruction_metrics, instruction_follow
+
+_L = [[0.5, 1.0, 1], [0.3, 0.8, 1], [0.5, 0.6, 1]]
+_R = [[0.5, 1.0, 1], [0.7, 0.8, 1], [0.5, 0.6, 1]]
+
+
+def _irec(pid, side, pred, text=None):
+    gt, alt = (_L, _R) if side == "left" else (_R, _L)
+    return {"id": f"{pid}_{side[0].upper()}", "generated": text or json.dumps(pred),
+            "parsed": None if pred is None else {"path": pred, "goal": pred[-1]},
+            "gt": {"path": gt, "goal": gt[-1]},
+            "habitat_meta": {"pair_id": pid, "side": side, "alt_path": alt}}
+
+
+def test_instruction_follow():
+    assert instruction_follow(_L, _L, _R)["follows"] == 1
+    assert instruction_follow(_R, _L, _R)["follows"] == 0
+
+
+def test_aggregate_instruction_metrics():
+    recs = [_irec("a", "left", _L), _irec("a", "right", _R),          # split correctly
+            _irec("b", "left", _L), _irec("b", "right", _L),          # ignores instruction
+            _irec("c", "left", None, "garbage"), _irec("c", "right", _R)]  # unparseable
+    m = aggregate_instruction_metrics(recs)
+    assert m["n_pairs"] == 3 and m["n_records"] == 6
+    assert m["pair_success"] == 1 / 3
+    assert m["follow_rate"] == 4 / 6
+    assert m["identical_output_rate"] == 1 / 3
+    assert m["follow_rate_by_side"] == {"left": 2 / 3, "right": 2 / 3}
+
+
+def test_aggregate_instruction_metrics_none_without_alt_path():
+    assert aggregate_instruction_metrics([{"id": "x", "parsed": None, "habitat_meta": {}}]) is None
