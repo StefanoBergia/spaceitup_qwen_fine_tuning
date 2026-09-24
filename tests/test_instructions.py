@@ -119,3 +119,44 @@ def test_instruction_rejects():
 def test_is_side_only():
     assert is_side_only("Go around the obstacle to the left.")
     assert not is_side_only("Go around the wooden table to the left.")
+
+
+from rover_vlm.instructions import finalize_pairs, gate_failures, summarize_labels, with_instruction
+
+
+def _row(rid, pair, passed, rejects=(), correct=True, instruction="Pass left of the lamp by the door."):
+    return {"id": rid, "pair_id": pair, "instruction": instruction, "rejects": list(rejects),
+            "side_only": False, "check_correct": correct, "passed": passed}
+
+
+def test_summarize_and_gate():
+    rows = [_row("a_L", "a", True), _row("a_R", "a", True),
+            _row("b_L", "b", True), _row("b_R", "b", False, correct=False),
+            _row("c_L", "c", False, rejects=["drawing:line"]), _row("c_R", "c", True),
+            {"id": "d_L", "error": "Timeout"}]
+    s = summarize_labels(rows)
+    assert (s["pairs_total"], s["pairs_kept"]) == (4, 1)
+    assert s["n_drawing_refs"] == 1 and s["n_rejected"] == 1
+    assert gate_failures(s, min_pair_survival=0.8, max_drawing_refs=0) == [
+        "pair survival 0.250 < 0.8", "drawing references 1 > 0"]
+
+
+def test_finalize_pairs_keeps_only_fully_passed(two_sided_sample):
+    left, right = build_pair(two_sided_sample)
+    rows = {left["id"]: _row(left["id"], "p", True, instruction="Pass left of the lamp."),
+            right["id"]: _row(right["id"], "p", True, instruction="Pass right of the lamp.")}
+    tmpl, cosmos, stats = finalize_pairs([left, right], rows)
+    assert [r["id"] for r in tmpl] == [r["id"] for r in cosmos] == [left["id"], right["id"]]
+    assert '"Pass right of the lamp."' in cosmos[1]["conversations"][0]["value"]
+    assert cosmos[1]["habitat_meta"]["instruction_source"] == "cosmos"
+    assert tmpl[1]["habitat_meta"]["instruction"] == TEMPLATE_INSTRUCTIONS["right"]
+    assert stats == {"pairs_in": 1, "pairs_kept": 1}
+    del rows[right["id"]]                                   # missing label row -> pair dropped
+    assert finalize_pairs([left, right], rows)[2] == {"pairs_in": 1, "pairs_kept": 0}
+
+
+def test_with_instruction_does_not_mutate(two_sided_sample):
+    left, _ = build_pair(two_sided_sample)
+    before = json.dumps(left)
+    with_instruction(left, "Keep right of the plant.", "cosmos")
+    assert json.dumps(left) == before

@@ -9,10 +9,12 @@ two records that share image and endpoints and differ only in the instruction an
 a model that ignores the instruction can get at most one of them right.
 """
 
+import copy
 import hashlib
 import json
 import math
 import re
+from collections import defaultdict
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -278,3 +280,79 @@ def is_side_only(text):
     """True when the instruction says nothing beyond a side — no better than the template."""
     words = re.findall(r"[a-z']+", (text or "").lower())
     return not [w for w in words if w not in _SIDE_FILLER]
+
+
+# --- label bookkeeping ----------------------------------------------------------------
+
+def _by_pair(items, key):
+    groups = defaultdict(list)
+    for it in items:
+        groups[key(it)].append(it)
+    return groups
+
+
+def summarize_labels(rows):
+    """The numbers the gate and the run summary are judged on.
+
+    A pair counts towards the total even when one of its requests errored (error rows
+    carry no pair_id, so it is recovered from the record id): an unlabelled pair is a
+    pair not kept, and hiding it would flatter the survival rate.
+    """
+    ok = [r for r in rows if not r.get("error")]
+    checked = [r for r in ok if r.get("check_correct") is not None]
+    pair_ids = {r.get("pair_id") or r["id"].rsplit("_", 1)[0] for r in rows}
+    kept = {pid for pid, rs in _by_pair(ok, lambda r: r["pair_id"]).items()
+            if len(rs) == 2 and all(r.get("passed") for r in rs)}
+    return {
+        "n_records": len(rows),
+        "n_instruction": sum(bool(r.get("instruction")) for r in ok),
+        "n_drawing_refs": sum(any(x.startswith("drawing") for x in r.get("rejects", [])) for r in ok),
+        "n_rejected": sum(bool(r.get("rejects")) for r in ok),
+        "n_checked": len(checked),
+        "check_accuracy": (round(sum(bool(r["check_correct"]) for r in checked) / len(checked), 4)
+                           if checked else None),
+        "n_side_only": sum(bool(r.get("side_only")) for r in ok),
+        "pairs_total": len(pair_ids),
+        "pairs_kept": len(kept),
+        "pair_survival": round(len(kept) / len(pair_ids), 4) if pair_ids else 0.0,
+    }
+
+
+def gate_failures(summary, *, min_pair_survival, max_drawing_refs):
+    """[] when the labelling round is good enough to scale up."""
+    out = []
+    if summary["pair_survival"] < min_pair_survival:
+        out.append(f"pair survival {summary['pair_survival']:.3f} < {min_pair_survival}")
+    if summary["n_drawing_refs"] > max_drawing_refs:
+        out.append(f"drawing references {summary['n_drawing_refs']} > {max_drawing_refs}")
+    return out
+
+
+def with_instruction(rec, text, source):
+    """A copy of a pair record whose prompt carries `text` as its instruction."""
+    new = copy.deepcopy(rec)
+    path = _answer_path(new)
+    new["conversations"][0]["value"] = instruction_endpoints_prompt(path[0], path[-1], text)
+    new["habitat_meta"]["instruction"] = text
+    new["habitat_meta"]["instruction_source"] = source
+    return new
+
+
+def finalize_pairs(records, rows_by_id):
+    """Pairs whose two records both passed labelling, as matched template/Cosmos lists.
+
+    The two lists hold the same ids in the same order and differ only in the instruction,
+    which is what makes template-vs-Cosmos a controlled comparison.
+    """
+    template, cosmos = [], []
+    groups = _by_pair(records, lambda r: r["habitat_meta"]["pair_id"])
+    for pid, recs in groups.items():
+        assert len(recs) == 2, f"pair {pid} has {len(recs)} records"
+        rows = [rows_by_id.get(r["id"]) for r in recs]
+        if not all(row and row.get("passed") for row in rows):
+            continue
+        for rec, row in zip(recs, rows):
+            side = rec["habitat_meta"]["side"]
+            template.append(with_instruction(rec, TEMPLATE_INSTRUCTIONS[side], "template"))
+            cosmos.append(with_instruction(rec, row["instruction"], "cosmos"))
+    return template, cosmos, {"pairs_in": len(groups), "pairs_kept": len(template) // 2}
