@@ -356,3 +356,10 @@ def finalize_pairs(records, rows_by_id):
             template.append(with_instruction(rec, TEMPLATE_INSTRUCTIONS[side], "template"))
             cosmos.append(with_instruction(rec, row["instruction"], "cosmos"))
     return template, cosmos, {"pairs_in": len(groups), "pairs_kept": len(template) // 2}
+
+
+def assert_scene_disjoint(train, eval_):
+    """Fatal if any scene appears in both splits (round 4's split guarantees it; re-checked)."""
+    shared = ({r["habitat_meta"]["scene_id"] for r in train}
+              & {r["habitat_meta"]["scene_id"] for r in eval_})
+    assert not shared, f"{len(shared)} scenes in both splits, e.g. {sorted(shared)[:3]}"

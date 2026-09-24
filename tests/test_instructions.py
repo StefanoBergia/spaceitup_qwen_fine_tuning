@@ -160,3 +160,16 @@ def test_with_instruction_does_not_mutate(two_sided_sample):
     before = json.dumps(left)
     with_instruction(left, "Keep right of the plant.", "cosmos")
     assert json.dumps(left) == before
+
+
+import pytest
+
+from rover_vlm.instructions import assert_scene_disjoint
+
+
+def test_assert_scene_disjoint(two_sided_sample):
+    left, right = build_pair(two_sided_sample)
+    assert_scene_disjoint([left], [])
+    with pytest.raises(AssertionError):
+        assert_scene_disjoint([left], [right])
+
