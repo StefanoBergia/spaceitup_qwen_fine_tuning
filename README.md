@@ -1363,8 +1363,9 @@ nothing, follow the instruction when told something. Spec:
    `handwritten_pairs.json`, `general_meta.json` (25,985 train + 2,866 eval records to label)
 2. Label (GPU, unattended, ~4–6 h): `sbatch slurm/label_instructions.sbatch` — Cosmos server and
    client in one job; 200-record gate (accept ≥ 0.9, no drawing references), full run, one retry
-   of rejected rows → `outputs/instr_labels_v2/{gate,eval,train}_i2.jsonl`
-3. Assemble: `uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i2.jsonl outputs/instr_labels_v2/eval_i2.jsonl`
+   of rejected rows (prompt i3: a grey alternative is drawn only when a real opposite-side
+   route exists; finalize-general refuses > 1% unlabelled records unless `--allow-missing`) → `outputs/instr_labels_v2/{gate,eval,train}_i3.jsonl`
+3. Assemble: `uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl`
    → `train_general.json` (~49.8k), `eval_plain.json`, `eval_instructed.json`, `eval_pairs.json`,
    `probe_handwritten.json` (from `configs/instructions_handwritten_v2.json`)
 4. Train (~7–10 h, 1 epoch, resumable):

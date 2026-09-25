@@ -301,7 +301,7 @@ table.wrap-cells td{{white-space:normal;vertical-align:top}}
   </ul></div>
   <pre>uv run scripts/prepare_habitat_instr.py general
 sbatch slurm/label_instructions.sbatch
-uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i2.jsonl outputs/instr_labels_v2/eval_i2.jsonl
+uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl
 sbatch --time=14:00:00 slurm/train_habitat.sbatch data/prepared_habitat_instr_v2/train_general.json outputs/runs_instr_v2/general --epochs 1 --save-steps 500 --resume
 sbatch slurm/eval_instruction_v2.sbatch
 uv run scripts/visualize_instruction_general.py</pre>

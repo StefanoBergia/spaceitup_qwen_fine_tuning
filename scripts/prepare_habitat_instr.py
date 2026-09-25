@@ -20,7 +20,7 @@ docs/superpowers/specs/2026-09-25-instruction-general-model-design.md):
     uv run scripts/prepare_habitat_instr.py general            # plain copies + what to label
     sbatch slurm/label_instructions.sbatch                      # Cosmos, unattended
     uv run scripts/prepare_habitat_instr.py finalize-general \
-        --instructions outputs/instr_labels_v2/train_i2.jsonl outputs/instr_labels_v2/eval_i2.jsonl
+        --instructions outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl
 
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
@@ -187,6 +187,15 @@ def _label_rows(paths):
 def stage_finalize_general(args):
     rows = _label_rows(args.instructions)
     meta = {"instructions": [str(p) for p in args.instructions]}
+    # an unlabelled record is not a rejection: a label job that timed out part-way would
+    # otherwise yield a silently shrunken training set (v2 review I3)
+    for name in SPLITS:
+        labels = json.loads((args.out_dir / f"labelset_{name}.json").read_text())
+        missing = sum(r["id"] not in rows for r in labels)
+        print(f"{name}: {missing} of {len(labels)} records have no label row")
+        if missing > 0.01 * len(labels) and not args.allow_missing:
+            raise SystemExit(f"{name}: {missing} records unlabelled (> 1%) — finish the label job "
+                             "(re-submit slurm/label_instructions.sbatch) or pass --allow-missing")
     d = args.out_dir
     for name in SPLITS:
         plain = json.loads((d / f"plain_{name}.json").read_text())
@@ -234,6 +243,8 @@ def main() -> None:
     e = sub.add_parser("finalize-general", help="v2: assemble train/eval files after labelling")
     e.add_argument("--out-dir", type=Path, default=V2_OUT)
     e.add_argument("--instructions", type=Path, nargs="+", required=True, help="label JSONL files")
+    e.add_argument("--allow-missing", action="store_true",
+                   help="assemble even if more than 1%% of records have no label row")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
      "finalize-general": stage_finalize_general}[args.stage](args)

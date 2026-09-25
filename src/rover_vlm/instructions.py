@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from .habitat_choice import _draw_badge, _font, _point_at_fraction
-from .eval import frechet_distance
+from .eval import bend_side, frechet_distance
 from .habitat_data import build_record, format_answer_goal, instruction_endpoints_prompt
 from .overlay import draw_polyline
 from .traces import SCENE_INTRO, SCRATCH_NOTE, answer_payload, parse_trace
@@ -148,7 +148,12 @@ def build_pair(sample_dir, *, texts=None, meta_extra=None, reasons=None):
 # answer" strategy as the reasoning traces -- and verification becomes a text check
 # (instruction_rejects with side=...): correct side word present, opposite absent, something
 # named, no drawing references. One Cosmos call per record instead of two.
-INSTRUCTION_PROMPT_VERSION = "i2"
+# i3 (2026-09-25, v2 review): for the ~23k single-route records the grey "alternative" was
+# usually a same-side variant or the `direct` line, yet i2 told Cosmos it goes to the other
+# side. i3 draws a grey route only when a real opposite-side candidate exists and otherwise
+# shows the target alone, with the grey sentence dropped from the prompt. Pair frames get
+# exactly the i2 text.
+INSTRUCTION_PROMPT_VERSION = "i3"
 RENDER_PX = 768
 # Magenta is rare indoors, so the drawn route is never mistaken for an object; grey keeps
 # the alternative visible without competing. The check image draws both routes alike.
@@ -221,14 +226,23 @@ def _answer_block(shape):
     )
 
 
-def generation_prompt(side):
-    """Ask Cosmos for an instruction taking the magenta route, which goes to `side`."""
+def generation_prompt(side, has_alt=True):
+    """Ask Cosmos for an instruction taking the magenta route, which goes to `side`.
+
+    has_alt=False (no opposite-side candidate drawn): the grey-route sentence is left out,
+    so the prompt never describes a route that is not on the image.
+    """
     other = "right" if side == "left" else "left"
+    if has_alt:
+        scene = f"""Two possible routes to the same goal are drawn on the image. The rover should take the
+bold magenta route, which goes to the rover's {side} (the {side} side of the image) around
+whatever lies between the two routes; the thin grey route goes to the {other} instead."""
+    else:
+        scene = f"""One route to the goal is drawn on the image in bold magenta. The rover should take it; it
+goes to the rover's {side} (the {side} side of the image) around whatever is in the way."""
     return f"""{SCENE_INTRO}
 
-Two possible routes to the same goal are drawn on the image. The rover should take the
-bold magenta route, which goes to the rover's {side} (the {side} side of the image) around
-whatever lies between the two routes; the thin grey route goes to the {other} instead.
+{scene}
 
 Write the instruction a person standing behind the rover would say, so that a driver who
 sees only the camera image, with nothing drawn on it, would take the {side} route.
@@ -460,14 +474,17 @@ def route_side(meta):
 
 
 def other_side_candidate(meta, side):
-    """Best candidate on the opposite side (feasible first), else any other; None if none."""
+    """Best candidate on the opposite side (feasible first), or None.
+
+    Only a genuinely opposite-side route may be drawn as Cosmos's grey alternative: same-side
+    variants and the `direct` line would contradict the prompt's "goes to the other side"
+    (v2 review I1 — they were ~86% of single-route alternatives).
+    """
     cands, label = meta.get("candidates", []), meta.get("label")
     other = "right" if side == "left" else "left"
     opposite = [i for i, c in enumerate(cands) if i != label and c.get("label") == other]
     opposite.sort(key=lambda i: not cands[i].get("feasible"))
-    rest = [i for i in range(len(cands)) if i != label and i not in opposite]
-    ranked = opposite + rest
-    return ranked[0] if ranked else None
+    return opposite[0] if opposite else None
 
 
 def _candidate_path(sample_dir, index):
@@ -532,7 +549,9 @@ def build_wrong_side(source_rec, *, meta_extra=None):
     other = "right" if side == "left" else "left"
     rec = build_record(sample_dir, framing="endpoints", instruction=TEMPLATE_INSTRUCTIONS[other],
                        meta_extra=meta_extra)
-    if rec is None:
+    # the probe reads which way the prediction bends, so its ground truth must itself bend
+    # clearly to the feasible side (v2 review I2: 89 of the first 300 ran "straight")
+    if rec is None or bend_side(_answer_path(rec)) != side:
         return None
     rec = _labelled(rec, other, "wrong_side", None, sample_dir.name, suffix="W")
     rec["habitat_meta"]["feasible_side"] = side
@@ -552,6 +571,8 @@ def finalize_general(plain_recs, label_recs, rows_by_id):
     Cosmos instruction in their prompt (with_instruction).
     """
     passed = {i for i, r in rows_by_id.items() if r.get("passed")}
+    missing = sum(r["id"] not in rows_by_id for r in label_recs)
+    rejected = sum(r["id"] in rows_by_id and r["id"] not in passed for r in label_recs)
     groups = _by_pair([r for r in label_recs if r["habitat_meta"].get("pair_id")],
                       lambda r: r["habitat_meta"]["pair_id"])
     bad_pairs = {pid for pid, rs in groups.items() if len(rs) != 2 or not all(r["id"] in passed for r in rs)}
@@ -567,6 +588,6 @@ def finalize_general(plain_recs, label_recs, rows_by_id):
         "instructed": kind("instructed"),
         "pairs": [r for r in kept if r["habitat_meta"].get("pair_id")],
         "wrong_side": kind("wrong_side"),
-        "stats": {"labelled": len(label_recs), "kept": len(kept),
+        "stats": {"labelled": len(label_recs), "missing": missing, "rejected": rejected, "kept": len(kept),
                   "pairs_kept": len(groups) - len(bad_pairs), "pairs_dropped": len(bad_pairs)},
     }

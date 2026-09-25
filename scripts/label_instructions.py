@@ -27,10 +27,10 @@ for the template instruction — so that call was dropped. See INSTRUCTION_PROMP
 
     # v2 (every round-4 frame; overlays rendered in memory, sent inline)
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v2/labelset_eval.json \
-        --out outputs/instr_labels_v2/eval_i2.jsonl --concurrency 8 --resume
+        --out outputs/instr_labels_v2/eval_i3.jsonl --concurrency 8 --resume
     # ... then one more attempt for the rejected rows (seed + 1)
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v2/labelset_eval.json \
-        --out outputs/instr_labels_v2/eval_i2.jsonl --concurrency 8 --resume --retry-rejected
+        --out outputs/instr_labels_v2/eval_i3.jsonl --concurrency 8 --resume --retry-rejected
     # record-level gate for single-route rows (no pairs in the split)
     ... --gate --min-accept 0.9 --min-pair-survival 0
 
@@ -131,7 +131,7 @@ def main() -> None:
             t0 = time.time()
             try:
                 raw_gen, fin_gen = chat_with_image(client, model, image,
-                                                   generation_prompt(hm["side"]),
+                                                   generation_prompt(hm["side"], has_alt=bool(hm.get("alt_path"))),
                                                    max_tokens=args.max_tokens, seed=seed)
             except Exception as e:  # noqa: BLE001 — one bad sample must not kill the run
                 return {**row, "error": f"{type(e).__name__}: {e}"}

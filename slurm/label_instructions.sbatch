@@ -15,7 +15,7 @@
 #
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-general --instructions \
-#         outputs/instr_labels_v2/train_i2.jsonl outputs/instr_labels_v2/eval_i2.jsonl
+#         outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl
 #SBATCH --job-name=cosmos3-label-instr
 #SBATCH --partition=A100
 #SBATCH --gres=gpu:3g.40gb:1
@@ -51,7 +51,7 @@ recs = [r for r in json.load(open(sys.argv[1]))
 json.dump(recs[: int(sys.argv[3])], open(sys.argv[2], "w"))
 PY
     # set -e: a failed gate (exit 2) ends the job here; the EXIT trap stops the server
-    "$UV" run scripts/label_instructions.py --split "$OUT/gate_split.json" --out "$OUT/gate_i2.jsonl" \
+    "$UV" run scripts/label_instructions.py --split "$OUT/gate_split.json" --out "$OUT/gate_i3.jsonl" \
         --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume \
         --gate --min-accept "$GATE_MIN_ACCEPT" --min-pair-survival 0
     echo "gate PASSED"
@@ -59,11 +59,11 @@ fi
 
 for s in eval train; do
     echo; echo "=============== labelling $s ==============="
-    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i2.jsonl" \
+    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i3.jsonl" \
         --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume
     echo; echo "=============== retry rejected: $s ==============="
-    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i2.jsonl" \
+    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i3.jsonl" \
         --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume --retry-rejected
 done
 echo; echo "=============== done ==============="
-wc -l "$OUT"/*_i2.jsonl
+wc -l "$OUT"/*_i3.jsonl

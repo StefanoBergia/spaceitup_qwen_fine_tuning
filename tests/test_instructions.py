@@ -403,3 +403,34 @@ def test_cells_table(tmp_path):
                                                 "win_vs_to_goal": 0.7, "instruction": {"pair_success": 0.8, "follow_rate": 0.9}}))
     (row,) = _load_general_report().cells_table(tmp_path)
     assert (row["tag"], row["set"], row["pair_success"]) == ("general", "eval_pairs", 0.8)
+
+
+def test_single_route_alt_only_from_opposite_side(tmp_path):
+    # review I1: the only other candidates are same-side / direct -> no grey route at all
+    d = write_sample(tmp_path / "s_c040", left_uv=[(256, 512), (140, 400), (256, 300)],
+                     right_uv=[(256, 512), (170, 420), (256, 300)], labels=("left", "left"), accepted=(0,),
+                     extra=[([(256, 512), (256, 300)], "direct", False)])
+    (rec,) = build_frame(_src(d))["labelset"]
+    assert rec["habitat_meta"]["alt_path"] is None
+    assert other_side_candidate({"label": 0, "candidates": [{"label": "left"}, {"label": "left"},
+                                                            {"label": "direct"}]}, "left") is None
+
+
+def test_generation_prompt_without_alternative():
+    p = generation_prompt("left", has_alt=False)
+    assert "grey route" not in p and "rover's left" in p and "never the word 'right'" in p
+    assert "grey route" in generation_prompt("left")
+
+
+def test_wrong_side_probe_requires_gt_to_bend_feasible(tmp_path):
+    # review I2: a ground truth that runs straight cannot calibrate "kept feasible"
+    d = write_sample(tmp_path / "s_c041", left_uv=[(256, 512), (253, 400), (256, 300)],
+                     right_uv=[(256, 512), (370, 400), (256, 300)], accepted=(0,))
+    assert build_wrong_side(_src(d)) is None
+
+
+def test_finalize_general_reports_missing_labels(two_sided_sample):
+    # review I3: an unlabelled record is not a rejection
+    f = build_frame(_src(two_sided_sample))
+    out = finalize_general([f["plain"]], f["labelset"], {})
+    assert out["stats"]["missing"] == 2 and out["stats"]["rejected"] == 0
