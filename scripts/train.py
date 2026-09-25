@@ -11,6 +11,9 @@ self-describing.
 CPU smoke test (login node, validates the whole pipeline in ~minutes):
     uv run scripts/train.py --smoke
 
+Long single-epoch runs: add --save-steps 500 --resume and re-submit the same command after a
+timeout; it continues from the latest checkpoint in --output-dir.
+
 --smoke trains 4 samples for 3 steps with a tiny LoRA on CPU and verifies that
 the loss is finite and the adapter saves/reloads. Use it after any change to the
 data pipeline or model setup, before submitting a GPU job.
@@ -43,6 +46,24 @@ IMAGE_ROOT = REPO_ROOT / "data" / "sharerobot" / "trajectory"
 DEFAULT_MODEL_ID = "Qwen/Qwen3.5-2B"
 
 
+def save_kwargs(args):
+    """TrainingArguments save settings. --save-steps N keeps the last 2 step checkpoints, so a
+    long single-epoch run killed near the end resumes instead of starting over."""
+    if args.smoke:
+        return {"save_strategy": "no"}
+    if args.save_steps:
+        return {"save_strategy": "steps", "save_steps": args.save_steps, "save_total_limit": 2}
+    return {"save_strategy": "epoch"}
+
+
+def resume_checkpoint(output_dir, resume):
+    """Latest checkpoint-N under output_dir when --resume is set, else None (fresh start)."""
+    if not resume:
+        return None
+    ckpts = sorted(Path(output_dir).glob("checkpoint-*"), key=lambda p: int(p.name.split("-")[1]))
+    return str(ckpts[-1]) if ckpts else None
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="HF base model repo id")
@@ -60,6 +81,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gradient-checkpointing", action="store_true")
     p.add_argument("--max-samples", type=int, default=None, help="truncate training set (debugging)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--save-steps", type=int, default=0,
+                   help="checkpoint every N steps (keeps 2); 0 = once per epoch as before")
+    p.add_argument("--resume", action="store_true",
+                   help="continue from the latest checkpoint in --output-dir, if any")
     p.add_argument("--smoke", action="store_true", help="tiny CPU run to validate the pipeline")
     return p.parse_args()
 
@@ -115,7 +140,7 @@ def main() -> None:
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         logging_steps=1 if args.smoke else 10,
-        save_strategy="no" if args.smoke else "epoch",
+        **save_kwargs(args),
         bf16=use_cuda,
         gradient_checkpointing=args.gradient_checkpointing,
         remove_unused_columns=False,  # collator needs the raw sample dicts
@@ -139,7 +164,10 @@ def main() -> None:
     )
 
     t0 = time.time()
-    result = trainer.train()
+    ckpt = resume_checkpoint(args.output_dir, args.resume)
+    if ckpt:
+        print(f"resuming from {ckpt}")
+    result = trainer.train(resume_from_checkpoint=ckpt)
     elapsed = time.time() - t0
     print(f"train done in {elapsed:.1f}s | final loss: {result.training_loss:.4f}")
 
