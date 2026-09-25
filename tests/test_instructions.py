@@ -386,3 +386,20 @@ def test_finalize_general(two_sided_sample, tmp_path):
     assert out["pairs"] == [] and len(out["train_or_all"]) == 2 + 1
     assert [r["id"] for r in out["instructed"]] == ["s_c030_L"]
     assert out["stats"]["pairs_dropped"] == 1
+
+
+def _load_general_report():
+    path = _P(__file__).resolve().parent.parent / "scripts" / "visualize_instruction_general.py"
+    spec = importlib.util.spec_from_file_location("vig", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_cells_table(tmp_path):
+    d = tmp_path / "eval_pairs" / "general"
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text(json.dumps({"parse_rate": 1.0, "mean_point_error_median": 0.02,
+                                                "win_vs_to_goal": 0.7, "instruction": {"pair_success": 0.8, "follow_rate": 0.9}}))
+    (row,) = _load_general_report().cells_table(tmp_path)
+    assert (row["tag"], row["set"], row["pair_success"]) == ("general", "eval_pairs", 0.8)

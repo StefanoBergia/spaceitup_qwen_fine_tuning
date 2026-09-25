@@ -1350,6 +1350,34 @@ frame followed; an instruction-blind model scores 0 by construction.
    (`instruction.pair_success`, `follow_rate`, `follow_rate_by_side`, `identical_output_rate`)
 8. Report: `uv run scripts/visualize_instruction_results.py` → `outputs/instruction_results.html`
 
+## General instruction model (v2, 2026-09-25)
+
+One adapter trained on **every** round-4 frame (original and yaw-augmented) twice: once with
+round 4's plain prompt, once with a Cosmos instruction for its correct route, plus the opposite
+instruction on frames with a feasible route on each side. Goal: plan like round 4 when told
+nothing, follow the instruction when told something. Spec:
+`docs/superpowers/specs/2026-09-25-instruction-general-model-design.md`.
+
+1. Build (CPU, ~15 min): `uv run scripts/prepare_habitat_instr.py general` →
+   `data/prepared_habitat_instr_v2/{plain,labelset}_{train,eval}.json`, `probe_wrong_side.json`,
+   `handwritten_pairs.json`, `general_meta.json` (25,985 train + 2,866 eval records to label)
+2. Label (GPU, unattended, ~4–6 h): `sbatch slurm/label_instructions.sbatch` — Cosmos server and
+   client in one job; 200-record gate (accept ≥ 0.9, no drawing references), full run, one retry
+   of rejected rows → `outputs/instr_labels_v2/{gate,eval,train}_i2.jsonl`
+3. Assemble: `uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i2.jsonl outputs/instr_labels_v2/eval_i2.jsonl`
+   → `train_general.json` (~49.8k), `eval_plain.json`, `eval_instructed.json`, `eval_pairs.json`,
+   `probe_handwritten.json` (from `configs/instructions_handwritten_v2.json`)
+4. Train (~7–10 h, 1 epoch, resumable):
+   `sbatch --time=14:00:00 slurm/train_habitat.sbatch data/prepared_habitat_instr_v2/train_general.json outputs/runs_instr_v2/general --epochs 1 --save-steps 500 --resume`
+   (after a timeout, re-submit the same command)
+5. Eval: `sbatch slurm/eval_instruction_v2.sbatch` → `outputs/eval_instr_v2/<set>/<tag>/metrics.json`
+6. Report: `uv run scripts/visualize_instruction_general.py` → `outputs/instruction_general.html`
+
+Pass criteria: plain prompt median error ≤ 0.013 and beats to_goal ≥ 69% (round 4: 0.011 / 71.6%);
+instructed prompt not worse; pair success ≥ 75% and not significantly below the v1 Cosmos model.
+The blocked-side probe (`probe_wrong_side`) tells single-route frames to take the side where
+Habitat has no route and reports which way the prediction bends (`metrics.json` → `wrong_side`).
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
@@ -1367,6 +1395,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Traced fine-tune: 2B vs 0.8B + reasoning | `uv run scripts/visualize_traced_comparison.py` | `outputs/eval_habitat_v2_traced/traced_comparison.html` |
 | Real-image eval: Habitat vs real per model | `uv run scripts/visualize_real_eval.py` | `outputs/eval_real/real_eval.html` |
 | Instruction-conditioned paths | `uv run scripts/visualize_instruction_results.py` | `outputs/instruction_results.html` |
+| General instruction model (v2) | `uv run scripts/visualize_instruction_general.py` | `outputs/instruction_general.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):
