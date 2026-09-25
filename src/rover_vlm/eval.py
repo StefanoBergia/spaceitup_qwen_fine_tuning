@@ -586,3 +586,52 @@ def clustered_bootstrap_ci(values, groups, n=4000, seed=0):
         idx = rng.integers(0, len(keys), len(keys))
         means.append(sums[idx].sum() / counts[idx].sum())
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def bend_side(path, tol=0.01, n=10):
+    """Which way a path bows from the straight line entry -> goal: "left", "right", "straight".
+
+    Measured as the mean perpendicular offset of the resampled path from that line, in the
+    direction of travel (image y points down, so "left" of travel is the -90° normal). On
+    round-4 labels this agrees with the candidate's side label 93% of the time; the offset
+    from the first waypoint alone (_signed_lateral) does not, because the goal's own x
+    offset dominates it.
+    """
+    xy, _ = _resample_flags(path, n)
+    a, b = xy[0], xy[-1]
+    d = b - a
+    length = float(np.linalg.norm(d))
+    if length < 1e-9:
+        return "straight"
+    normal = np.array([-d[1], d[0]]) / length          # points to the left of travel
+    offset = float(((xy - a) @ normal).mean())
+    if abs(offset) < tol:
+        return "straight"
+    return "left" if offset < 0 else "right"
+
+
+def wrong_side_metrics(records):
+    """Probe summary for records with habitat_meta.kind == "wrong_side", else None.
+
+    Each record is a single-route frame told to go to the side where no route exists; its
+    ground truth is the feasible route. obeyed = the prediction bends to the instructed
+    side, kept_feasible = it bends to the feasible side. Unparseable predictions stay in the
+    denominator.
+    """
+    rows = [r for r in records if (r.get("habitat_meta") or {}).get("kind") == "wrong_side"]
+    if not rows:
+        return None
+    counts = {"obeyed": 0, "kept_feasible": 0, "straight": 0, "unparsed": 0}
+    for r in rows:
+        hm = r["habitat_meta"]
+        if not (r.get("parsed") and r["parsed"].get("path")):
+            counts["unparsed"] += 1
+            continue
+        side = bend_side(r["parsed"]["path"])
+        if side == hm["side"]:
+            counts["obeyed"] += 1
+        elif side == hm["feasible_side"]:
+            counts["kept_feasible"] += 1
+        else:
+            counts["straight"] += 1
+    return {"n": len(rows), **{k: v / len(rows) for k, v in counts.items()}}

@@ -515,26 +515,28 @@ def build_frame(source_rec, *, meta_extra=None, reasons=None):
 
 
 def build_wrong_side(source_rec, *, meta_extra=None):
-    """Probe record: a single-route frame instructed to take its blocked other side.
+    """Probe record: a single-route frame told to go to the side where no route exists.
 
-    Built from the blocked candidate, so the eval's `follows` reads as "obeyed"; alt_path is
-    the feasible route. None unless the opposite-side candidate exists and is infeasible.
+    The candidate generator almost never draws a route on the blocked side (the other
+    candidates of a single-route frame are same-side variants or `direct`; an infeasible
+    opposite-side route exists in ~1 of 200 frames), so the probe keeps the feasible route
+    as ground truth and the eval reads which way the prediction bends
+    (eval.wrong_side_metrics). Template wording: Cosmos cannot describe an undrawn route.
+    None for pair frames, `direct` frames and frames whose record fails to build.
     """
     sample_dir = Path(source_rec["image"][0]).parent
     meta = json.loads((sample_dir / "meta.json").read_text())
     side = route_side(meta)
     if side not in SIDES or side_candidates(meta) is not None:
         return None
-    idx = other_side_candidate(meta, side)
     other = "right" if side == "left" else "left"
-    if idx is None or meta["candidates"][idx].get("label") != other or meta["candidates"][idx].get("feasible"):
+    rec = build_record(sample_dir, framing="endpoints", instruction=TEMPLATE_INSTRUCTIONS[other],
+                       meta_extra=meta_extra)
+    if rec is None:
         return None
-    rec = build_record(sample_dir, framing="endpoints", candidate=idx,
-                       instruction=TEMPLATE_INSTRUCTIONS[other], meta_extra=meta_extra)
-    feasible = _candidate_path(sample_dir, meta["label"])
-    if rec is None or feasible is None:
-        return None
-    return _labelled(rec, other, "wrong_side", feasible, sample_dir.name, suffix="W")
+    rec = _labelled(rec, other, "wrong_side", None, sample_dir.name, suffix="W")
+    rec["habitat_meta"]["feasible_side"] = side
+    return rec
 
 
 def retry_ids(rows):

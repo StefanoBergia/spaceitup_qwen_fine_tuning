@@ -38,6 +38,7 @@ from rover_vlm.eval import (
     aggregate_metrics,
     aggregate_habitat_metrics,
     aggregate_instruction_metrics,
+    wrong_side_metrics,
     choice_metrics,
     habitat_metrics,
     normalize_prediction,
@@ -215,6 +216,9 @@ def main() -> None:
         instr = aggregate_instruction_metrics(results)
         if instr is not None:
             summary["instruction"] = instr
+        probe = wrong_side_metrics(results)
+        if probe is not None:
+            summary["wrong_side"] = probe
     summary["tag"] = args.tag
     summary["model_id"] = args.model_id
     summary["adapter"] = str(args.adapter) if args.adapter else None

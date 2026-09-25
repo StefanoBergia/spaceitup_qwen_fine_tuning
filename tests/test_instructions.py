@@ -342,13 +342,15 @@ def test_single_route_without_alternative_builds_with_none(tmp_path):
 
 
 def test_build_wrong_side(tmp_path):
+    # single-route frame (right blocked): instructed to go right, where no route exists;
+    # the answer stays the feasible left route, and nothing needs Cosmos
     d = write_sample(tmp_path / "s_c023", left_uv=[(256, 512), (140, 400), (256, 300)],
                      right_uv=[(256, 512), (370, 400), (256, 300)], accepted=(0,))
     w = build_wrong_side(_src(d))
     hm = w["habitat_meta"]
-    assert (w["id"], hm["kind"], hm["side"]) == ("s_c023_W", "wrong_side", "right")
-    assert max(x for x, _, _ in json.loads(w["conversations"][1]["value"])["path"]) > 0.6
-    assert min(x for x, _, _ in hm["alt_path"]) < 0.4
+    assert (w["id"], hm["kind"], hm["side"], hm["feasible_side"]) == ("s_c023_W", "wrong_side", "right", "left")
+    assert hm["alt_path"] is None and '"Go around to the right."' in w["conversations"][0]["value"]
+    assert min(x for x, _, _ in json.loads(w["conversations"][1]["value"])["path"]) < 0.4
     assert build_wrong_side(_src(write_sample(tmp_path / "s_c024",
         left_uv=[(256, 512), (140, 400), (256, 300)], right_uv=[(256, 512), (370, 400), (256, 300)]))) is None
 

@@ -325,3 +325,23 @@ def test_clustered_bootstrap_resamples_groups():
     assert lo == 0.0 and hi == 1.0            # only two clusters: whole-cluster draws
     lo, hi = clustered_bootstrap_ci([1] * 6, list("abcdef"), n=200)
     assert lo == hi == 1.0
+
+
+from rover_vlm.eval import bend_side, wrong_side_metrics
+
+
+def test_bend_side_relative_to_entry_goal_line():
+    assert bend_side(_L) == "left" and bend_side(_R) == "right"
+    assert bend_side([[0.5, 1.0, 1], [0.501, 0.8, 1], [0.5, 0.6, 1]]) == "straight"
+    # side entry: start on the left edge, goal centre; a path bowing up is to the route's left
+    assert bend_side([[0.0, 0.8, 1], [0.3, 0.55, 1], [0.5, 0.6, 1]]) == "left"
+
+
+def test_wrong_side_metrics():
+    def rec(pred):
+        return {"id": "w", "parsed": None if pred is None else {"path": pred, "goal": pred[-1]},
+                "gt": {"path": _L, "goal": _L[-1]}, "metrics": None,
+                "habitat_meta": {"kind": "wrong_side", "side": "right", "feasible_side": "left"}}
+    m = wrong_side_metrics([rec(_R), rec(_L), rec(_L), rec(None), {"id": "x", "habitat_meta": {}}])
+    assert m == {"n": 4, "obeyed": 0.25, "kept_feasible": 0.5, "straight": 0.0, "unparsed": 0.25}
+    assert wrong_side_metrics([{"id": "x", "habitat_meta": {}}]) is None
