@@ -23,6 +23,10 @@
 #SBATCH --mem=128G
 #SBATCH --time=14:00:00
 #SBATCH --output=outputs/slurm/%x-%j.out
+# Telegram notification through the cluster's SLURM mail plugin (start, end, failure — a
+# failed gate exits non-zero, so it arrives as a failure)
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=telegram:422627024
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 mkdir -p outputs/slurm outputs/instr_labels_v2
