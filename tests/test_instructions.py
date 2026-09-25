@@ -223,3 +223,25 @@ def test_build_pair_given_texts_with_quotes(two_sided_sample):
     left, right = build_pair(two_sided_sample,
                              texts={"left": 'Pass the "big" lamp on its left side.', "right": "Keep right of the lamp stand."})
     assert "'big'" in left["conversations"][0]["value"]
+
+
+from rover_vlm.instructions import rescore_row
+
+
+def test_parse_choice_accepts_string_numbers():
+    # observed on the first gate run: Cosmos quotes the number
+    assert parse_choice('<think>x</think>\n<answer>\n{"choice": "1"}\n</answer>') == 1
+    assert parse_choice('<answer>{"choice": " 2 "}</answer>') == 2
+    assert parse_choice('<answer>{"choice": "one"}</answer>') is None
+
+
+def test_rescore_row_reparses_saved_replies():
+    row = {"id": "a_L", "instruction": "Pass left of the grey sofa near the window.", "rejects": [],
+           "check_choice": None, "check_expected": 1, "check_correct": None, "passed": False,
+           "raw_check": '<answer>{"choice": "1"}</answer>'}
+    new = rescore_row(row)
+    assert (new["check_choice"], new["check_correct"], new["passed"]) == (1, True, True)
+    assert row["passed"] is False                        # input untouched
+    kept = {"id": "b_L", "passed": True, "check_choice": 2}   # passed rows keep no raw reply
+    assert rescore_row(kept) == kept
+    assert rescore_row({"id": "c", "error": "Timeout"}) == {"id": "c", "error": "Timeout"}

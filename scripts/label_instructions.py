@@ -18,6 +18,10 @@ Per record, two independent calls:
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_train.json \
         --out outputs/instr_labels/train_i1.jsonl --concurrency 8 --resume
 
+    # re-judge a finished file with the current parser (no endpoint, no GPU)
+    uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json \
+        --limit-pairs 100 --out outputs/instr_labels/gate_i1.jsonl --rescore --gate
+
 Writes one JSON line per record, flushed as it goes, so a killed run keeps what it had.
 """
 
@@ -30,7 +34,7 @@ from pathlib import Path
 
 from rover_vlm.instructions import (
     INSTRUCTION_PROMPT_VERSION, check_prompt, gate_failures, generation_prompt,
-    instruction_rejects, is_side_only, parse_choice, parse_instruction, summarize_labels,
+    instruction_rejects, is_side_only, parse_choice, parse_instruction, rescore_row, summarize_labels,
 )
 from rover_vlm.labelling_io import chat_with_image, connect, prepare_output, resolve_endpoint
 
@@ -51,6 +55,8 @@ def main() -> None:
     p.add_argument("--resume", action="store_true", help="continue a run; retries error rows")
     p.add_argument("--overwrite", action="store_true", help="allow replacing a non-empty output")
     p.add_argument("--show", action="store_true", help="print both raw replies per record")
+    p.add_argument("--rescore", action="store_true",
+                   help="re-parse the saved raw replies in --out with the current parser; no requests")
     p.add_argument("--gate", action="store_true", help="exit 2 unless the thresholds below hold")
     p.add_argument("--min-pair-survival", type=float, default=0.8)
     p.add_argument("--max-drawing-refs", type=int, default=0)
@@ -61,7 +67,19 @@ def main() -> None:
         keep = set(list(dict.fromkeys(r["habitat_meta"]["pair_id"] for r in records))[: args.limit_pairs])
         records = [r for r in records if r["habitat_meta"]["pair_id"] in keep]
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
+    if args.rescore:
+        if not args.out.exists():
+            raise SystemExit(f"--rescore needs an existing {args.out}")
+        old = [json.loads(line) for line in args.out.read_text().splitlines() if line.strip()]
+        new = [rescore_row(r) for r in old]
+        tmp = args.out.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in new))
+        tmp.replace(args.out)
+        changed = sum(a != b for a, b in zip(old, new))
+        print(f"rescored {len(new)} rows in {args.out} ({changed} changed)")
+        done, mode = {r["id"] for r in new}, "a"
+    else:
+        done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
     todo = [r for r in records if r["id"] not in done]
     print(f"split: {args.split}  records {len(records)}  to label {len(todo)}  "
           f"prompt {INSTRUCTION_PROMPT_VERSION}  concurrency {args.concurrency}")

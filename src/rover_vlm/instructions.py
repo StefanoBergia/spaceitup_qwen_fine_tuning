@@ -257,7 +257,10 @@ def parse_choice(raw):
     payload = answer_payload(answer)
     if payload is not None:
         c = payload.get("choice")
-        return c if c in (1, 2) else None
+        # Cosmos often quotes the number ({"choice": "1"}) -- seen on every row of the first gate
+        if isinstance(c, str) and c.strip() in ("1", "2"):
+            c = int(c.strip())
+        return c if c in (1, 2) and not isinstance(c, bool) else None
     found = set(re.findall(r"\b([12])\b", answer or ""))
     return int(found.pop()) if len(found) == 1 else None
 
@@ -380,3 +383,18 @@ def assert_scene_disjoint(train, eval_):
     shared = ({r["habitat_meta"]["scene_id"] for r in train}
               & {r["habitat_meta"]["scene_id"] for r in eval_})
     assert not shared, f"{len(shared)} scenes in both splits, e.g. {sorted(shared)[:3]}"
+
+
+def rescore_row(row):
+    """A label row re-judged from its saved raw verify reply, with the current parser.
+
+    Lets a parser fix be applied to a finished run without paying for the Cosmos calls
+    again. Rows without a saved reply (passed rows, errors) are returned unchanged.
+    """
+    if row.get("error") or row.get("raw_check") is None:
+        return row
+    new = dict(row)
+    new["check_choice"] = parse_choice(row["raw_check"])
+    new["check_correct"] = None if new["check_choice"] is None else new["check_choice"] == row["check_expected"]
+    new["passed"] = bool(row.get("instruction") and not row.get("rejects") and new["check_correct"])
+    return new
