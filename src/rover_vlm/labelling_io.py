@@ -9,6 +9,7 @@ killed and resumed. The rules for that file live here once:
   rather than shadowed — a row that ran and merely failed a check is a result, not an error.
 """
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -66,12 +67,21 @@ def connect(base_url, model=None):
         )
 
 
-def chat_with_image(client, model, image_path, prompt, *, max_tokens, seed):
-    """One image+text request -> (raw reply, finish_reason). Raises on transport errors."""
+def image_url(image):
+    """A path becomes a file:// URI (the server reads NFS directly); bytes become a data URL."""
+    if isinstance(image, (bytes, bytearray)):
+        return "data:image/jpeg;base64," + base64.b64encode(bytes(image)).decode()
+    return Path(image).resolve().as_uri()
+
+
+def chat_with_image(client, model, image, prompt, *, max_tokens, seed):
+    """One image+text request -> (raw reply, finish_reason). Raises on transport errors.
+
+    `image` is a file path or JPEG bytes."""
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": Path(image_path).resolve().as_uri()}},
+            {"type": "image_url", "image_url": {"url": image_url(image)}},
             {"type": "text", "text": prompt},
         ]}],
         max_tokens=max_tokens,

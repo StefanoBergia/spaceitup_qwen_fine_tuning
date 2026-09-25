@@ -269,3 +269,20 @@ def test_rescore_row_reapplies_side_rules_for_i2():
            "instruction": "Keep right of the tall bookshelf and go through the doorway."}
     new = rescore_row(row)
     assert new["passed"] is False and "side:missing" in new["rejects"]
+
+
+from rover_vlm.instructions import render_generation_jpeg
+
+
+def test_render_generation_jpeg_bytes_and_no_alt(two_sided_sample):
+    left, _ = build_pair(two_sided_sample)
+    data = render_generation_jpeg(left)
+    assert data[:2] == b"\xff\xd8"                       # JPEG magic
+    lone = json.loads(json.dumps(left))
+    lone["habitat_meta"]["alt_path"] = None
+    assert render_generation_jpeg(lone)[:2] == b"\xff\xd8"
+
+
+def test_four_word_instructions_are_accepted():
+    assert instruction_rejects("Go left around the sofa.", side="left") == []
+    assert instruction_rejects("Go left sofa.", side="left") == ["length:3"]

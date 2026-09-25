@@ -11,6 +11,7 @@ a model that ignores the instruction can get at most one of them right.
 
 import copy
 import hashlib
+import io
 import json
 import math
 import re
@@ -171,14 +172,25 @@ def _xy(path):
     return [(x, y) for x, y, _ in path]
 
 
-def render_generation_image(record, out_path):
-    """Frame with the record's route bold magenta and the alternative thin grey."""
+def render_generation_jpeg(record):
+    """Cosmos's generation overlay as JPEG bytes: the record's route bold magenta and, when
+    the record has one, the alternative thin grey. Rendered in memory so the ~28k v2 requests
+    need no overlay files on NFS."""
     img, draw = _canvas(record)
     W, H = img.size
-    draw_polyline(draw, _xy(record["habitat_meta"]["alt_path"]), OTHER_COLOR, W, H, width=3)
+    alt = record["habitat_meta"].get("alt_path")
+    if alt:
+        draw_polyline(draw, _xy(alt), OTHER_COLOR, W, H, width=3)
     draw_polyline(draw, _xy(_answer_path(record)), TARGET_COLOR, W, H, width=7)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def render_generation_image(record, out_path):
+    """render_generation_jpeg written to out_path (v1 kept its overlays on disk)."""
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    img.save(out_path, "JPEG", quality=90)
+    Path(out_path).write_bytes(render_generation_jpeg(record))
 
 
 def render_check_image(record, out_path):
@@ -287,7 +299,9 @@ _DRAWING = re.compile(
     r"(?:bold|thin|grey|gray) (?:route|path))\b",
     re.I,
 )
-_WORD_LIMITS = (6, 25)
+# v2 (2026-09-25): minimum 6 -> 4 words. 77 of v1's 91 train rejects were short, correct
+# instructions such as "Go left around the sofa."; v1's finalized data is unaffected.
+_WORD_LIMITS = (4, 25)
 
 
 def instruction_rejects(text, side=None):

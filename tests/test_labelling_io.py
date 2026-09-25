@@ -24,3 +24,13 @@ def test_prepare_output_resume_retries_errors_only(tmp_path):
     done, mode = prepare_output(p, resume=True, overwrite=False)
     assert done == {"a", "c"} and mode == "a"
     assert [json.loads(l)["id"] for l in p.read_text().splitlines()] == ["a", "c"]
+
+
+from rover_vlm.labelling_io import image_url
+
+
+def test_image_url_path_and_bytes(tmp_path):
+    p = tmp_path / "x.jpg"
+    p.write_bytes(b"\xff\xd8xx")
+    assert image_url(p).startswith("file://")
+    assert image_url(b"\xff\xd8xx") == "data:image/jpeg;base64,/9h4eA=="
