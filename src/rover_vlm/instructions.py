@@ -446,3 +446,89 @@ def rescore_row(row):
     new["check_correct"] = None if new["check_choice"] is None else new["check_choice"] == row["check_expected"]
     new["passed"] = bool(row.get("instruction") and not row.get("rejects") and new["check_correct"])
     return new
+
+
+# --- v2: every round-4 frame -----------------------------------------------------------
+
+def route_side(meta):
+    """Side label ("left" / "right" / "direct") of the labelled candidate, or None."""
+    cands, label = meta.get("candidates", []), meta.get("label")
+    return cands[label].get("label") if label is not None and 0 <= label < len(cands) else None
+
+
+def other_side_candidate(meta, side):
+    """Best candidate on the opposite side (feasible first), else any other; None if none."""
+    cands, label = meta.get("candidates", []), meta.get("label")
+    other = "right" if side == "left" else "left"
+    opposite = [i for i, c in enumerate(cands) if i != label and c.get("label") == other]
+    opposite.sort(key=lambda i: not cands[i].get("feasible"))
+    rest = [i for i in range(len(cands)) if i != label and i not in opposite]
+    ranked = opposite + rest
+    return ranked[0] if ranked else None
+
+
+def _candidate_path(sample_dir, index):
+    rec = build_record(sample_dir, framing="endpoints", candidate=index)
+    return _answer_path(rec) if rec is not None else None
+
+
+def _labelled(rec, side, kind, alt_path, sample_name, suffix=None):
+    rec["id"] = f"{sample_name}_{suffix or side[0].upper()}"
+    rec["habitat_meta"].update({"side": side, "kind": kind, "alt_path": alt_path,
+                                "instruction_source": "template"})
+    return rec
+
+
+def build_frame(source_rec, *, meta_extra=None, reasons=None):
+    """Plain copy + the records to label for one round-4 frame.
+
+    Pair frames (build_pair accepts them) give both sides; the correct side is kind
+    "instructed", the other "opposite". Single-route frames give one "instructed" record
+    whose alt_path is the best other-side candidate (only for Cosmos's overlay; no pair_id,
+    so no pair metric sees it). `direct` frames give the plain copy only.
+    """
+    sample_dir = Path(source_rec["image"][0]).parent
+    meta = json.loads((sample_dir / "meta.json").read_text())
+    out = {"plain": copy.deepcopy(source_rec), "labelset": []}
+    side = route_side(meta)
+    if side not in SIDES:
+        _skip(reasons, "direct")
+        return out
+    pair = build_pair(sample_dir, meta_extra=meta_extra, reasons=reasons)
+    if pair is not None:
+        for rec in pair:
+            rec["habitat_meta"]["kind"] = "instructed" if rec["habitat_meta"]["side"] == side else "opposite"
+        out["labelset"] = pair
+        return out
+    rec = build_record(sample_dir, framing="endpoints", instruction=TEMPLATE_INSTRUCTIONS[side],
+                       meta_extra=meta_extra)
+    if rec is None:
+        _skip(reasons, "record_failed")
+        return out
+    alt_idx = other_side_candidate(meta, side)
+    alt = _candidate_path(sample_dir, alt_idx) if alt_idx is not None else None
+    out["labelset"] = [_labelled(rec, side, "instructed", alt, sample_dir.name)]
+    return out
+
+
+def build_wrong_side(source_rec, *, meta_extra=None):
+    """Probe record: a single-route frame instructed to take its blocked other side.
+
+    Built from the blocked candidate, so the eval's `follows` reads as "obeyed"; alt_path is
+    the feasible route. None unless the opposite-side candidate exists and is infeasible.
+    """
+    sample_dir = Path(source_rec["image"][0]).parent
+    meta = json.loads((sample_dir / "meta.json").read_text())
+    side = route_side(meta)
+    if side not in SIDES or side_candidates(meta) is not None:
+        return None
+    idx = other_side_candidate(meta, side)
+    other = "right" if side == "left" else "left"
+    if idx is None or meta["candidates"][idx].get("label") != other or meta["candidates"][idx].get("feasible"):
+        return None
+    rec = build_record(sample_dir, framing="endpoints", candidate=idx,
+                       instruction=TEMPLATE_INSTRUCTIONS[other], meta_extra=meta_extra)
+    feasible = _candidate_path(sample_dir, meta["label"])
+    if rec is None or feasible is None:
+        return None
+    return _labelled(rec, other, "wrong_side", feasible, sample_dir.name, suffix="W")

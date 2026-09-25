@@ -286,3 +286,68 @@ def test_render_generation_jpeg_bytes_and_no_alt(two_sided_sample):
 def test_four_word_instructions_are_accepted():
     assert instruction_rejects("Go left around the sofa.", side="left") == []
     assert instruction_rejects("Go left sofa.", side="left") == ["length:3"]
+
+
+from rover_vlm.habitat_data import build_record
+from rover_vlm.instructions import build_frame, build_wrong_side, other_side_candidate, route_side
+
+
+def _src(d):
+    """What data/prepared_habitat_v4 holds for this sample."""
+    return build_record(d, framing="endpoints", meta_extra={"sample_id": d.name})
+
+
+def test_build_frame_pair_frame(two_sided_sample):
+    f = build_frame(_src(two_sided_sample))
+    assert f["plain"] == _src(two_sided_sample)
+    kinds = sorted((r["habitat_meta"]["kind"], r["habitat_meta"]["side"]) for r in f["labelset"])
+    assert kinds == [("instructed", "left"), ("opposite", "right")]
+    assert all(r["habitat_meta"]["pair_id"] == "scene_a_c000" for r in f["labelset"])
+
+
+def test_build_frame_single_route(tmp_path):
+    # right route blocked: single-route frame; its alt_path is the blocked right route
+    d = write_sample(tmp_path / "s_c020", left_uv=[(256, 512), (140, 400), (256, 300)],
+                     right_uv=[(256, 512), (370, 400), (256, 300)], accepted=(0,))
+    f = build_frame(_src(d))
+    (rec,) = f["labelset"]
+    hm = rec["habitat_meta"]
+    assert (rec["id"], hm["kind"], hm["side"]) == ("s_c020_L", "instructed", "left")
+    assert "pair_id" not in hm and hm["alt_path"] and max(x for x, _, _ in hm["alt_path"]) > 0.6
+
+
+def test_build_frame_direct_is_plain_only(tmp_path):
+    d = write_sample(tmp_path / "s_c021", left_uv=[(256, 512), (256, 300)],
+                     right_uv=[(256, 512), (370, 400), (256, 300)], labels=("direct", "right"))
+    f = build_frame(_src(d))
+    assert f["labelset"] == [] and f["plain"]["id"] == "s_c021"
+
+
+def test_other_side_candidate_prefers_feasible_opposite():
+    meta = {"label": 0, "candidates": [{"label": "left", "feasible": True},
+                                       {"label": "right", "feasible": False},
+                                       {"label": "right", "feasible": True}]}
+    assert other_side_candidate(meta, "left") == 2
+    meta["candidates"][2]["feasible"] = False
+    assert other_side_candidate(meta, "left") == 1
+    assert other_side_candidate({"label": 0, "candidates": [{"label": "left", "feasible": True}]}, "left") is None
+    assert route_side(meta) == "left"
+
+
+def test_single_route_without_alternative_builds_with_none(tmp_path):
+    d = write_sample(tmp_path / "s_c022", left_uv=[(256, 512), (140, 400), (256, 300)],
+                     right_uv=[(900, 900), (950, 950)], accepted=(0,))    # other candidate off-frame
+    (rec,) = build_frame(_src(d))["labelset"]
+    assert rec["habitat_meta"]["alt_path"] is None
+
+
+def test_build_wrong_side(tmp_path):
+    d = write_sample(tmp_path / "s_c023", left_uv=[(256, 512), (140, 400), (256, 300)],
+                     right_uv=[(256, 512), (370, 400), (256, 300)], accepted=(0,))
+    w = build_wrong_side(_src(d))
+    hm = w["habitat_meta"]
+    assert (w["id"], hm["kind"], hm["side"]) == ("s_c023_W", "wrong_side", "right")
+    assert max(x for x, _, _ in json.loads(w["conversations"][1]["value"])["path"]) > 0.6
+    assert min(x for x, _, _ in hm["alt_path"]) < 0.4
+    assert build_wrong_side(_src(write_sample(tmp_path / "s_c024",
+        left_uv=[(256, 512), (140, 400), (256, 300)], right_uv=[(256, 512), (370, 400), (256, 300)]))) is None

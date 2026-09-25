@@ -5,21 +5,23 @@ import pytest
 from PIL import Image
 
 
-def write_sample(d, *, left_uv, right_uv, label=0, goal_uv=(256, 300), accepted=(0, 1)):
+def write_sample(d, *, left_uv, right_uv, label=0, goal_uv=(256, 300), accepted=(0, 1),
+                 labels=("left", "right"), extra=None):
+    """extra: optional list of (uv_points, side_label, feasible) appended as candidates."""
     d.mkdir(parents=True, exist_ok=True)
+    cands_uv = [left_uv, right_uv] + [e[0] for e in (extra or [])]
     fpv = {
         "image_size": [512, 512],
         "goal": {"uv": list(goal_uv), "hidden": False},
-        "candidates": [
-            {"runs": [{"hidden": False, "uv": [list(p) for p in left_uv]}]},
-            {"runs": [{"hidden": False, "uv": [list(p) for p in right_uv]}]},
-        ],
+        "candidates": [{"runs": [{"hidden": False, "uv": [list(p) for p in uv]}]} for uv in cands_uv],
     }
+    cand_meta = [{"label": labels[0], "feasible": 0 in accepted},
+                 {"label": labels[1], "feasible": 1 in accepted}]
+    cand_meta += [{"label": e[1], "feasible": e[2]} for e in (extra or [])]
     meta = {
         "sample_id": d.name, "scene_id": "scene_a", "flavor": "doorway",
         "label": label, "accepted": list(accepted), "correct_path_in_fov": True,
-        "candidates": [{"label": "left", "feasible": 0 in accepted},
-                       {"label": "right", "feasible": 1 in accepted}],
+        "candidates": cand_meta,
     }
     (d / "fpv_paths.json").write_text(json.dumps(fpv))
     (d / "meta.json").write_text(json.dumps(meta))
