@@ -1326,18 +1326,22 @@ any other frame's path is already pinned and the instruction would be ignorable.
 `docs/superpowers/specs/2026-09-24-instruction-conditioned-paths-design.md`.
 
 Two arms on identical frames: `template` ("Go around to the left.") and `cosmos`
-(Cosmos3-Nano's landmark-grounded instruction, kept only if a second, independent Cosmos call
-picks the right route from it). Headline metric: **pair success** — both instructions of a
+(Cosmos3-Nano is told the side — known exactly from the metadata — and names the landmark the
+route passes; kept only if the text states the correct side, not the opposite one, names
+something, and never mentions the drawing). Prompt i1 also had Cosmos verify each instruction;
+its gate showed Cosmos cannot judge left vs right on drawn routes (63% even for the template
+instruction), so i2 dropped that call. Headline metric: **pair success** — both instructions of a
 frame followed; an instruction-blind model scores 0 by construction.
 
 1. Pairs + overlays (CPU, ~10 min): `uv run scripts/prepare_habitat_instr.py pairs` →
    `data/prepared_habitat_instr_v1/pairs_{train,eval}.json`, `overlays/`, `pairs_meta.json`
 2. Cosmos endpoint: `sbatch slurm/serve_cosmos3.sbatch`, wait for READY
 3. Gate (100 eval pairs; exits 2 on failure — drawing references must be 0, pair survival ≥ 0.8):
-   `uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json --limit-pairs 100 --out outputs/instr_labels/gate_i1.jsonl --concurrency 8 --gate`
-4. Full labels (`--resume` safe): the same script on `pairs_train.json` → `outputs/instr_labels/train_i1.jsonl`
-   and on `pairs_eval.json` → `outputs/instr_labels/eval_i1.jsonl`
-5. Finalize: `uv run scripts/prepare_habitat_instr.py finalize --instructions outputs/instr_labels/train_i1.jsonl outputs/instr_labels/eval_i1.jsonl`
+   `uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json --limit-pairs 100 --out outputs/instr_labels/gate_i2.jsonl --concurrency 8 --gate`
+   (`--rescore` re-judges a finished file with the current rules, no requests)
+4. Full labels (`--resume` safe): the same script on `pairs_train.json` → `outputs/instr_labels/train_i2.jsonl`
+   and on `pairs_eval.json` → `outputs/instr_labels/eval_i2.jsonl`
+5. Finalize: `uv run scripts/prepare_habitat_instr.py finalize --instructions outputs/instr_labels/train_i2.jsonl outputs/instr_labels/eval_i2.jsonl`
    → `{train,eval}_{template,cosmos}.json` (same ids in both arms)
 6. Train both arms (~1.3 h each):
    `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v1/train_template.json outputs/runs_instr_v1/template --epochs 3`

@@ -123,6 +123,16 @@ instructions whose only content is a side word — a high share means Cosmos add
 on held-out frames; `nvidia/Cosmos-Reason2-8B` (cached) is available as an independent verifier
 if self-agreement looks inflated.
 
+**Revised after the first gate (2026-09-25, prompt i1 → i2).** The i1 gate failed at chance
+level: pair survival 25% (0.5² = 25%), verifier accuracy 59%. A control run gave the verifier
+the *template* instruction on the same check images: 63% accuracy, 37% pair survival — Cosmos3-Nano
+cannot tell left from right on drawn routes (it picks "the curved one" for "go around"), and
+48% of i1 instructions named no side while only 67% of the rest named the right one. Since the
+side is known exactly, i2 hands it to Cosmos and asks only for the landmark; the Cosmos verify
+call is dropped and replaced by text rules (`instruction_rejects(text, side)`: correct side word
+present, opposite absent, something named, no drawing reference). Remaining unchecked risk: a
+named landmark that is not in the frame.
+
 ## 3. Training
 
 | run | data | question |

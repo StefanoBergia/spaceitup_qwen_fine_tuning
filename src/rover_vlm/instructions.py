@@ -135,7 +135,19 @@ def build_pair(sample_dir, *, texts=None, meta_extra=None, reasons=None):
 
 # --- Cosmos labelling ----------------------------------------------------------------
 # Bump when a prompt or overlay changes, so label files from different revisions coexist.
-INSTRUCTION_PROMPT_VERSION = "i1"
+#
+# i1 asked Cosmos to work out which way the magenta route goes and had a second Cosmos call
+# verify the instruction against two identically drawn routes. The 100-pair gate showed
+# Cosmos3-Nano cannot judge left vs right on drawn routes: given the *template* instruction
+# ("Go around to the left.") the verifier picked the right route only 63% of the time
+# (pair survival 37%), and 48% of i1 instructions named no side while only 67% of the rest
+# named the correct one. The side is known exactly from the metadata, so asking Cosmos for
+# it bought nothing but noise.
+# i2 hands the side over and asks Cosmos only for the landmark -- the same "justify the known
+# answer" strategy as the reasoning traces -- and verification becomes a text check
+# (instruction_rejects with side=...): correct side word present, opposite absent, something
+# named, no drawing references. One Cosmos call per record instead of two.
+INSTRUCTION_PROMPT_VERSION = "i2"
 RENDER_PX = 768
 # Magenta is rare indoors, so the drawn route is never mistaken for an object; grey keeps
 # the alternative visible without competing. The check image draws both routes alike.
@@ -197,24 +209,26 @@ def _answer_block(shape):
     )
 
 
-def generation_prompt():
-    """Ask Cosmos for the instruction that singles out the magenta route."""
+def generation_prompt(side):
+    """Ask Cosmos for an instruction taking the magenta route, which goes to `side`."""
+    other = "right" if side == "left" else "left"
     return f"""{SCENE_INTRO}
 
-Two possible routes to the same goal are drawn on the image. The bold magenta route is the
-one the rover should drive; the thin grey route is the alternative it must not take.
+Two possible routes to the same goal are drawn on the image. The rover should take the
+bold magenta route, which goes to the rover's {side} (the {side} side of the image) around
+whatever lies between the two routes; the thin grey route goes to the {other} instead.
 
 Write the instruction a person standing behind the rover would say, so that a driver who
-sees only the camera image, with nothing drawn on it, would take the magenta route and not
-the grey one.
+sees only the camera image, with nothing drawn on it, would take the {side} route.
 
 Rules for the instruction:
 - One sentence of 6 to 25 words, as a command ("go ...", "pass ...", "keep ...").
-- Refer to things that are really in the scene — furniture, walls, doorways, openings,
-  floor areas. Name at least one of them and say on which side of it the route passes.
-- Never mention the drawing: no lines, line colours, drawn routes, numbers, highlights or
-  coordinates. The driver will not see any of them.
-- Never name an object that is not in this image.
+- It must contain the word '{side}' and never the word '{other}'.
+- Name the thing in the scene that the route passes — a piece of furniture, a wall, a
+  doorway, an opening — and say that the route passes it on the {side}. Name only
+  things that are really in this image.
+- Never mention the drawing: no lines, colours of lines, magenta, grey, drawn routes,
+  numbers, highlights or coordinates. The driver will not see any of them.
 
 {_answer_block('{"instruction": "<the instruction>"}')}"""
 
@@ -276,8 +290,12 @@ _DRAWING = re.compile(
 _WORD_LIMITS = (6, 25)
 
 
-def instruction_rejects(text):
-    """Why an instruction is unusable; [] when it is fine."""
+def instruction_rejects(text, side=None):
+    """Why an instruction is unusable; [] when it is fine.
+
+    With `side` (prompt i2+) the text is also the verifier: it must say that side, must not
+    say the other one, and must name something beyond the side (see is_side_only).
+    """
     if not text:
         return ["empty"]
     out = [f"drawing:{m.group(0).lower()}" for m in _DRAWING.finditer(text)]
@@ -286,6 +304,14 @@ def instruction_rejects(text):
     n = len(text.split())
     if not (_WORD_LIMITS[0] <= n <= _WORD_LIMITS[1]):
         out.append(f"length:{n}")
+    if side is not None:
+        other = "right" if side == "left" else "left"
+        if not re.search(rf"\b{side}\b", text, re.I):
+            out.append("side:missing")
+        if re.search(rf"\b{other}\b", text, re.I):
+            out.append("side:opposite")
+        if is_side_only(text):
+            out.append("no_landmark")
     return out
 
 
@@ -391,7 +417,15 @@ def rescore_row(row):
     Lets a parser fix be applied to a finished run without paying for the Cosmos calls
     again. Rows without a saved reply (passed rows, errors) are returned unchanged.
     """
-    if row.get("error") or row.get("raw_check") is None:
+    if row.get("error"):
+        return row
+    if row.get("prompt_version", "i1") != "i1" and row.get("instruction"):
+        # i2+: no Cosmos verify call; the text rules are the verifier
+        new = dict(row)
+        new["rejects"] = instruction_rejects(row["instruction"], side=row["side"])
+        new["passed"] = not new["rejects"]
+        return new
+    if row.get("raw_check") is None:
         return row
     new = dict(row)
     new["check_choice"] = parse_choice(row["raw_check"])

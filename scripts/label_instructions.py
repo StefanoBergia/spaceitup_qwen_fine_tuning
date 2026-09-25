@@ -1,22 +1,25 @@
-"""Label route instructions with Cosmos3-Nano: write one per record, then verify it.
+"""Label route instructions with Cosmos3-Nano: one per record, checked by text rules.
 
 Runs on the LOGIN NODE against the endpoint published by slurm/serve_cosmos3.sbatch.
 Input is a pairs file from `scripts/prepare_habitat_instr.py pairs`; each record carries
 its two overlay images (habitat_meta.gen_image / check_image).
 
-Per record, two independent calls:
-  1. generate — frame with the record's route bold magenta and the other side's grey;
-     Cosmos writes the instruction that singles out the magenta one;
-  2. verify   — both routes drawn alike, badges 1/2 in a per-id random order; Cosmos is
-     given the instruction and must pick the route. A record passes when the instruction
-     parsed, trips no reject rule and the pick is right.
+Per record, one call (prompt i2): the frame with the record's route bold magenta and the
+other side's grey, plus the side the route takes (known exactly from the metadata); Cosmos
+names the landmark the route passes. A record passes when the instruction parses and trips
+no rule in instruction_rejects(text, side): correct side word present, opposite absent,
+something named, no reference to the drawing.
+
+(Prompt i1 also asked Cosmos to verify each instruction against two identically drawn
+routes; the 100-pair gate showed it cannot judge left from right on drawn routes — 63% even
+for the template instruction — so that call was dropped. See INSTRUCTION_PROMPT_VERSION.)
 
     # gate: first 100 eval pairs; exits 2 if the gate fails
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json \
-        --limit-pairs 100 --out outputs/instr_labels/gate_i1.jsonl --concurrency 8 --gate
+        --limit-pairs 100 --out outputs/instr_labels/gate_i2.jsonl --concurrency 8 --gate
     # full run (resumable)
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_train.json \
-        --out outputs/instr_labels/train_i1.jsonl --concurrency 8 --resume
+        --out outputs/instr_labels/train_i2.jsonl --concurrency 8 --resume
 
     # re-judge a finished file with the current parser (no endpoint, no GPU)
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json \
@@ -33,8 +36,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.instructions import (
-    INSTRUCTION_PROMPT_VERSION, check_prompt, gate_failures, generation_prompt,
-    instruction_rejects, is_side_only, parse_choice, parse_instruction, rescore_row, summarize_labels,
+    INSTRUCTION_PROMPT_VERSION, gate_failures, generation_prompt, instruction_rejects,
+    is_side_only, parse_instruction, rescore_row, summarize_labels,
 )
 from rover_vlm.labelling_io import chat_with_image, connect, prepare_output, resolve_endpoint
 
@@ -96,28 +99,22 @@ def main() -> None:
                    "prompt_version": INSTRUCTION_PROMPT_VERSION}
             t0 = time.time()
             try:
-                raw_gen, fin_gen = chat_with_image(client, model, hm["gen_image"], generation_prompt(),
+                raw_gen, fin_gen = chat_with_image(client, model, hm["gen_image"],
+                                                   generation_prompt(hm["side"]),
                                                    max_tokens=args.max_tokens, seed=args.seed)
-                text = parse_instruction(raw_gen)
-                choice, raw_chk, fin_chk = None, None, None
-                if text:
-                    raw_chk, fin_chk = chat_with_image(client, model, hm["check_image"], check_prompt(text),
-                                                       max_tokens=args.max_tokens, seed=args.seed)
-                    choice = parse_choice(raw_chk)
             except Exception as e:  # noqa: BLE001 — one bad sample must not kill the run
                 return {**row, "error": f"{type(e).__name__}: {e}"}
-            rejects = instruction_rejects(text)
-            correct = None if choice is None else choice == hm["check_expected"]
+            text = parse_instruction(raw_gen)
+            rejects = instruction_rejects(text, side=hm["side"])
             row.update({
                 "instruction": text, "rejects": rejects,
                 "side_only": is_side_only(text) if text else None,
-                "check_choice": choice, "check_expected": hm["check_expected"],
-                "check_correct": correct, "passed": bool(text and not rejects and correct),
-                "finish": [fin_gen, fin_chk], "latency_s": round(time.time() - t0, 2),
+                "passed": bool(text and not rejects),
+                "finish": fin_gen, "latency_s": round(time.time() - t0, 2),
             })
-            # keep the raw replies whenever they are the only way to explain the outcome
+            # keep the raw reply whenever it is the only way to explain the outcome
             if args.show or not row["passed"]:
-                row["raw_gen"], row["raw_check"] = raw_gen, raw_chk
+                row["raw_gen"] = raw_gen
             return row
 
         started = time.time()
@@ -134,11 +131,11 @@ def main() -> None:
                     elif row["passed"]:
                         status = "ok"
                     else:
-                        status = f"FAIL rejects={row['rejects']} check={row['check_choice']}/{row['check_expected']}"
+                        status = f"FAIL rejects={row['rejects']}"
                     print(f"[{i}/{len(todo)}] {row['id']}  {rate * 60:.0f}/min  "
-                          f"eta {(len(todo) - i) / rate / 60:.0f}m  {row.get('instruction')!r}  {status}")
+                          f"eta {(len(todo) - i) / rate / 60:.0f}m  {row.get('instruction')!r}  {status}", flush=True)
                     if args.show:
-                        print(f"--- generate ---\n{row.get('raw_gen')}\n--- check ---\n{row.get('raw_check')}\n")
+                        print(f"--- reply ---\n{row.get('raw_gen')}\n")
             except KeyboardInterrupt:
                 print(f"\ninterrupted — {args.out} holds everything finished so far. Re-run with --resume.")
                 for fut in futures:

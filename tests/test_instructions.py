@@ -92,7 +92,7 @@ def test_render_images(two_sided_sample, tmp_path):
 
 
 def test_prompts_have_no_concrete_nouns():
-    text = (generation_prompt() + check_prompt("{x}")).lower()
+    text = (generation_prompt("left") + generation_prompt("right") + check_prompt("{x}")).lower()
     for noun in ("sofa", "table", "chair", "counter", "bed", "desk", "cabinet", "couch", "kitchen"):
         assert noun not in text
 
@@ -245,3 +245,27 @@ def test_rescore_row_reparses_saved_replies():
     kept = {"id": "b_L", "passed": True, "check_choice": 2}   # passed rows keep no raw reply
     assert rescore_row(kept) == kept
     assert rescore_row({"id": "c", "error": "Timeout"}) == {"id": "c", "error": "Timeout"}
+
+
+
+def test_generation_prompt_hands_over_the_side():
+    p = generation_prompt("left")
+    assert "rover's left" in p and "'left'" in p and "never the word 'right'" in p
+    assert "rover's right" in generation_prompt("right")
+
+
+def test_instruction_rejects_side_rules():
+    ok = "Pass on the left of the grey sofa, then continue to the doorway."
+    assert instruction_rejects(ok, side="left") == []
+    assert "side:missing" in instruction_rejects(ok, side="right")
+    both = "Pass left of the sofa, keeping the table on your right side."
+    assert instruction_rejects(both, side="left") == ["side:opposite"]
+    assert "no_landmark" in instruction_rejects("Go around the obstacle to the left side.", side="left")
+    assert instruction_rejects(ok) == []                  # no side given -> i1 rules only
+
+
+def test_rescore_row_reapplies_side_rules_for_i2():
+    row = {"id": "a_L", "side": "left", "prompt_version": "i2", "rejects": [], "passed": True,
+           "instruction": "Keep right of the tall bookshelf and go through the doorway."}
+    new = rescore_row(row)
+    assert new["passed"] is False and "side:missing" in new["rejects"]
