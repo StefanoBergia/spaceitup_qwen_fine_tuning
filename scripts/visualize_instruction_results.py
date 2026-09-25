@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from rover_vlm.eval import instruction_follow  # noqa: E402
-from rover_vlm.overlay import draw_polyline, embed_jpeg  # noqa: E402
+from rover_vlm.overlay import draw_path, draw_polyline, embed_jpeg  # noqa: E402
 
 ROOT = REPO_ROOT / "outputs" / "eval_instr_v1"
 DATA = REPO_ROOT / "data" / "prepared_habitat_instr_v1"
@@ -49,7 +49,7 @@ SET_NAMES = {"template": "template wording", "cosmos": "Cosmos wording"}
 ARM_VAR = {"instr_template": "--arm-template", "instr_cosmos": "--arm-cosmos",
            "r4_lora": "--ref", "base": "--ref"}
 # prediction overlay colours (image content, fixed): left instruction / right instruction
-LEFT_RGB, RIGHT_RGB, ROUTE_RGB = (42, 120, 214), (235, 104, 52), (255, 255, 255)
+LEFT_RGB, RIGHT_RGB, GT_RGB = (42, 120, 214), (235, 104, 52), (120, 120, 120)
 
 # Measured on the 100-pair i1 gate (2026-09-25, serve job 91865); the control run used a
 # throwaway script, so its numbers are recorded here rather than re-read from disk.
@@ -140,17 +140,23 @@ def chart_svg(rows):
 
 
 def pair_figure(image_path, sides, size=460):
-    """One frame: both candidate routes in white, the two predictions in blue / orange."""
+    """One frame: both candidate routes in grey, the two predictions in blue / orange.
+
+    Every waypoint is drawn with its occlusion flag, the project's convention from
+    rover_vlm.overlay: filled = visible (v=1), hollow = hidden behind an obstacle (v=0).
+    Ground-truth waypoints are small grey markers, predictions larger coloured ones, so the
+    predicted visibility can be read against the label on the same route.
+    """
     img = Image.open(image_path).convert("RGB").resize((size, size), Image.LANCZOS)
     d = ImageDraw.Draw(img)
     for side in ("left", "right"):
         r, _ = sides[side]
-        draw_polyline(d, [(p[0], p[1]) for p in r["gt"]["path"]], (150, 150, 150), size, size, width=3)
+        draw_path(d, r["gt"]["path"], GT_RGB, size, size, r=4, width=3)
     for side, rgb in (("left", LEFT_RGB), ("right", RIGHT_RGB)):
         r, _ = sides[side]
         if r.get("parsed") and r["parsed"].get("path"):
-            draw_polyline(d, [(p[0], p[1]) for p in r["parsed"]["path"]], rgb, size, size, width=4)
-    return embed_jpeg(img, max_px=size, quality=82)
+            draw_path(d, r["parsed"]["path"], rgb, size, size, r=7, width=3)
+    return embed_jpeg(img, max_px=size, quality=85)
 
 
 def gallery(root, tag, set_, n):
@@ -175,9 +181,11 @@ def gallery(root, tag, set_, n):
             r, ok = sides[side]
             instr = evals[r["id"]]["habitat_meta"]["instruction"]
             verdict = "followed" if ok else "not followed"
+            vis = (r.get("metrics") or {}).get("path_visibility_acc")
+            vis_txt = f" · visibility {100 * vis:.0f}% match" if vis is not None else ""
             lines.append(f'<li class="{cls}"><span class="swatch" aria-hidden="true"></span>'
                          f'<span class="instr">“{html.escape(instr)}”</span>'
-                         f'<span class="outcome {"ok" if ok else "miss"}">{verdict}</span></li>')
+                         f'<span class="outcome {"ok" if ok else "miss"}">{verdict}{vis_txt}</span></li>')
         status = "both followed" if all(ok for _, ok in sides.values()) else "pair failed"
         cards.append(
             f'<figure class="pair"><img src="{pair_figure(src, sides)}" alt="Held-out frame {html.escape(pid)} '
@@ -436,11 +444,15 @@ def build_page(root, gallery_tag, gallery_set, n):
   <div class="stack">
     <span class="eyebrow">Held-out examples · {MODEL_NAMES[gallery_tag]} · {SET_NAMES[gallery_set]}</span>
     <h2>One frame, two instructions, two paths</h2>
-    <p>Both candidate routes in grey with a white outline; the model's path for the left instruction in blue and for the right
-    instruction in orange. Frames with the most clearly separated routes first; the last cards are failures.</p>
-    <div class="key"><span><i style="background:rgb(150,150,150);outline:1px solid #fff"></i>both candidate routes (grey, white outline)</span>
+    <p>Both candidate routes in grey; the model's path for the left instruction in blue and for the right
+    instruction in orange. Each waypoint shows its occlusion flag: filled where the ground is visible, hollow
+    where the route passes behind an obstacle. The grey routes show the labels, the coloured ones the model's
+    own call. “Visibility match” is the share of the prediction's waypoints whose flag agrees with the label. Frames with the most clearly separated routes first; the last cards are failures.</p>
+    <div class="key"><span><i style="background:rgb(120,120,120);outline:1px solid #fff"></i>both candidate routes (labels)</span>
       <span><i style="background:rgb(42,120,214)"></i>prediction for the left instruction</span>
-      <span><i style="background:rgb(235,104,52)"></i>prediction for the right instruction</span></div>
+      <span><i style="background:rgb(235,104,52)"></i>prediction for the right instruction</span>
+      <span><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="var(--ink-2)"/></svg>waypoint visible</span>
+      <span><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="var(--ink-2)" stroke-width="2"/></svg>waypoint occluded</span></div>
   </div>
   <div class="gallery">{gallery(root, gallery_tag, gallery_set, n)}{blind_example(root, gallery_set)}</div>
 </section>
