@@ -354,14 +354,14 @@ def _by_pair(items, key):
 def summarize_labels(rows):
     """The numbers the gate and the run summary are judged on.
 
-    A pair counts towards the total even when one of its requests errored (error rows
-    carry no pair_id, so it is recovered from the record id): an unlabelled pair is a
-    pair not kept, and hiding it would flatter the survival rate.
+    A pair counts towards the total even when one of its requests errored (error rows keep
+    their pair_id): an unlabelled pair is a pair not kept, and hiding it would flatter the
+    survival rate. Single-route rows (pair_id None, v2) count only towards accept_rate.
     """
     ok = [r for r in rows if not r.get("error")]
     checked = [r for r in ok if r.get("check_correct") is not None]
-    pair_ids = {r.get("pair_id") or r["id"].rsplit("_", 1)[0] for r in rows}
-    kept = {pid for pid, rs in _by_pair(ok, lambda r: r["pair_id"]).items()
+    pair_ids = {r["pair_id"] for r in rows if r.get("pair_id")}
+    kept = {pid for pid, rs in _by_pair([r for r in ok if r.get("pair_id")], lambda r: r["pair_id"]).items()
             if len(rs) == 2 and all(r.get("passed") for r in rs)}
     return {
         "n_records": len(rows),
@@ -372,15 +372,18 @@ def summarize_labels(rows):
         "check_accuracy": (round(sum(bool(r["check_correct"]) for r in checked) / len(checked), 4)
                            if checked else None),
         "n_side_only": sum(bool(r.get("side_only")) for r in ok),
+        "accept_rate": round(sum(bool(r.get("passed")) for r in ok) / len(ok), 4) if ok else 0.0,
         "pairs_total": len(pair_ids),
         "pairs_kept": len(kept),
         "pair_survival": round(len(kept) / len(pair_ids), 4) if pair_ids else 0.0,
     }
 
 
-def gate_failures(summary, *, min_pair_survival, max_drawing_refs):
+def gate_failures(summary, *, min_pair_survival, max_drawing_refs, min_accept=None):
     """[] when the labelling round is good enough to scale up."""
     out = []
+    if min_accept is not None and summary["accept_rate"] < min_accept:
+        out.append(f"accept rate {summary['accept_rate']:.3f} < {min_accept}")
     if summary["pair_survival"] < min_pair_survival:
         out.append(f"pair survival {summary['pair_survival']:.3f} < {min_pair_survival}")
     if summary["n_drawing_refs"] > max_drawing_refs:
@@ -532,3 +535,36 @@ def build_wrong_side(source_rec, *, meta_extra=None):
     if rec is None or feasible is None:
         return None
     return _labelled(rec, other, "wrong_side", feasible, sample_dir.name, suffix="W")
+
+
+def retry_ids(rows):
+    """Rows worth one more Cosmos attempt: ran, were rejected, and were not retried yet."""
+    return {r["id"] for r in rows if not r.get("error") and not r.get("passed") and not r.get("retried")}
+
+
+def finalize_general(plain_recs, label_recs, rows_by_id):
+    """Assemble v2 files from plain copies, labelled records and their label rows.
+
+    A labelled record is kept when its row passed; a pair frame is kept only when both of
+    its records passed (otherwise both go, the plain copy stays). Kept records carry the
+    Cosmos instruction in their prompt (with_instruction).
+    """
+    passed = {i for i, r in rows_by_id.items() if r.get("passed")}
+    groups = _by_pair([r for r in label_recs if r["habitat_meta"].get("pair_id")],
+                      lambda r: r["habitat_meta"]["pair_id"])
+    bad_pairs = {pid for pid, rs in groups.items() if len(rs) != 2 or not all(r["id"] in passed for r in rs)}
+    kept = [with_instruction(r, rows_by_id[r["id"]]["instruction"], "cosmos") for r in label_recs
+            if r["id"] in passed and r["habitat_meta"].get("pair_id") not in bad_pairs]
+
+    def kind(k):
+        return [r for r in kept if r["habitat_meta"]["kind"] == k]
+
+    return {
+        "train_or_all": ([copy.deepcopy(p) for p in plain_recs]
+                         + [r for r in kept if r["habitat_meta"]["kind"] != "wrong_side"]),
+        "instructed": kind("instructed"),
+        "pairs": [r for r in kept if r["habitat_meta"].get("pair_id")],
+        "wrong_side": kind("wrong_side"),
+        "stats": {"labelled": len(label_recs), "kept": len(kept),
+                  "pairs_kept": len(groups) - len(bad_pairs), "pairs_dropped": len(bad_pairs)},
+    }

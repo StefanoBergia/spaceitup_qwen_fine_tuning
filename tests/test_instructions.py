@@ -133,7 +133,7 @@ def test_summarize_and_gate():
     rows = [_row("a_L", "a", True), _row("a_R", "a", True),
             _row("b_L", "b", True), _row("b_R", "b", False, correct=False),
             _row("c_L", "c", False, rejects=["drawing:line"]), _row("c_R", "c", True),
-            {"id": "d_L", "error": "Timeout"}]
+            {"id": "d_L", "pair_id": "d", "error": "Timeout"}]
     s = summarize_labels(rows)
     assert (s["pairs_total"], s["pairs_kept"]) == (4, 1)
     assert s["n_drawing_refs"] == 1 and s["n_rejected"] == 1
@@ -351,3 +351,36 @@ def test_build_wrong_side(tmp_path):
     assert min(x for x, _, _ in hm["alt_path"]) < 0.4
     assert build_wrong_side(_src(write_sample(tmp_path / "s_c024",
         left_uv=[(256, 512), (140, 400), (256, 300)], right_uv=[(256, 512), (370, 400), (256, 300)]))) is None
+
+
+from rover_vlm.instructions import finalize_general, retry_ids
+
+
+def test_summarize_accept_rate_and_single_rows():
+    rows = [{"id": "a_L", "pair_id": None, "passed": True, "rejects": []},
+            {"id": "b_R", "pair_id": None, "passed": False, "rejects": ["length:3"]}]
+    s = summarize_labels(rows)
+    assert s["accept_rate"] == 0.5 and s["pairs_total"] == 0
+    assert gate_failures(s, min_pair_survival=0.0, max_drawing_refs=0, min_accept=0.9) == ["accept rate 0.500 < 0.9"]
+
+
+def test_retry_ids_skips_errors_passed_and_retried():
+    rows = [{"id": "a", "passed": False}, {"id": "b", "passed": False, "retried": True},
+            {"id": "c", "passed": True}, {"id": "d", "error": "Timeout"}]
+    assert retry_ids(rows) == {"a"}
+
+
+def test_finalize_general(two_sided_sample, tmp_path):
+    f = build_frame(_src(two_sided_sample))
+    single = build_frame(_src(write_sample(tmp_path / "s_c030", left_uv=[(256, 512), (140, 400), (256, 300)],
+                                           right_uv=[(256, 512), (370, 400), (256, 300)], accepted=(0,))))
+    labels = f["labelset"] + single["labelset"]
+    ok = lambda r: {"id": r["id"], "passed": True, "instruction": f"Pass {r['habitat_meta']['side']} of the lamp."}
+    rows = {r["id"]: ok(r) for r in labels}
+    out = finalize_general([f["plain"], single["plain"]], labels, rows)
+    assert len(out["train_or_all"]) == 2 + 3 and len(out["pairs"]) == 2 and len(out["instructed"]) == 2
+    rows[f["labelset"][1]["id"]]["passed"] = False               # one side of the pair rejected
+    out = finalize_general([f["plain"], single["plain"]], labels, rows)
+    assert out["pairs"] == [] and len(out["train_or_all"]) == 2 + 1
+    assert [r["id"] for r in out["instructed"]] == ["s_c030_L"]
+    assert out["stats"]["pairs_dropped"] == 1
