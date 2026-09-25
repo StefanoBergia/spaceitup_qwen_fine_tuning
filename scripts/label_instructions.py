@@ -25,6 +25,15 @@ for the template instruction — so that call was dropped. See INSTRUCTION_PROMP
     uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json \
         --limit-pairs 100 --out outputs/instr_labels/gate_i1.jsonl --rescore --gate
 
+    # v2 (every round-4 frame; overlays rendered in memory, sent inline)
+    uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v2/labelset_eval.json \
+        --out outputs/instr_labels_v2/eval_i2.jsonl --concurrency 8 --resume
+    # ... then one more attempt for the rejected rows (seed + 1)
+    uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v2/labelset_eval.json \
+        --out outputs/instr_labels_v2/eval_i2.jsonl --concurrency 8 --resume --retry-rejected
+    # record-level gate for single-route rows (no pairs in the split)
+    ... --gate --min-accept 0.9 --min-pair-survival 0
+
 Writes one JSON line per record, flushed as it goes, so a killed run keeps what it had.
 """
 
@@ -37,7 +46,7 @@ from pathlib import Path
 
 from rover_vlm.instructions import (
     INSTRUCTION_PROMPT_VERSION, gate_failures, generation_prompt, instruction_rejects,
-    is_side_only, parse_instruction, rescore_row, summarize_labels,
+    is_side_only, parse_instruction, render_generation_jpeg, rescore_row, retry_ids, summarize_labels,
 )
 from rover_vlm.labelling_io import chat_with_image, connect, prepare_output, resolve_endpoint
 
@@ -62,13 +71,18 @@ def main() -> None:
                    help="re-parse the saved raw replies in --out with the current parser; no requests")
     p.add_argument("--gate", action="store_true", help="exit 2 unless the thresholds below hold")
     p.add_argument("--min-pair-survival", type=float, default=0.8)
+    p.add_argument("--min-accept", type=float, default=None,
+                   help="gate also on the share of accepted records (v2 single-route rows)")
+    p.add_argument("--retry-rejected", action="store_true",
+                   help="with --resume: label rejected, not-yet-retried rows once more, seed + 1")
     p.add_argument("--max-drawing-refs", type=int, default=0)
     args = p.parse_args()
 
     records = json.loads(args.split.read_text())
     if args.limit_pairs:
-        keep = set(list(dict.fromkeys(r["habitat_meta"]["pair_id"] for r in records))[: args.limit_pairs])
-        records = [r for r in records if r["habitat_meta"]["pair_id"] in keep]
+        keep = set(list(dict.fromkeys(r["habitat_meta"].get("pair_id") for r in records
+                                      if r["habitat_meta"].get("pair_id")))[: args.limit_pairs])
+        records = [r for r in records if r["habitat_meta"].get("pair_id") in keep]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.rescore:
         if not args.out.exists():
@@ -83,6 +97,19 @@ def main() -> None:
         done, mode = {r["id"] for r in new}, "a"
     else:
         done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
+    seed = args.seed
+    if args.retry_rejected:
+        if not args.resume:
+            raise SystemExit("--retry-rejected continues an existing file: pass --resume too")
+        old = [json.loads(line) for line in args.out.read_text().splitlines() if line.strip()]
+        again = retry_ids(old) & {r["id"] for r in records}
+        tmp = args.out.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in old if r["id"] not in again))
+        tmp.replace(args.out)
+        done -= again
+        seed = args.seed + 1
+        mode = "a"
+        print(f"retrying {len(again)} rejected rows with seed {seed}")
     todo = [r for r in records if r["id"] not in done]
     print(f"split: {args.split}  records {len(records)}  to label {len(todo)}  "
           f"prompt {INSTRUCTION_PROMPT_VERSION}  concurrency {args.concurrency}")
@@ -95,13 +122,17 @@ def main() -> None:
         def label(rec):
             """One record, both calls. Never raises: a bad sample is a recorded failure."""
             hm = rec["habitat_meta"]
-            row = {"id": rec["id"], "pair_id": hm["pair_id"], "side": hm["side"],
-                   "prompt_version": INSTRUCTION_PROMPT_VERSION}
+            row = {"id": rec["id"], "pair_id": hm.get("pair_id"), "kind": hm.get("kind"),
+                   "side": hm["side"], "prompt_version": INSTRUCTION_PROMPT_VERSION}
+            if args.retry_rejected:
+                row["retried"] = True
+            # v1 records point at overlay files; v2 renders the overlay in memory
+            image = hm["gen_image"] if hm.get("gen_image") else render_generation_jpeg(rec)
             t0 = time.time()
             try:
-                raw_gen, fin_gen = chat_with_image(client, model, hm["gen_image"],
+                raw_gen, fin_gen = chat_with_image(client, model, image,
                                                    generation_prompt(hm["side"]),
-                                                   max_tokens=args.max_tokens, seed=args.seed)
+                                                   max_tokens=args.max_tokens, seed=seed)
             except Exception as e:  # noqa: BLE001 — one bad sample must not kill the run
                 return {**row, "error": f"{type(e).__name__}: {e}"}
             text = parse_instruction(raw_gen)
@@ -152,7 +183,7 @@ def main() -> None:
         print(f"{errors} request errors — re-run with --resume to retry them")
     if args.gate:
         fails = gate_failures(summary, min_pair_survival=args.min_pair_survival,
-                              max_drawing_refs=args.max_drawing_refs)
+                              max_drawing_refs=args.max_drawing_refs, min_accept=args.min_accept)
         print("GATE: " + ("PASS" if not fails else "FAIL — " + "; ".join(fails)))
         if fails:
             sys.exit(2)
