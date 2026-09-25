@@ -532,8 +532,12 @@ def aggregate_instruction_metrics(records):
     differ only in the instruction, so a model that ignores it returns the same path twice
     and wins at most one of the two -- 0% pair success by construction. An unparseable
     prediction counts as not following; it is never dropped from the denominator.
+
+    Pairs come only from records with a pair_id. Records with an alt_path but no pair_id
+    (v2 single-route instructed records, the wrong-side probe) count towards follow_rate
+    only; one whose alt_path is None (nothing to compare against) is left out.
     """
-    rows = [r for r in records if "alt_path" in (r.get("habitat_meta") or {})]
+    rows = [r for r in records if (r.get("habitat_meta") or {}).get("alt_path")]
     if not rows:
         return None
     follows, by_pair, by_side = {}, {}, {}
@@ -543,17 +547,42 @@ def aggregate_instruction_metrics(records):
         if r.get("parsed") and r["parsed"].get("path"):
             ok = instruction_follow(r["parsed"]["path"], r["gt"]["path"], hm["alt_path"])["follows"]
         follows[r["id"]] = ok
-        by_pair.setdefault(hm["pair_id"], []).append(r)
+        if hm.get("pair_id"):
+            by_pair.setdefault(hm["pair_id"], []).append(r)
         by_side.setdefault(hm["side"], []).append(ok)
     pairs = [p for p in by_pair.values() if len(p) == 2]
+    success = [all(follows[r["id"]] for r in p) for p in pairs]
+    by_source = {}
+    for p, ok in zip(pairs, success):
+        by_source.setdefault(p[0]["habitat_meta"].get("source") or "unknown", []).append(ok)
     return {
         "n_records": len(rows),
         "n_pairs": len(pairs),
         "follow_rate": float(np.mean(list(follows.values()))),
-        "pair_success": (float(np.mean([all(follows[r["id"]] for r in p) for p in pairs]))
-                         if pairs else 0.0),
+        "pair_success": float(np.mean(success)) if pairs else None,
+        "pair_success_by_source": {k: float(np.mean(v)) for k, v in sorted(by_source.items())},
         "identical_output_rate": (float(np.mean(
             [p[0].get("generated", "").strip() == p[1].get("generated", "").strip() for p in pairs]))
-            if pairs else 0.0),
+            if pairs else None),
         "follow_rate_by_side": {s: float(np.mean(v)) for s, v in sorted(by_side.items())},
     }
+
+
+def clustered_bootstrap_ci(values, groups, n=4000, seed=0):
+    """95% bootstrap interval of mean(values), resampling whole groups (e.g. viewpoints).
+
+    v2's eval pairs include yaw-rotated copies of the same viewpoint, which are not
+    independent; resampling pairs one by one would make the interval too narrow.
+    """
+    rng = np.random.default_rng(seed)
+    by = {}
+    for v, g in zip(values, groups):
+        by.setdefault(g, []).append(float(v))
+    keys = list(by)
+    sums = np.array([sum(by[k]) for k in keys])
+    counts = np.array([len(by[k]) for k in keys])
+    means = []
+    for _ in range(n):
+        idx = rng.integers(0, len(keys), len(keys))
+        means.append(sums[idx].sum() / counts[idx].sum())
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))

@@ -303,3 +303,25 @@ def test_aggregate_instruction_metrics():
 
 def test_aggregate_instruction_metrics_none_without_alt_path():
     assert aggregate_instruction_metrics([{"id": "x", "parsed": None, "habitat_meta": {}}]) is None
+
+
+from rover_vlm.eval import clustered_bootstrap_ci
+
+
+def test_aggregate_ignores_unpaired_alt_path_records():
+    recs = [_irec("a", "left", _L), _irec("a", "right", _R)]
+    lone = _irec("z", "left", _L)
+    lone["habitat_meta"].pop("pair_id")
+    recs[0]["habitat_meta"]["source"] = "augmented"
+    m = aggregate_instruction_metrics(recs + [lone])
+    assert m["n_pairs"] == 1 and m["n_records"] == 3 and m["pair_success"] == 1.0
+    assert m["pair_success_by_source"] == {"augmented": 1.0}
+    solo = aggregate_instruction_metrics([lone])
+    assert solo["n_pairs"] == 0 and solo["pair_success"] is None and solo["follow_rate"] == 1.0
+
+
+def test_clustered_bootstrap_resamples_groups():
+    lo, hi = clustered_bootstrap_ci([1, 1, 1, 0, 0, 0], ["a", "a", "a", "b", "b", "b"], n=500)
+    assert lo == 0.0 and hi == 1.0            # only two clusters: whole-cluster draws
+    lo, hi = clustered_bootstrap_ci([1] * 6, list("abcdef"), n=200)
+    assert lo == hi == 1.0
