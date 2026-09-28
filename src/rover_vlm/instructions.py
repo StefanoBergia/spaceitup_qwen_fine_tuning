@@ -610,6 +610,22 @@ def resolve_i4(reply, side, template):
             "rejects": rejects, "passed": not rejects}
 
 
+def load_landmarks(paths, ids):
+    """{id: landmarks row} for `ids`; exits when any id has no row — labelling a record
+    without its target would silently fall back to nothing."""
+    rows = {}
+    for p in paths:
+        for line in Path(p).read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                rows[r["id"]] = r
+    missing = [i for i in ids if i not in rows]
+    if missing:
+        raise SystemExit(f"{len(missing)} of {len(ids)} records have no landmark row "
+                         f"(e.g. {missing[:3]}) — run prepare_habitat_instr.py landmarks")
+    return {i: rows[i] for i in ids}
+
+
 # --- v2: every round-4 frame -----------------------------------------------------------
 
 def route_side(meta):

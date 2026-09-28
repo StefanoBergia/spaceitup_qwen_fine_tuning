@@ -1,7 +1,14 @@
 #!/bin/bash
 # Label the v2 instruction set with Cosmos3-Nano, unattended: serve + client in one job.
 #
-#     sbatch slurm/label_instructions.sbatch
+#     sbatch slurm/label_instructions.sbatch                  # i4 gate only (default), then audit
+#     STAGE=full sbatch slurm/label_instructions.sbatch       # i4 eval + train (~8 h)
+#     PROMPT=i3 STAGE=full sbatch slurm/label_instructions.sbatch   # the old v2 prompt
+#
+# i4 (2026-09-28, docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md) needs
+# data/prepared_habitat_instr_v2/landmarks_{eval,train}.jsonl (prepare_habitat_instr.py
+# landmarks). Its gate is 100 eval pairs + 100 single-route eval records; the job stops
+# after the gate so a human can audit the labels before the full run.
 #
 # One allocation serves the model and drives the client over localhost, so nothing depends
 # on a terminal or a session staying alive (on 2026-09-24 a READY server idled 8 h because
@@ -15,7 +22,7 @@
 #
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-general --instructions \
-#         outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl
+#         outputs/instr_labels_v2/train_i4.jsonl outputs/instr_labels_v2/eval_i4.jsonl
 #SBATCH --job-name=cosmos3-label-instr
 #SBATCH --partition=A100
 #SBATCH --gres=gpu:3g.40gb:1
@@ -37,17 +44,45 @@ CONCURRENCY="${CONCURRENCY:-8}"
 GATE_N="${GATE_N:-200}"
 GATE_MIN_ACCEPT="${GATE_MIN_ACCEPT:-0.9}"
 UV="${UV:-$HOME/.local/bin/uv}"
+PROMPT="${PROMPT:-i4}"
+# STAGE=gate: only the gate set, then stop (i4: a human audits it before the full run)
+# STAGE=full: skip the gate, label eval + train
+STAGE="${STAGE:-gate}"
 # unbuffered so the log shows progress; thread caps for the client's image rendering
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 unset VIRTUAL_ENV
 [ -f "$D/labelset_eval.json" ] || { echo "missing $D/labelset_eval.json — run prepare_habitat_instr.py general first"; exit 1; }
+if [ "$PROMPT" = "i4" ]; then
+    for s in eval train; do
+        [ -f "$D/landmarks_$s.jsonl" ] || { echo "missing $D/landmarks_$s.jsonl — run prepare_habitat_instr.py landmarks"; exit 1; }
+    done
+fi
+# --landmarks only for i4
+lm() { [ "$PROMPT" = "i4" ] && echo "--landmarks $D/landmarks_$1.jsonl" || true; }
 
 cosmos3_start_server
 trap 'rm -f "$ENDPOINT_FILE"; kill $SERVER_PID 2>/dev/null || true' EXIT
 cosmos3_wait_healthy
 
-if [ "$GATE_N" -gt 0 ]; then
-    echo; echo "=============== gate: $GATE_N single-route eval records ==============="
+if [ "$STAGE" = "gate" ] && [ "$PROMPT" = "i4" ]; then
+    echo; echo "=============== gate (i4): 100 eval pairs + 100 single-route eval records ==============="
+    "$UV" run python - "$D/labelset_eval.json" "$OUT/gate_split_i4.json" <<'PY'
+import json, sys
+recs = json.load(open(sys.argv[1]))
+pairs = set(list(dict.fromkeys(r["habitat_meta"]["pair_id"] for r in recs if r["habitat_meta"].get("pair_id")))[:100])
+keep = [r for r in recs if r["habitat_meta"].get("pair_id") in pairs]
+keep += [r for r in recs if not r["habitat_meta"].get("pair_id")][:100]
+json.dump(keep, open(sys.argv[2], "w"))
+print(len(keep), "gate records")
+PY
+    "$UV" run scripts/label_instructions.py --prompt i4 --split "$OUT/gate_split_i4.json" $(lm eval) \
+        --out "$OUT/gate_i4.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume
+    echo "gate labelled — audit it, then: STAGE=full sbatch slurm/label_instructions.sbatch"
+    exit 0
+fi
+
+if [ "$STAGE" = "gate" ] && [ "$GATE_N" -gt 0 ]; then
+    echo; echo "=============== gate ($PROMPT): $GATE_N single-route eval records ==============="
     "$UV" run python - "$D/labelset_eval.json" "$OUT/gate_split.json" "$GATE_N" <<'PY'
 import json, sys
 recs = [r for r in json.load(open(sys.argv[1]))
@@ -55,19 +90,19 @@ recs = [r for r in json.load(open(sys.argv[1]))
 json.dump(recs[: int(sys.argv[3])], open(sys.argv[2], "w"))
 PY
     # set -e: a failed gate (exit 2) ends the job here; the EXIT trap stops the server
-    "$UV" run scripts/label_instructions.py --split "$OUT/gate_split.json" --out "$OUT/gate_i3.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume \
+    "$UV" run scripts/label_instructions.py --prompt "$PROMPT" --split "$OUT/gate_split.json" \
+        --out "$OUT/gate_$PROMPT.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume \
         --gate --min-accept "$GATE_MIN_ACCEPT" --min-pair-survival 0
     echo "gate PASSED"
 fi
 
 for s in eval train; do
     echo; echo "=============== labelling $s ==============="
-    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i3.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume
+    "$UV" run scripts/label_instructions.py --prompt "$PROMPT" --split "$D/labelset_$s.json" $(lm $s) \
+        --out "$OUT/${s}_${PROMPT}.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume
     echo; echo "=============== retry rejected: $s ==============="
-    "$UV" run scripts/label_instructions.py --split "$D/labelset_$s.json" --out "$OUT/${s}_i3.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume --retry-rejected
+    "$UV" run scripts/label_instructions.py --prompt "$PROMPT" --split "$D/labelset_$s.json" $(lm $s) \
+        --out "$OUT/${s}_${PROMPT}.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume --retry-rejected
 done
 echo; echo "=============== done ==============="
-wc -l "$OUT"/*_i3.jsonl
+wc -l "$OUT"/*_"$PROMPT".jsonl

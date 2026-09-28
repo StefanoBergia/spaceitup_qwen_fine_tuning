@@ -34,6 +34,14 @@ for the template instruction — so that call was dropped. See INSTRUCTION_PROMP
     # record-level gate for single-route rows (no pairs in the split)
     ... --gate --min-accept 0.9 --min-pair-survival 0
 
+    # i4 (2026-09-28, the default): geometry-chosen targets, Cosmos names them. Records whose
+    # landmark row has no target get a rejected row without a Cosmos call.
+    uv run scripts/label_instructions.py --prompt i4 \
+        --split data/prepared_habitat_instr_v2/labelset_eval.json \
+        --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl \
+        --out outputs/instr_labels_v2/eval_i4.jsonl --concurrency 8 --resume
+    # i3 (the v2 prompt) needs --prompt i3
+
 Writes one JSON line per record, flushed as it goes, so a killed run keeps what it had.
 """
 
@@ -45,8 +53,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.instructions import (
-    INSTRUCTION_PROMPT_VERSION, gate_failures, generation_prompt, instruction_rejects,
-    is_side_only, parse_instruction, render_generation_jpeg, rescore_row, retry_ids, summarize_labels,
+    choose_template, gate_failures, generation_prompt, instruction_rejects, is_side_only,
+    load_landmarks, naming_prompt, parse_instruction, parse_target_reply, render_generation_jpeg,
+    render_target_jpeg, rescore_row, resolve_i4, retry_ids, summarize_labels,
 )
 from rover_vlm.labelling_io import chat_with_image, connect, prepare_output, resolve_endpoint
 
@@ -76,6 +85,10 @@ def main() -> None:
     p.add_argument("--retry-rejected", action="store_true",
                    help="with --resume: label rejected, not-yet-retried rows once more, seed + 1")
     p.add_argument("--max-drawing-refs", type=int, default=0)
+    p.add_argument("--prompt", choices=["i3", "i4"], default="i4",
+                   help="i4 (2026-09-28): name the geometry-chosen target; i3: the v2 prompt")
+    p.add_argument("--landmarks", type=Path, nargs="+", default=None,
+                   help="landmarks_*.jsonl from prepare_habitat_instr.py landmarks (i4)")
     args = p.parse_args()
 
     records = json.loads(args.split.read_text())
@@ -83,6 +96,11 @@ def main() -> None:
         keep = set(list(dict.fromkeys(r["habitat_meta"].get("pair_id") for r in records
                                       if r["habitat_meta"].get("pair_id")))[: args.limit_pairs])
         records = [r for r in records if r["habitat_meta"].get("pair_id") in keep]
+    landmarks = None
+    if args.prompt == "i4" and not args.rescore:
+        if not args.landmarks:
+            raise SystemExit("--prompt i4 needs --landmarks data/prepared_habitat_instr_v2/landmarks_*.jsonl")
+        landmarks = load_landmarks(args.landmarks, {r["id"] for r in records})
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.rescore:
         if not args.out.exists():
@@ -112,7 +130,7 @@ def main() -> None:
         print(f"retrying {len(again)} rejected rows with seed {seed}")
     todo = [r for r in records if r["id"] not in done]
     print(f"split: {args.split}  records {len(records)}  to label {len(todo)}  "
-          f"prompt {INSTRUCTION_PROMPT_VERSION}  concurrency {args.concurrency}")
+          f"prompt {args.prompt}  concurrency {args.concurrency}")
 
     if todo:
         base_url = resolve_endpoint(args.endpoint, ENDPOINT_FILE)
@@ -120,12 +138,14 @@ def main() -> None:
         print(f"endpoint: {base_url}\nmodel:    {model}\n")
 
         def label(rec):
-            """One record, both calls. Never raises: a bad sample is a recorded failure."""
+            """One record. Never raises: a bad sample is a recorded failure."""
             hm = rec["habitat_meta"]
             row = {"id": rec["id"], "pair_id": hm.get("pair_id"), "kind": hm.get("kind"),
-                   "side": hm["side"], "prompt_version": INSTRUCTION_PROMPT_VERSION}
+                   "side": hm["side"], "prompt_version": args.prompt}
             if args.retry_rejected:
                 row["retried"] = True
+            if args.prompt == "i4":
+                return label_i4(rec, row)
             # v1 records point at overlay files; v2 renders the overlay in memory
             image = hm["gen_image"] if hm.get("gen_image") else render_generation_jpeg(rec)
             t0 = time.time()
@@ -146,6 +166,30 @@ def main() -> None:
             # keep the raw reply whenever it is the only way to explain the outcome
             if args.show or not row["passed"]:
                 row["raw_gen"] = raw_gen
+            return row
+
+        def label_i4(rec, row):
+            hm = rec["habitat_meta"]
+            lm = landmarks[rec["id"]]
+            row["target"] = lm["target"]
+            if lm["target"] == "none":
+                return {**row, "reply": None, "rejects": [f"no_target:{lm['reason']}"], "passed": False}
+            template = choose_template(rec["id"], lm["target"], has_beside=True)
+            t0 = time.time()
+            try:
+                raw, fin = chat_with_image(client, model, render_target_jpeg(rec, lm["polygon"]),
+                                           naming_prompt(lm["target"], hm["side"]),
+                                           max_tokens=args.max_tokens, seed=seed)
+            except Exception as e:  # noqa: BLE001 — one bad sample must not kill the run
+                return {**row, "error": f"{type(e).__name__}: {e}"}
+            reply = parse_target_reply(raw)
+            # a template needing {beside} is only usable when Cosmos gave one
+            if "{beside}" in template and not (reply and reply.get("beside")):
+                template = choose_template(rec["id"], lm["target"], has_beside=False)
+            row.update({"template": template, "reply": reply, **resolve_i4(reply, hm["side"], template),
+                        "finish": fin, "latency_s": round(time.time() - t0, 2)})
+            if args.show or not row["passed"]:
+                row["raw_gen"] = raw
             return row
 
         started = time.time()

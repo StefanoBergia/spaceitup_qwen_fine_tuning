@@ -525,3 +525,14 @@ def test_rescore_row_i4():
     none_row = {"id": "b_L", "side": "left", "prompt_version": "i4", "reply": None,
                 "rejects": ["no_target:no_visible_target"], "passed": False}
     assert rescore_row(none_row) == none_row
+
+
+from rover_vlm.instructions import load_landmarks  # noqa: E402
+
+
+def test_load_landmarks_refuses_incomplete_coverage(tmp_path):
+    p = tmp_path / "lm.jsonl"
+    p.write_text(json.dumps({"id": "a", "target": "object", "polygon": [[0, 0], [1, 0], [1, 1]]}) + "\n")
+    assert set(load_landmarks([p], {"a"})) == {"a"}
+    with pytest.raises(SystemExit, match="1 of 2 records have no landmark row"):
+        load_landmarks([p], {"a", "b"})
