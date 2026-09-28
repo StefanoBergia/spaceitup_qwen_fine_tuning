@@ -309,7 +309,7 @@ def parse_choice(raw):
 # instruction that leans on the drawing teaches Qwen to look for something that is not there.
 _DRAWING = re.compile(
     r"\b(?:lines?|stroke|overlay|drawn|drawing|highlight\w*|marked|arrows?|badges?|magenta|"
-    r"numbered|coordinates?|options?|(?:route|path) (?:1|2|one|two)|"
+    r"numbered|coordinates?|options?|outlin\w*|contour|dimmed|cyan|(?:route|path) (?:1|2|one|two)|"
     r"(?:bold|thin|grey|gray) (?:route|path))\b",
     re.I,
 )
@@ -458,6 +458,12 @@ def rescore_row(row):
     """
     if row.get("error"):
         return row
+    if row.get("prompt_version") == "i4":
+        if row.get("reply") is None and any(r.startswith("no_target") for r in row.get("rejects", [])):
+            return row
+        new = dict(row)
+        new.update(resolve_i4(row.get("reply"), row["side"], row["template"]))
+        return new
     if row.get("prompt_version", "i1") != "i1" and row.get("instruction"):
         # i2+: no Cosmos verify call; the text rules are the verifier
         new = dict(row)
@@ -471,6 +477,137 @@ def rescore_row(row):
     new["check_correct"] = None if new["check_choice"] is None else new["check_choice"] == row["check_expected"]
     new["passed"] = bool(row.get("instruction") and not row.get("rejects") and new["check_correct"])
     return new
+
+
+# --- i4 (2026-09-28): geometry picks the target, Cosmos only names it ------------------
+# The v2 human audit found i3's landmarks ~20% wrong (75% on pairs' second route): Cosmos
+# named real objects but not the one the route goes around. i4 shows Cosmos only the target
+# that rover_vlm.landmarks chose — outlined, rest dimmed, no route — and hands it the side
+# and a sentence pattern. The name is Cosmos's; the side and the referent are geometry's.
+
+TARGET_OUTLINE_COLOR = (0, 230, 255)
+TARGET_TEMPLATES = {
+    "object": [
+        "Go {side} around the {name}.",
+        "Pass the {name} on the {side}.",
+        "Take the {side} way around the {name}.",
+        "Keep {side} of the {name}.",
+        "Go around the {name} on the {side} side.",
+        "Steer {side} around the {name}.",
+        "Pass {side} of the {name}.",
+        "Head {side} around the {name}.",
+    ],
+    "opening": [
+        "Go through the {name} on the {side}.",
+        "Take the {name} on the {side}.",
+        "Head {side} through the {name}.",
+        "Use the {name} on the {side}.",
+        "Go {side} through the {name}.",
+        "Go through the {name} to the {side} of the {beside}.",
+        "Take the {name} {side} of the {beside}.",
+        "Head for the {name} on the {side}, by the {beside}.",
+    ],
+}
+
+
+def _stable_index(key, n):
+    return int(hashlib.sha1(key.encode()).hexdigest(), 16) % n
+
+
+def choose_template(record_id, target, has_beside):
+    """A sentence pattern for the record, fixed by its id (reruns agree)."""
+    opts = [t for t in TARGET_TEMPLATES[target] if has_beside or "{beside}" not in t]
+    return opts[_stable_index(record_id, len(opts))]
+
+
+def fill_template(template, side, name, beside):
+    return template.format(side=side, name=name, beside=beside or "")
+
+
+def head_noun(name):
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    return words[-1] if words else None
+
+
+def render_target_jpeg(record, polygon):
+    """The frame with the target outlined and everything else dimmed; no route drawn."""
+    img, _ = _canvas(record)
+    W, H = img.size
+    pts = [(u * W, v * H) for u, v in polygon]
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).polygon(pts, fill=255)
+    dim = Image.eval(img, lambda p: int(p * 0.45))
+    img = Image.composite(img, dim, mask)
+    ImageDraw.Draw(img).polygon(pts, outline=TARGET_OUTLINE_COLOR, width=6)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def naming_prompt(target, side):
+    """Ask Cosmos to name the outlined target and phrase the instruction (prompt i4)."""
+    what = ("an opening the rover drives through — a doorway, a passage, a hallway or a gap "
+            "between two things" if target == "opening" else "the object the rover drives around")
+    pattern = TARGET_TEMPLATES[target][0].format(side=side, name="<name>", beside="<beside>")
+    beside = ('"beside": "<the most prominent object right next to the opening, or null>", '
+              if target == "opening" else '"beside": null, ')
+    return f"""{SCENE_INTRO}
+
+One region of the image is outlined; everything outside it is dimmed. The outlined region is
+{what}. The rover will pass it on its {side}.
+
+1. Name what is inside the outline in 1 to 5 words, the way a person would say it
+   ("grey sofa", "open doorway", "kitchen island"). Never use the words left or right in
+   the name.
+2. Say whether the outline covers one single thing (true) or several unrelated things (false).
+3. Write one instruction a person standing behind the rover would say, in your own words,
+   meaning the same as: "{pattern}". It must contain the word '{side}' and the name, and must
+   not mention the outline, the dimming, colours of the drawing, or "your left/right".
+
+{_answer_block('{"name": "<name>", ' + beside + '"single": true, "instruction": "<the instruction>"}')}"""
+
+
+def parse_target_reply(raw):
+    """{"name", "beside", "single", "instruction"} from a Cosmos i4 reply, or None."""
+    _, answer = parse_trace(raw)
+    payload = answer_payload(answer)
+    if payload is None or not isinstance(payload.get("name"), str) or not payload["name"].strip():
+        return None
+    single = payload.get("single", True)
+    if isinstance(single, str):
+        single = single.strip().lower() not in ("false", "no", "0")
+    beside = payload.get("beside")
+    beside = " ".join(beside.lower().split()) if isinstance(beside, str) and beside.strip() else None
+    text = payload.get("instruction")
+    return {"name": " ".join(payload["name"].lower().split()), "beside": beside,
+            "single": bool(single),
+            "instruction": " ".join(text.split()) if isinstance(text, str) and text.strip() else None}
+
+
+def _i4_rejects(text, side, name):
+    out = instruction_rejects(text, side=side)
+    noun = head_noun(name)
+    if text and noun and not re.search(rf"\b{re.escape(noun)}(?:e?s)?\b", text, re.I):
+        out.append("name:missing")
+    return out
+
+
+def resolve_i4(reply, side, template):
+    """The instruction for a record from its i4 reply: Cosmos's paraphrase when it passes the
+    rules, else the filled template (which must pass them too)."""
+    if reply is None:
+        return {"instruction": None, "instruction_source": None, "rejects": ["parse"], "passed": False}
+    if not reply["single"]:
+        return {"instruction": None, "instruction_source": None, "rejects": ["mask_ambiguous"], "passed": False}
+    if len(reply["name"].split()) > 5 or _DRAWING.search(reply["name"]):
+        return {"instruction": None, "instruction_source": None, "rejects": ["name:bad"], "passed": False}
+    para = reply.get("instruction")
+    if para and not _i4_rejects(para, side, reply["name"]):
+        return {"instruction": para, "instruction_source": "cosmos", "rejects": [], "passed": True}
+    filled = fill_template(template, side, reply["name"], reply.get("beside"))
+    rejects = _i4_rejects(filled, side, reply["name"])
+    return {"instruction": filled if not rejects else None, "instruction_source": "template",
+            "rejects": rejects, "passed": not rejects}
 
 
 # --- v2: every round-4 frame -----------------------------------------------------------

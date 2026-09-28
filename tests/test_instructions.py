@@ -446,3 +446,82 @@ def test_finalize_general_reports_missing_labels(two_sided_sample):
     f = build_frame(_src(two_sided_sample))
     out = finalize_general([f["plain"]], f["labelset"], {})
     assert out["stats"]["missing"] == 2 and out["stats"]["rejected"] == 0
+
+
+import io  # noqa: E402
+
+from rover_vlm.instructions import (  # noqa: E402
+    TARGET_TEMPLATES, choose_template, fill_template, head_noun, naming_prompt,
+    parse_target_reply, render_target_jpeg, resolve_i4,
+)
+
+
+def test_naming_prompt_hides_the_route_and_hands_over_the_side():
+    p = naming_prompt("object", "left")
+    assert "outlined" in p and "left" in p and "magenta" not in p
+    assert '"name"' in p and '"single"' in p
+    assert "doorway" in naming_prompt("opening", "right").lower()
+
+
+def test_parse_target_reply():
+    raw = ('<think>x</think>\n<answer>{"name": "Grey Sofa", "beside": null, "single": true, '
+           '"instruction": "Go left around the grey sofa."}</answer>')
+    r = parse_target_reply(raw)
+    assert r == {"name": "grey sofa", "beside": None, "single": True,
+                 "instruction": "Go left around the grey sofa."}
+    assert parse_target_reply("<answer>no json</answer>") is None
+    assert parse_target_reply('<answer>{"single": "false", "name": "chair"}</answer>')["single"] is False
+
+
+def test_templates_are_deterministic_and_filled():
+    t = choose_template("abc_L", "object", False)
+    assert t == choose_template("abc_L", "object", False) and t in TARGET_TEMPLATES["object"]
+    assert "{beside}" not in choose_template("abc_L", "opening", False)
+    s = fill_template("Pass the {name} on the {side}.", "right", "coffee table", None)
+    assert s == "Pass the coffee table on the right."
+
+
+def test_head_noun():
+    assert head_noun("dark wooden cabinet") == "cabinet"
+    assert head_noun("  ") is None
+
+
+def test_resolve_i4_prefers_valid_paraphrase_then_template():
+    tpl = "Go {side} around the {name}."
+    good = {"name": "grey sofa", "beside": None, "single": True,
+            "instruction": "Keep left and pass around the grey sofa."}
+    r = resolve_i4(good, "left", tpl)
+    assert r["passed"] and r["instruction_source"] == "cosmos"
+    bad_para = {**good, "instruction": "Go around the outlined thing on the left."}
+    r = resolve_i4(bad_para, "left", tpl)
+    assert r["passed"] and r["instruction_source"] == "template"
+    assert r["instruction"] == "Go left around the grey sofa."
+    assert resolve_i4({**good, "single": False}, "left", tpl)["rejects"] == ["mask_ambiguous"]
+    assert resolve_i4(None, "left", tpl)["rejects"] == ["parse"]
+
+
+def test_resolve_i4_rejects_a_name_with_a_side_word():
+    reply = {"name": "right cabinet", "beside": None, "single": True, "instruction": "Go left."}
+    r = resolve_i4(reply, "left", "Go {side} around the {name}.")
+    assert not r["passed"] and "side:opposite" in r["rejects"]
+
+
+def test_render_target_jpeg(tmp_path):
+    from PIL import Image
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64), (120, 120, 120)).save(img)
+    rec = {"image": [str(img)]}
+    out = render_target_jpeg(rec, [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]])
+    im = Image.open(io.BytesIO(out)).convert("RGB")
+    assert im.getpixel((5, 5))[0] < im.getpixel((im.width // 2, im.height // 2))[0]   # outside dimmed
+
+
+def test_rescore_row_i4():
+    row = {"id": "a_L", "side": "left", "prompt_version": "i4", "template": "Go {side} around the {name}.",
+           "reply": {"name": "grey sofa", "beside": None, "single": True,
+                     "instruction": "Go left around the grey sofa."}, "passed": False}
+    new = rescore_row(row)
+    assert new["passed"] and new["instruction_source"] == "cosmos"
+    none_row = {"id": "b_L", "side": "left", "prompt_version": "i4", "reply": None,
+                "rejects": ["no_target:no_visible_target"], "passed": False}
+    assert rescore_row(none_row) == none_row
