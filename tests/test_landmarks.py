@@ -52,7 +52,7 @@ def test_densify_components_hull():
 
 
 from rover_vlm.landmarks import (  # noqa: E402
-    REASONS, crossing_excursion, select_target,
+    REASONS, select_target,
 )
 
 
@@ -82,49 +82,63 @@ def _box_route():
             tuple(np.array([2.5, 3.5]) + 0.9 * LEFT), (2.5, 4.6)]
 
 
-def test_object_between_route_and_chord(tmp_path):
+def test_object_the_route_bends_around(tmp_path):
     s = _free()
     s[45:56, 45:56] = OCC                                # 0.55 m box centred (2.5, 2.5)
     t = select_target(_write(tmp_path / "s", s, _box_route()), 0)
     assert t["target"] == "object" and t["reason"] is None
-    assert np.allclose(t["world_xz"], [2.5, 2.5], atol=0.2)
-    u0, v0, u1, v1 = t["bbox"]
-    # only the part of the box between chord (x = 2.5, image centre) and route (image left)
-    # is enclosed, so the outline sits just left of centre
-    assert u0 < 0.5 and u1 <= 0.55
+    assert np.allclose(t["world_xz"], [2.5, 2.5], atol=0.3)
     assert len(t["polygon"]) >= 3
 
 
-def test_opening_in_doorway_wall(tmp_path):
+def test_nearest_obstacle_passed_not_the_largest(tmp_path):
     s = _free()
-    s[60:62, :] = OCC                                    # wall across z = 3.0
-    s[60:62, 55:75] = FREE                               # 1.0 m gap, x = 2.75 .. 3.75
-    route = [(2.5, 0.2), (3.25, 2.0), (3.25, 3.6), (2.5, 4.6)]
-    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
-    assert t["target"] == "opening"
-    assert t["diag"]["width_m"] == pytest.approx(1.0, abs=0.15)
-
-
-def test_hidden_opening_falls_back_to_the_blocking_object(tmp_path):
-    s = _free()
-    s[60:62, :] = OCC
-    s[60:62, 55:75] = FREE
-    s[30:32, 55:72] = OCC                                # screen x 2.75..3.6 at z 1.5, on the camera->gap ray
-    # route stays on the image-left side of the chord (x >= 2.5) and passes outside the screen
-    route = [(2.5, 0.2), (3.9, 1.0), (3.9, 2.0), (3.25, 2.6), (3.25, 3.6), (2.5, 4.6)]
-    assert crossing_excursion(np.array(route, float)) == 0.0
-    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
+    s[45:56, 45:56] = OCC                                # box 0.6 m inside the route
+    s[28:32, 60:62] = OCC                                # small post x 3.0..3.1, z 1.4..1.6, 0.3 m inside
+    t = select_target(_write(tmp_path / "s", s, _box_route()), 0)
     assert t["target"] == "object"
-    assert 2.6 < t["world_xz"][0] < 3.7 and 1.3 < t["world_xz"][1] < 1.8   # the screen, not the wall
+    assert np.allclose(t["world_xz"], [3.05, 1.5], atol=0.15)
 
 
-def test_route_crossing_chord_dropped(tmp_path):
+def test_obstacle_on_the_outside_of_the_bend_is_not_a_target(tmp_path):
     s = _free()
-    s[45:56, 45:56] = OCC
-    route = [(2.5, 0.2), (3.5, 1.5), (1.5, 3.0), (2.5, 4.6)]   # bends one way then the other
-    assert crossing_excursion(np.array(route, float)) > 0.3
+    s[20:80, 74:76] = OCC                                # wall x 3.7..3.8 alongside, outside the bend
+    t = select_target(_write(tmp_path / "s", s, _box_route()), 0)
+    assert (t["target"], t["reason"]) == ("none", "no_visible_target")
+
+
+def test_close_obstacle_counts_although_its_floor_is_below_the_image(tmp_path):
+    s = _free()
+    s[11:13, 45:47] = OCC                                # pillar x 2.25..2.35, z 0.55..0.65 (0.4 m ahead)
+    route = [(2.5, 0.2), (3.4, 1.5), (3.4, 3.5), (2.5, 4.6)]
     t = select_target(_write(tmp_path / "s", s, route), 0)
-    assert t["target"] == "none" and t["reason"] == "route_crosses_chord"
+    assert t["target"] == "object"
+    assert np.allclose(t["world_xz"], [2.3, 0.6], atol=0.1)
+    assert t["bbox"][1] < 1.0                            # its column reaches into the frame
+
+
+def test_hidden_obstacle_skipped_for_the_one_in_front(tmp_path):
+    s = _free()
+    s[45:56, 50:56] = OCC                                # box x 2.5..2.8, z 2.25..2.8
+    s[20:22, 51:60] = OCC                                # screen x 2.55..3.0 at z 1.0, in front of it
+    t = select_target(_write(tmp_path / "s", s, _box_route()), 0)
+    assert t["target"] == "object"
+    assert 0.9 < t["world_xz"][1] < 1.2                  # the screen, not the box behind it
+
+
+def test_bends_both_ways_obstacle_passed_on_the_labels_side(tmp_path):
+    # the route first swings right (x 2.2), then bows left overall (label "left" = +x). The side
+    # word must be true for the named obstacle: a post the route passes with the post on its
+    # right (route goes left of it) is a target; one passed the other way round is not.
+    route = [(2.5, 0.2), (2.2, 1.0), (2.2, 1.6), (3.4, 2.6), (3.4, 3.6), (2.5, 4.6)]
+    s = _free()
+    s[24:28, 38:40] = OCC                                # post x 1.9..2.0, z 1.2..1.4: on the route's right
+    t = select_target(_write(tmp_path / "a", s, route), 0)
+    assert t["target"] == "object" and np.allclose(t["world_xz"], [1.95, 1.3], atol=0.1)
+    s = _free()
+    s[24:28, 48:50] = OCC                                # post x 2.4..2.5: on the route's left
+    t = select_target(_write(tmp_path / "b", s, route), 0)
+    assert (t["target"], t["reason"]) == ("none", "no_visible_target")
 
 
 def test_nothing_visible(tmp_path):
@@ -138,8 +152,7 @@ def test_bad_inputs_are_reasons_not_crashes(tmp_path):
     assert select_target(d, 7)["reason"] == "bad_candidate"
     (d / "state.npz").unlink()
     assert select_target(d, 0)["reason"] == "no_state"
-    assert set(REASONS) >= {"bad_candidate", "no_state", "no_visible_target",
-                            "route_crosses_chord", "both_sides", "target_too_small"}
+    assert set(REASONS) == {"bad_candidate", "no_state", "no_visible_target", "target_too_small"}
 
 
 REAL = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train/"
@@ -227,29 +240,3 @@ def test_target_category_skips_the_wall_behind_an_object():
     box = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
     assert target_category(ids, cats, box) == "couch"
     assert target_category(ids, cats, box, name="white wall") == "wall"   # the name is the wall
-
-
-def test_opening_must_be_in_the_wall_the_chord_crosses(tmp_path):
-    # review: the narrowest gap anywhere on the route was taken; a squeeze between two
-    # pieces of furniture near the start must not beat the doorway in the crossed wall
-    s = _free()
-    s[60:62, :] = OCC                                    # wall across z = 3.0 (crossed by the chord)
-    s[60:62, 55:75] = FREE                               # doorway 1.0 m wide, x = 2.75 .. 3.75
-    s[24:30, 58:60] = OCC                                # two posts 0.65 m apart at z ~1.3, off the
-    s[24:30, 73:75] = OCC                                # camera->doorway ray: x 2.9..3.0 and 3.65..3.75
-    route = [(2.5, 0.2), (3.25, 1.0), (3.25, 3.6), (2.5, 4.6)]
-    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
-    assert t["target"] == "opening"
-    assert 2.8 < t["world_xz"][1] < 3.2                  # the doorway, not the posts at z ~1.3
-
-
-def test_blobs_on_both_sides_of_the_chord_dropped(tmp_path):
-    # review: both_sides had no test. The route bows left (+x) to 3.4 but first dips 0.2 m
-    # to the right (x = 2.3), enclosing a thin post there as well as the box on the left.
-    s = _free()
-    s[45:56, 52:60] = OCC                                # box x 2.6..3.0, z 2.25..2.8 (left of chord)
-    s[16:22, 47:49] = OCC                                # post x 2.35..2.45, z 0.8..1.1 (right of chord)
-    route = [(2.5, 0.2), (2.3, 0.6), (2.3, 1.3), (3.4, 2.0), (3.4, 3.5), (2.5, 4.6)]
-    assert crossing_excursion(np.array(route, float)) <= 0.3        # passes the crossing filter
-    t = select_target(_write(tmp_path / "s", s, route), 0)
-    assert (t["target"], t["reason"]) == ("none", "both_sides")

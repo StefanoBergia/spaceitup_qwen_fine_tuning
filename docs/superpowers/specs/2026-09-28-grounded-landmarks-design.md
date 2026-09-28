@@ -62,27 +62,32 @@ Camera: level pinhole, hfov 90°, height 0.8 m above the floor, at `pose_xz` fac
 
 For the record's route (its candidate polyline):
 
-1. **Opening** (tried first, `doorway` frames only — in `detour` frames the obstacle is the better landmark): where the route passes through the wall line — the
-   narrowest gap between occupied cells along the route, near the blob the chord
-   crosses. Usable when the gap point projects inside the image and the route is not
-   hidden there. Target = the image region spanning the gap's two flanks, floor to door
-   height (~2.0 m), clipped to the image.
-2. **Object** (fallback): occupied blobs in the region enclosed between the route and the
-   straight chord. Each blob's footprint is projected as columns from the
-   floor to 1.0 m (the 2D map has no heights). Usable when
-   its visible projected area ≥ a minimum; the largest visible one is the target.
-3. **None**, with a reason code: `no_visible_target`, `both_sides` (visible enclosed
-   obstacles on both sides of the chord — the "left and right in the same image" routes),
-   `target_out_of_frame`, `target_hidden`.
+**Revised 2026-09-28 after the geometry audit failed (59/98 right; openings 8/23; 16 of 28
+dropped records had an obvious obstacle). User decision: objects only.**
+
+1. **Object**: the visible obstacle the route passes closest to (within 1.0 m, past its first
+   0.3 m) that lies on the route's *inner* side at that point — toward the straight chord,
+   i.e. what the route bends around. This is exactly "the route passes it on the side its
+   label says", so the metadata side word is true of the named object even on routes that
+   bend both ways; an obstacle passed the other way round is never named. An obstacle
+   counts as visible when part of its floor-to-1.0 m column is in frame and the camera ray
+   meets it first (close obstacles have their floor below the image). The outline is the
+   convex hull of its visible cells within 1.5 m of the route (a long wall is outlined only
+   where the route passes it), floor to 1.0 m.
+2. **None**, with a reason code: `no_visible_target`, `target_too_small`, `bad_candidate`,
+   `no_state`.
+
+(The first version's opening search, `route_crosses_chord` and `both_sides` drops were
+removed: the audit showed users name the object, not the doorway, and most two-way routes
+have a nameable obstacle on the label's side.)
 
 Output `data/prepared_habitat_instr_v2/landmarks_{train,eval}.jsonl`, one row per labelset
 record: `id`, `target` (`opening` | `object` | `none`), `reason`, `bbox` (normalised),
 `mask` (polygon in normalised image coords), `world_xz` (target centre), and diagnostics
 (gap width, blob area, visible fraction).
 
-Pairs: a detour pair's two routes enclose the same blob (same target, opposite sides); a
-doorway pair's routes use different openings, so the two instructions name different
-openings.
+Pairs: the two routes of a pair usually pass different obstacles or the same one on
+opposite sides; each record's instruction names what its own route passes.
 
 ### 2. Naming and sentence — prompt i4 (`instructions.py`, `label_instructions.py`)
 
