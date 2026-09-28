@@ -127,7 +127,7 @@ const tone = (v) => (v === "ok" || v === "none_ok") ? "ok" : v === "unsure" ? "u
 if (DATA.mode === "geometry") {
   document.title = "Landmark Geometry Audit";
   $("h1").textContent = "Landmark Geometry Audit";
-  $("sub").textContent = "Each frame shows a route (magenta), its straight entry → goal line (dashed) and the target the geometry picked (cyan outline): the opening the route passes through, or the object it bends around. Is that the thing an instruction for this route should name?";
+  $("sub").textContent = "Each frame shows a route (magenta), its straight entry → goal line (dashed) and the object the geometry picked (cyan outline). Would the instruction above the buttons be true for this route: is the outlined object something the route goes around, on that side? Other objects may be just as good; mark it true if this one is correct.";
 }
 VERDICTS.forEach((d, i) => {
   const b = document.createElement("button");
@@ -169,7 +169,8 @@ function render() {
   $("pos").textContent = `${idx + 1} / ${items.length}`;
   $("rid").textContent = it.id;
   $("instr").textContent = it.instruction ? `“${it.instruction}”`
-    : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})` : `Target: ${it.target}`;
+    : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})`
+    : `“Go ${it.side} around the outlined object.”`;
   $("tgtleg").hidden = !it.target || it.target === "none";
   $("side").textContent = `bows ${it.side} of the line`;
   $("kind").textContent = it.kind === "opposite" ? "other side of a two-route pair" : (it.has_alt ? "one side of a two-route pair" : "single-route frame");

@@ -139,7 +139,8 @@ START_SKIP_M = 0.3          # ignore what the route passes in its first metres (
 KEEP_NEAR_ROUTE_M = 1.5     # outline only the part of a long blob (a wall) near the route
 MIN_VISIBLE_CELLS = 4       # visible occupied cells for an object to count
 MIN_POLY_AREA = 0.002       # outline area as a fraction of the image
-REASONS = ("bad_candidate", "no_state", "no_visible_target", "target_too_small")
+CROSSING_SNAP_M = 0.8       # chord.crossing_xz to the nearest occupied cell
+REASONS = ("bad_candidate", "no_state", "side_mismatch", "no_visible_target", "target_too_small")
 
 
 def _none(reason, **diag):
@@ -185,10 +186,56 @@ def _seen_first(grid, cam, lab, xz, rc):
     return first is None or lab[first] == lab[tuple(rc)]
 
 
-def select_target(sample_dir, candidate_index):
+def _dilate(mask):
+    out = mask.copy()
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            out[max(dr, 0):mask.shape[0] + min(dr, 0), max(dc, 0):mask.shape[1] + min(dc, 0)] |= \
+                mask[max(-dr, 0):mask.shape[0] + min(-dr, 0), max(-dc, 0):mask.shape[1] + min(-dc, 0)]
+    return out
+
+
+def _outline(cam, vis, source, **diag):
+    outline = np.vstack([cam.uv(vis)[0], cam.uv(vis, OBJECT_TOP_M)[0]])
+    return _finish("object", convex_hull(outline), vis.mean(0), source=source,
+                   visible_cells=len(vis), **diag)
+
+
+def crossing_target(grid, cam, crossing_xz):
+    """The obstacle the straight start->goal line runs into (Habitat's chord.crossing_xz):
+    what the route is going around by construction. Blobs one empty cell apart are one
+    obstacle (the camera sees the front face; the crossing cell may be on the back one).
+    Returns the outline dict, or None when it is not on the map or not in view."""
+    if crossing_xz is None:
+        return None
+    occm = grid.s == OCC
+    occ = np.argwhere(occm)
+    if not len(occ):
+        return None
+    d = np.linalg.norm(grid.xz(occ) - np.asarray(crossing_xz, float), axis=1)
+    if d.min() > CROSSING_SNAP_M:
+        return None
+    merged, _ = components(_dilate(occm))
+    lab = np.where(occm, merged, 0)
+    cells = np.argwhere(lab == lab[tuple(occ[int(d.argmin())])])
+    bxz = grid.xz(cells)
+    keep = (np.linalg.norm(bxz - np.asarray(crossing_xz, float), axis=1) <= KEEP_NEAR_ROUTE_M) \
+        & column_in_frame(cam, bxz)
+    vis = np.array([q for q, rc, ok in zip(bxz, cells, keep) if ok and _seen_first(grid, cam, lab, q, rc)])
+    if len(vis) < MIN_VISIBLE_CELLS:
+        return None
+    return _outline(cam, vis, "crossing", blob_cells=len(cells))
+
+
+def select_target(sample_dir, candidate_index, side=None):
     """The object an instruction for this route should name, or a reason there is none.
 
-    The target is the visible obstacle the route passes closest to (within MAX_PASS_DIST_M,
+    `side` (the record's label side): when given, a route that does not bow that way from
+    its straight line is dropped (`side_mismatch`, ~1.4% of records) — its side word could
+    not be true of any obstacle the route goes around.
+
+    First choice is the obstacle the straight line runs into (crossing_target): audit r2
+    showed that is what people name. Otherwise, the visible obstacle the route passes closest to (within MAX_PASS_DIST_M,
     past the first START_SKIP_M) that lies on the route's inner side there — toward the
     straight start->goal line, i.e. what the route bends around. That is exactly "the route
     passes it on the side its label says", so the side word stays the metadata side and is
@@ -210,6 +257,11 @@ def select_target(sample_dir, candidate_index):
     pts = densify(route, 0.05)
     a, nrm = _chord_frame(route)
     main = np.sign(((pts - a) @ nrm).mean()) or 1.0
+    if side is not None and ("right" if main > 0 else "left") != side:
+        return _none("side_mismatch")
+    t = crossing_target(grid, cam, meta.get("chord", {}).get("crossing_xz"))
+    if t is not None:
+        return t
     d = np.gradient(pts, axis=0)
     d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
     normals = np.stack([-d[:, 1], d[:, 0]], 1)          # same handedness as the chord normal
@@ -238,6 +290,4 @@ def select_target(sample_dir, candidate_index):
                     if ok and _seen_first(grid, cam, lab, q, rc)])
     if len(vis) < MIN_VISIBLE_CELLS:
         return _none("no_visible_target", visible_cells=len(vis))
-    outline = np.vstack([cam.uv(vis)[0], cam.uv(vis, OBJECT_TOP_M)[0]])
-    return _finish("object", convex_hull(outline), vis.mean(0),
-                   pass_dist_m=round(best[0], 3), visible_cells=len(vis), blob_cells=len(cells))
+    return _outline(cam, vis, "nearest", pass_dist_m=round(best[0], 3), blob_cells=len(cells))

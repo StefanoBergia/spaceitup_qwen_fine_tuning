@@ -141,6 +141,42 @@ def test_bends_both_ways_obstacle_passed_on_the_labels_side(tmp_path):
     assert (t["target"], t["reason"]) == ("none", "no_visible_target")
 
 
+def test_obstacle_on_the_straight_line_wins_over_a_nearer_one(tmp_path):
+    # audit r2: the named object is usually what blocks the straight line to the goal
+    # (Habitat's chord.crossing_xz), even when the route passes something else closer
+    s = _free()
+    s[45:56, 45:56] = OCC                                # box on the chord, x 2.25..2.8, z 2.25..2.8
+    s[28:32, 60:62] = OCC                                # post 0.3 m inside the route
+    d = _write(tmp_path / "s", s, _box_route(), crossing=[2.5, 2.25])
+    t = select_target(d, 0, side="left")
+    assert t["target"] == "object" and t["diag"]["source"] == "crossing"
+    assert np.allclose(t["world_xz"], [2.5, 2.5], atol=0.3)
+
+
+def test_unmapped_crossing_falls_back_to_the_nearest_obstacle(tmp_path):
+    s = _free()
+    s[28:32, 60:62] = OCC                                # only the post; nothing near the crossing
+    t = select_target(_write(tmp_path / "s", s, _box_route(), crossing=[1.0, 4.0]), 0, side="left")
+    assert t["target"] == "object" and t["diag"]["source"] == "nearest"
+    assert np.allclose(t["world_xz"], [3.05, 1.5], atol=0.15)
+
+
+def test_crossing_obstacle_split_by_a_gap_is_one_obstacle(tmp_path):
+    # the camera sees the front face; the crossing cell is on the back face, one empty cell behind
+    s = _free()
+    s[45:47, 45:56] = OCC                                # front face z 2.25..2.35
+    s[48:56, 45:56] = OCC                                # back part z 2.4..2.8, 5 cm gap
+    t = select_target(_write(tmp_path / "s", s, _box_route(), crossing=[2.5, 2.7]), 0, side="left")
+    assert t["target"] == "object" and t["diag"]["source"] == "crossing"
+
+
+def test_route_bowing_against_its_label_is_dropped(tmp_path):
+    s = _free()
+    s[45:56, 45:56] = OCC
+    t = select_target(_write(tmp_path / "s", s, _box_route(), crossing=[2.5, 2.25]), 0, side="right")
+    assert (t["target"], t["reason"]) == ("none", "side_mismatch")
+
+
 def test_nothing_visible(tmp_path):
     route = [(2.5, 0.2), (3.4, 2.0), (2.5, 4.6)]
     t = select_target(_write(tmp_path / "s", _free(), route), 0)
@@ -152,7 +188,7 @@ def test_bad_inputs_are_reasons_not_crashes(tmp_path):
     assert select_target(d, 7)["reason"] == "bad_candidate"
     (d / "state.npz").unlink()
     assert select_target(d, 0)["reason"] == "no_state"
-    assert set(REASONS) == {"bad_candidate", "no_state", "no_visible_target", "target_too_small"}
+    assert set(REASONS) == {"bad_candidate", "no_state", "side_mismatch", "no_visible_target", "target_too_small"}
 
 
 REAL = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train/"

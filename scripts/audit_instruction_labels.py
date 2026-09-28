@@ -58,9 +58,11 @@ VERDICTS = {
         {"v": "side", "label": "Wrong side", "help": "Route goes the other way round the named object"},
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous to judge from this frame"},
     ],
+    # round 3 (2026-09-28): the question is whether the instruction would be TRUE, not whether
+    # the outline is the one object a person would pick — several are often defensible
     "geometry": [
-        {"v": "ok", "label": "Right target", "help": "The outline is the opening the route uses / the object it goes around"},
-        {"v": "wrong", "label": "Wrong target", "help": "The outline is on something else"},
+        {"v": "ok", "label": "True instruction", "help": "\"Go <side> around the outlined object\" is correct for this route"},
+        {"v": "wrong", "label": "False instruction", "help": "Wrong object (not something the route goes around) or wrong side"},
         {"v": "none_ok", "label": "No target, correctly", "help": "Nothing nameable; dropping this record is right"},
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
     ],

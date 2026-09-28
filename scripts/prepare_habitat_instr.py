@@ -251,7 +251,7 @@ def landmark_row(rec):
     hm = rec["habitat_meta"]
     sample_dir = Path(rec["image"][0]).parent
     try:
-        t = select_target(sample_dir, hm["candidate_index"])
+        t = select_target(sample_dir, hm["candidate_index"], side=hm["side"])
     except Exception as e:  # noqa: BLE001 — one bad sample is a counted reason, not a dead stage
         t = {"target": "none", "reason": "error", "polygon": [], "bbox": None,
              "world_xz": None, "diag": {"error": f"{type(e).__name__}: {e}"}}
