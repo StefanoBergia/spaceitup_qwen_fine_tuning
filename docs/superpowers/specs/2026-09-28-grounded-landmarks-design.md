@@ -62,14 +62,14 @@ Camera: level pinhole, hfov 90°, height 0.8 m above the floor, at `pose_xz` fac
 
 For the record's route (its candidate polyline):
 
-1. **Opening** (tried first): where the route passes through the wall line — the
+1. **Opening** (tried first, `doorway` frames only — in `detour` frames the obstacle is the better landmark): where the route passes through the wall line — the
    narrowest gap between occupied cells along the route, near the blob the chord
    crosses. Usable when the gap point projects inside the image and the route is not
    hidden there. Target = the image region spanning the gap's two flanks, floor to door
    height (~2.0 m), clipped to the image.
 2. **Object** (fallback): occupied blobs in the region enclosed between the route and the
    straight chord. Each blob's footprint is projected as columns from the floor to the
-   rover height band (0–0.8 m, plus top of blob if taller cells are marked). Usable when
+   floor to 1.0 m (the 2D map has no heights). Usable when
    its visible projected area ≥ a minimum; the largest visible one is the target.
 3. **None**, with a reason code: `no_visible_target`, `both_sides` (visible enclosed
    obstacles on both sides of the chord — the "left and right in the same image" routes),
