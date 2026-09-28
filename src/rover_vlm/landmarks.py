@@ -184,11 +184,29 @@ def _finish(kind, poly, world_xz, **diag):
             "diag": {"area": round(area, 5), **diag}}
 
 
-def find_opening(grid, route):
+def crossed_blob(grid, crossing_xz, radius_m=0.5):
+    """Mask of the occupied blob the straight chord runs into (its occupied cell nearest
+    `crossing_xz`, within radius_m), or None when the map has no such cell."""
+    if crossing_xz is None:
+        return None
+    occ = np.argwhere(grid.s == OCC)
+    if not len(occ):
+        return None
+    d = np.linalg.norm(grid.xz(occ) - np.asarray(crossing_xz, float), axis=1)
+    if d.min() > radius_m:
+        return None
+    lab, _ = components(grid.s == OCC)
+    r, c = occ[int(d.argmin())]
+    return lab == lab[r, c]
+
+
+def find_opening(grid, route, wall=None):
     """Narrowest rover-passable gap between occupied cells that the route passes through.
 
     At each route point, scan perpendicular both ways for the first occupied cell; a point
-    with a hit on both sides within MAX_OPENING_M is a gap. Returns the narrowest one with
+    with a hit on both sides within MAX_OPENING_M is a gap. With `wall` (a cell mask), a gap
+    counts only if one of its flanks is in it — the doorway is in the wall the chord crosses,
+    not a squeeze between furniture elsewhere on the route. Returns the narrowest one with
     width in [MIN_OPENING_M, MAX_OPENING_M] as {"width_m", "centre", "flanks"} or None.
     """
     pts = densify(route, 0.05)
@@ -207,6 +225,8 @@ def find_opening(grid, route):
                     break
             hits.append(hit)
         if hits[0] is None or hits[1] is None:
+            continue
+        if wall is not None and not any(wall[tuple(np.round(grid.rc(h)[0]).astype(int))] for h in hits):
             continue
         w = float(np.linalg.norm(hits[0] - hits[1]))
         if MIN_OPENING_M <= w <= MAX_OPENING_M and (best is None or w < best["width_m"]):
@@ -245,7 +265,8 @@ def enclosed_blobs(grid, cam, route):
 def select_target(sample_dir, candidate_index):
     """The thing an instruction for this route should name, or a reason there is none.
 
-    Order: the opening the route passes through (doorway frames, if the camera sees it),
+    Order: the opening the route passes through in the wall the chord crosses (doorway
+    frames whose crossed wall is on the map, if the camera sees the opening),
     else the most visible occupied blob between the route and its chord, else none.
     """
     sd = Path(sample_dir)
@@ -262,8 +283,9 @@ def select_target(sample_dir, candidate_index):
     grid = Grid.load(sd / "state.npz")
     cam = Camera(meta["pose_xz"], meta["heading_xz"])
 
-    if meta.get("flavor") == "doorway":
-        op = find_opening(grid, route)
+    wall = crossed_blob(grid, meta.get("chord", {}).get("crossing_xz")) if meta.get("flavor") == "doorway" else None
+    if wall is not None:
+        op = find_opening(grid, route, wall)
         if op is not None:
             c = op["centre"]
             uvc, fc = cam.uv([c])

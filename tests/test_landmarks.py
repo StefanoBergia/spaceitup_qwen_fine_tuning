@@ -56,13 +56,14 @@ from rover_vlm.landmarks import (  # noqa: E402
 )
 
 
-def _write(d, state, route, *, flavor="detour", pose=(2.5, 0.2), heading=(0.0, 1.0)):
+def _write(d, state, route, *, flavor="detour", pose=(2.5, 0.2), heading=(0.0, 1.0), crossing=None):
     """A synthetic sample dir: 5 m x 5 m map at 5 cm, camera at `pose` facing +z."""
     d.mkdir(parents=True, exist_ok=True)
     np.savez(d / "state.npz", state=state, mpp=0.05, x_min=0.0, z_min=0.0)
     cands = [{"label": "left", "polyline_xz": [list(map(float, p)) for p in route]}]
     meta = {"pose_xz": list(pose), "heading_xz": list(heading), "flavor": flavor,
-            "chord": {"goal": [route[-1][0], 0.0, route[-1][1]], "floor_height": 0.0},
+            "chord": {"goal": [route[-1][0], 0.0, route[-1][1]], "floor_height": 0.0,
+                      "crossing_xz": crossing},
             "candidates": cands}
     (d / "meta.json").write_text(json.dumps(meta))
     return d
@@ -99,7 +100,7 @@ def test_opening_in_doorway_wall(tmp_path):
     s[60:62, :] = OCC                                    # wall across z = 3.0
     s[60:62, 55:75] = FREE                               # 1.0 m gap, x = 2.75 .. 3.75
     route = [(2.5, 0.2), (3.25, 2.0), (3.25, 3.6), (2.5, 4.6)]
-    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway"), 0)
+    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
     assert t["target"] == "opening"
     assert t["diag"]["width_m"] == pytest.approx(1.0, abs=0.15)
 
@@ -112,7 +113,7 @@ def test_hidden_opening_falls_back_to_the_blocking_object(tmp_path):
     # route stays on the image-left side of the chord (x >= 2.5) and passes outside the screen
     route = [(2.5, 0.2), (3.9, 1.0), (3.9, 2.0), (3.25, 2.6), (3.25, 3.6), (2.5, 4.6)]
     assert crossing_excursion(np.array(route, float)) == 0.0
-    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway"), 0)
+    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
     assert t["target"] == "object"
     assert 2.6 < t["world_xz"][0] < 3.7 and 1.3 < t["world_xz"][1] < 1.8   # the screen, not the wall
 
@@ -226,3 +227,17 @@ def test_target_category_skips_the_wall_behind_an_object():
     box = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
     assert target_category(ids, cats, box) == "couch"
     assert target_category(ids, cats, box, name="white wall") == "wall"   # the name is the wall
+
+
+def test_opening_must_be_in_the_wall_the_chord_crosses(tmp_path):
+    # review: the narrowest gap anywhere on the route was taken; a squeeze between two
+    # pieces of furniture near the start must not beat the doorway in the crossed wall
+    s = _free()
+    s[60:62, :] = OCC                                    # wall across z = 3.0 (crossed by the chord)
+    s[60:62, 55:75] = FREE                               # doorway 1.0 m wide, x = 2.75 .. 3.75
+    s[24:30, 58:60] = OCC                                # two posts 0.65 m apart at z ~1.3, off the
+    s[24:30, 73:75] = OCC                                # camera->doorway ray: x 2.9..3.0 and 3.65..3.75
+    route = [(2.5, 0.2), (3.25, 1.0), (3.25, 3.6), (2.5, 4.6)]
+    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
+    assert t["target"] == "opening"
+    assert 2.8 < t["world_xz"][1] < 3.2                  # the doorway, not the posts at z ~1.3
