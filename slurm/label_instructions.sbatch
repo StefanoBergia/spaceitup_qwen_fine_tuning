@@ -7,7 +7,7 @@
 #
 # i4 (2026-09-28, docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md) needs
 # data/prepared_habitat_instr_v2/landmarks_{eval,train}.jsonl (prepare_habitat_instr.py
-# landmarks). Its gate is 100 eval pairs + 100 single-route eval records; the job stops
+# landmarks). Its gate is the first 300 eval records with a target; the job stops
 # after the gate so a human can audit the labels before the full run.
 #
 # One allocation serves the model and drives the client over localhost, so nothing depends
@@ -65,14 +65,15 @@ trap 'rm -f "$ENDPOINT_FILE"; kill $SERVER_PID 2>/dev/null || true' EXIT
 cosmos3_wait_healthy
 
 if [ "$STAGE" = "gate" ] && [ "$PROMPT" = "i4" ]; then
-    echo; echo "=============== gate (i4): 100 eval pairs + 100 single-route eval records ==============="
-    "$UV" run python - "$D/labelset_eval.json" "$OUT/gate_split_i4.json" <<'PY'
+    # the first 300 eval records that have a target: after the route_bends_both_ways drop
+    # (2026-09-28) almost no pair keeps both sides, so a pair-based gate would label nothing
+    echo; echo "=============== gate (i4): 300 eval records with a landmark target ==============="
+    "$UV" run python - "$D/labelset_eval.json" "$D/landmarks_eval.jsonl" "$OUT/gate_split_i4.json" <<'PY'
 import json, sys
 recs = json.load(open(sys.argv[1]))
-pairs = set(list(dict.fromkeys(r["habitat_meta"]["pair_id"] for r in recs if r["habitat_meta"].get("pair_id")))[:100])
-keep = [r for r in recs if r["habitat_meta"].get("pair_id") in pairs]
-keep += [r for r in recs if not r["habitat_meta"].get("pair_id")][:100]
-json.dump(keep, open(sys.argv[2], "w"))
+has = {json.loads(l)["id"] for l in open(sys.argv[2]) if json.loads(l)["target"] != "none"}
+keep = [r for r in recs if r["id"] in has][:300]
+json.dump(keep, open(sys.argv[3], "w"))
 print(len(keep), "gate records")
 PY
     "$UV" run scripts/label_instructions.py --prompt i4 --split "$OUT/gate_split_i4.json" $(lm eval) \
