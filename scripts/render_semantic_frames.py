@@ -64,17 +64,23 @@ def main():
             print(f"[{scene}] SIM FAILED\n{traceback.format_exc()}", flush=True)
             continue
         try:
-            cats = json.dumps({int(o.semantic_id): o.category.name()
+            cats = json.dumps({int(o.semantic_id): (o.category.name() if o.category else "unknown")
                                for o in sim.semantic_scene.objects if o is not None})
             for d in todo:
-                meta = json.loads((d / "meta.json").read_text())
-                fh = meta["chord"]["floor_height"]
-                set_agent_pose(sim, [meta["pose_xz"][0], fh, meta["pose_xz"][1]],
-                               [meta["heading_xz"][0], 0.0, meta["heading_xz"][1]])
-                ids = np.asarray(sim.get_sensor_observations()["semantic"])
-                ids = ids.astype(np.uint16 if ids.max() < 65536 else np.uint32)
-                np.savez_compressed(args.out / f"{d.name}.npz", ids=ids, categories=cats)
-                done += 1
+                # one bad sample is a counted failure: re-raising would stop the job on the same
+                # sample at every resubmit (the run resumes from where it died)
+                try:
+                    meta = json.loads((d / "meta.json").read_text())
+                    fh = meta["chord"]["floor_height"]
+                    set_agent_pose(sim, [meta["pose_xz"][0], fh, meta["pose_xz"][1]],
+                                   [meta["heading_xz"][0], 0.0, meta["heading_xz"][1]])
+                    ids = np.asarray(sim.get_sensor_observations()["semantic"])
+                    ids = ids.astype(np.uint16 if ids.max() < 65536 else np.uint32)
+                    np.savez_compressed(args.out / f"{d.name}.npz", ids=ids, categories=cats)
+                    done += 1
+                except Exception:
+                    fail += 1
+                    print(f"[{scene}] {d.name} FAILED\n{traceback.format_exc()}", flush=True)
         finally:
             sim.close()
         print(f"[{n}/{len(scenes)}] {scene}: {len(todo)} frames  total {done}  "
