@@ -1383,10 +1383,10 @@ Habitat has no route and reports which way the prediction bends (`metrics.json` 
 
 A 100-label human audit of the i3 labels found ~20% wrong (75% on pairs' second route): Cosmos
 names real objects well but not the one the route goes around. i4 lets **geometry pick the
-target** — the opening the route passes through (doorway frames), else the object it bends
-around — on the rover's own occupancy map, and Cosmos only **names** it. Routes that bend
-both ways, or whose target the camera cannot see, get no instruction (reason-coded; their
-plain copy stays). Spec: `docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md`.
+target** — the visible obstacle the route passes closest to on the side its label says
+(objects only; a first version that also used doorways failed its audit) — on the rover's
+own occupancy map, and Cosmos only **names** it. Records with no such obstacle in view get
+no instruction (reason-coded; their plain copy stays). Spec: `docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md`.
 
 1. Targets (CPU, ~45 min, 4 workers):
    `OMP_NUM_THREADS=1 uv run scripts/prepare_habitat_instr.py landmarks` →
