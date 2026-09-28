@@ -75,7 +75,15 @@ dropped records had an obvious obstacle). User decision: objects only.**
    convex hull of its visible cells within 1.5 m of the route (a long wall is outlined only
    where the route passes it), floor to 1.0 m.
 2. **None**, with a reason code: `no_visible_target`, `target_too_small`, `bad_candidate`,
-   `no_state`.
+   `no_state`, `side_mismatch`, `route_bends_both_ways`.
+
+**Revised again after audits r2 (84%) and r3 (82%, "is the instruction true").** First choice
+is the obstacle the straight line runs into (Habitat's `chord.crossing_xz`, blobs one cell
+apart merged), which is what people name; the rule above is the fallback. Routes that stray
+more than 0.3 m to the other side of their straight line are dropped (`route_bends_both_ways`):
+16 of r3's 18 false instructions were such routes; on r3's marks the filter leaves ~97% true
+with 85.5% of train records labelled. Consequence: pairs' second routes almost all bend both
+ways, so labelled steering pairs drop to ~0; clean pairs must come from the generator (next step).
 
 (The first version's opening search, `route_crosses_chord` and `both_sides` drops were
 removed: the audit showed users name the object, not the doorway, and most two-way routes

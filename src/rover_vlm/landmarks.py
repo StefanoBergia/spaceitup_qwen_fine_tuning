@@ -140,7 +140,11 @@ KEEP_NEAR_ROUTE_M = 1.5     # outline only the part of a long blob (a wall) near
 MIN_VISIBLE_CELLS = 4       # visible occupied cells for an object to count
 MIN_POLY_AREA = 0.002       # outline area as a fraction of the image
 CROSSING_SNAP_M = 0.8       # chord.crossing_xz to the nearest occupied cell
-REASONS = ("bad_candidate", "no_state", "side_mismatch", "no_visible_target", "target_too_small")
+# Audit r3 (2026-09-28): 16 of 18 false instructions were routes straying more than this to
+# the other side of their straight line; no single side word describes them.
+MAX_CROSSING_M = 0.3
+REASONS = ("bad_candidate", "no_state", "side_mismatch", "route_bends_both_ways",
+           "no_visible_target", "target_too_small")
 
 
 def _none(reason, **diag):
@@ -232,7 +236,8 @@ def select_target(sample_dir, candidate_index, side=None):
 
     `side` (the record's label side): when given, a route that does not bow that way from
     its straight line is dropped (`side_mismatch`, ~1.4% of records) — its side word could
-    not be true of any obstacle the route goes around.
+    not be true of any obstacle the route goes around. A route straying more than
+    MAX_CROSSING_M to the other side is dropped too (`route_bends_both_ways`).
 
     First choice is the obstacle the straight line runs into (crossing_target): audit r2
     showed that is what people name. Otherwise, the visible obstacle the route passes closest to (within MAX_PASS_DIST_M,
@@ -259,6 +264,9 @@ def select_target(sample_dir, candidate_index, side=None):
     main = np.sign(((pts - a) @ nrm).mean()) or 1.0
     if side is not None and ("right" if main > 0 else "left") != side:
         return _none("side_mismatch")
+    excursion = float(max(0.0, (-main * ((pts - a) @ nrm)).max()))
+    if excursion > MAX_CROSSING_M:
+        return _none("route_bends_both_ways", excursion_m=round(excursion, 3))
     t = crossing_target(grid, cam, meta.get("chord", {}).get("crossing_xz"))
     if t is not None:
         return t

@@ -126,19 +126,30 @@ def test_hidden_obstacle_skipped_for_the_one_in_front(tmp_path):
     assert 0.9 < t["world_xz"][1] < 1.2                  # the screen, not the box behind it
 
 
-def test_bends_both_ways_obstacle_passed_on_the_labels_side(tmp_path):
-    # the route first swings right (x 2.2), then bows left overall (label "left" = +x). The side
-    # word must be true for the named obstacle: a post the route passes with the post on its
-    # right (route goes left of it) is a target; one passed the other way round is not.
-    route = [(2.5, 0.2), (2.2, 1.0), (2.2, 1.6), (3.4, 2.6), (3.4, 3.6), (2.5, 4.6)]
+def test_small_swing_keeps_the_side_word_true_of_the_named_obstacle(tmp_path):
+    # the route swings 0.15 m right before bowing left (label "left" = +x). A post it passes
+    # with the post on its right (route goes left of it) is a target; one passed the other
+    # way round is not.
+    route = [(2.5, 0.2), (2.35, 1.0), (2.35, 1.6), (3.4, 2.6), (3.4, 3.6), (2.5, 4.6)]
     s = _free()
-    s[24:28, 38:40] = OCC                                # post x 1.9..2.0, z 1.2..1.4: on the route's right
-    t = select_target(_write(tmp_path / "a", s, route), 0)
-    assert t["target"] == "object" and np.allclose(t["world_xz"], [1.95, 1.3], atol=0.1)
+    s[24:28, 41:43] = OCC                                # post x 2.05..2.15, z 1.2..1.4: on the route's right
+    t = select_target(_write(tmp_path / "a", s, route), 0, side="left")
+    assert t["target"] == "object" and np.allclose(t["world_xz"], [2.1, 1.3], atol=0.1)
     s = _free()
     s[24:28, 48:50] = OCC                                # post x 2.4..2.5: on the route's left
-    t = select_target(_write(tmp_path / "b", s, route), 0)
+    t = select_target(_write(tmp_path / "b", s, route), 0, side="left")
     assert (t["target"], t["reason"]) == ("none", "no_visible_target")
+
+
+def test_route_bending_both_ways_is_dropped(tmp_path):
+    # audit r3: 16 of 18 false instructions were routes straying > 0.3 m to the other side
+    # of the straight line — no single side word describes them
+    route = [(2.5, 0.2), (1.8, 1.0), (1.8, 1.6), (3.4, 2.6), (3.4, 3.6), (2.5, 4.6)]
+    s = _free()
+    s[45:56, 45:56] = OCC
+    t = select_target(_write(tmp_path / "s", s, route, crossing=[2.5, 2.25]), 0, side="left")
+    assert (t["target"], t["reason"]) == ("none", "route_bends_both_ways")
+    assert t["diag"]["excursion_m"] == pytest.approx(0.7, abs=0.05)
 
 
 def test_obstacle_on_the_straight_line_wins_over_a_nearer_one(tmp_path):
@@ -188,7 +199,8 @@ def test_bad_inputs_are_reasons_not_crashes(tmp_path):
     assert select_target(d, 7)["reason"] == "bad_candidate"
     (d / "state.npz").unlink()
     assert select_target(d, 0)["reason"] == "no_state"
-    assert set(REASONS) == {"bad_candidate", "no_state", "side_mismatch", "no_visible_target", "target_too_small"}
+    assert set(REASONS) == {"bad_candidate", "no_state", "side_mismatch", "route_bends_both_ways",
+                            "no_visible_target", "target_too_small"}
 
 
 REAL = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train/"
