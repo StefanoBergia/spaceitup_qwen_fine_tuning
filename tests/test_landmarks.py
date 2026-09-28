@@ -241,3 +241,15 @@ def test_opening_must_be_in_the_wall_the_chord_crosses(tmp_path):
     t = select_target(_write(tmp_path / "s", s, route, flavor="doorway", crossing=[2.5, 3.0]), 0)
     assert t["target"] == "opening"
     assert 2.8 < t["world_xz"][1] < 3.2                  # the doorway, not the posts at z ~1.3
+
+
+def test_blobs_on_both_sides_of_the_chord_dropped(tmp_path):
+    # review: both_sides had no test. The route bows left (+x) to 3.4 but first dips 0.2 m
+    # to the right (x = 2.3), enclosing a thin post there as well as the box on the left.
+    s = _free()
+    s[45:56, 52:60] = OCC                                # box x 2.6..3.0, z 2.25..2.8 (left of chord)
+    s[16:22, 47:49] = OCC                                # post x 2.35..2.45, z 0.8..1.1 (right of chord)
+    route = [(2.5, 0.2), (2.3, 0.6), (2.3, 1.3), (3.4, 2.0), (3.4, 3.5), (2.5, 4.6)]
+    assert crossing_excursion(np.array(route, float)) <= 0.3        # passes the crossing filter
+    t = select_target(_write(tmp_path / "s", s, route), 0)
+    assert (t["target"], t["reason"]) == ("none", "both_sides")
