@@ -154,3 +154,19 @@ def test_projection_matches_stored_goal_pixel():
     W, H = fpv["image_size"]
     assert uv[0, 0] * W == pytest.approx(fpv["goal"]["uv"][0], abs=1.0)
     assert uv[0, 1] * H == pytest.approx(fpv["goal"]["uv"][1], abs=1.0)
+
+
+def test_landmark_row_carries_record_fields(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "prep", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
+    prep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prep)
+    s = _free()
+    s[45:56, 45:56] = OCC
+    d = _write(tmp_path / "scene_c000", s, _box_route())
+    rec = {"id": "scene_c000_L", "image": [str(d / "fpv_enhanced.png")],
+           "habitat_meta": {"candidate_index": 0, "side": "left", "kind": "instructed", "pair_id": None}}
+    row = prep.landmark_row(rec)
+    assert row["id"] == "scene_c000_L" and row["side"] == "left" and row["target"] == "object"
+    json.dumps(row)                                      # serialisable as a JSONL row

@@ -56,9 +56,9 @@ blockquote { margin: 0; font-family: var(--quote); font-style: italic; font-weig
 .verdicts kbd { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); border-radius: 4px; text-align: center; padding: 1px 0; color: var(--muted); }
 .verdicts strong { font-weight: 600; display: block; }
 .verdicts small { color: var(--muted); font-size: 13px; }
-.verdicts button[aria-pressed="true"][data-v="ok"] { background: var(--ok-soft); border-color: var(--ok); }
-.verdicts button[aria-pressed="true"][data-v="landmark"], .verdicts button[aria-pressed="true"][data-v="side"] { background: var(--bad-soft); border-color: var(--bad); }
-.verdicts button[aria-pressed="true"][data-v="unsure"] { background: var(--unsure-soft); border-color: var(--unsure); }
+.verdicts button[aria-pressed="true"] { background: var(--bad-soft); border-color: var(--bad); }
+.verdicts button[aria-pressed="true"][data-tone="ok"] { background: var(--ok-soft); border-color: var(--ok); }
+.verdicts button[aria-pressed="true"][data-tone="unsure"] { background: var(--unsure-soft); border-color: var(--unsure); }
 label.note { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; min-height: 56px; resize: vertical; }
 .nav { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
@@ -67,9 +67,9 @@ textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--
 .status { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(26px, 1fr)); gap: 4px; }
 .strip button { aspect-ratio: 1; border: 0; border-radius: 3px; background: var(--empty); cursor: pointer; font-family: var(--mono); font-size: 10px; color: var(--muted); padding: 0; font-variant-numeric: tabular-nums; }
-.strip button[data-v="ok"] { background: var(--ok); color: var(--surface); }
-.strip button[data-v="landmark"], .strip button[data-v="side"] { background: var(--bad); color: var(--surface); }
-.strip button[data-v="unsure"] { background: var(--unsure); color: var(--surface); }
+.strip button[data-tone="bad"] { background: var(--bad); color: var(--surface); }
+.strip button[data-tone="ok"] { background: var(--ok); color: var(--surface); }
+.strip button[data-tone="unsure"] { background: var(--unsure); color: var(--surface); }
 .strip button[aria-current="true"] { outline: 2px solid var(--route); outline-offset: 1px; }
 .stripcap { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); flex-wrap: wrap; gap: 6px; }
 @media (prefers-reduced-motion: no-preference) { .verdicts button, .strip button { transition: background-color .12s, border-color .12s; } }
@@ -78,8 +78,8 @@ textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--
 <div class="wrap">
   <header>
     <div>
-      <h1>Instruction Label Audit</h1>
-      <p class="sub">Cosmos3-Nano instructions from the v2 training set. “Left” or “right” is neither endpoint: it is the way the route bows away from the dashed straight line between entry point and goal, i.e. which side of the object in between it passes. Is the landmark real, and does the magenta route pass it on that side?</p>
+      <h1 id="h1">Instruction Label Audit</h1>
+      <p class="sub" id="sub">Cosmos3-Nano instructions from the v2 training set. “Left” or “right” is neither endpoint: it is the way the route bows away from the dashed straight line between entry point and goal, i.e. which side of the object in between it passes. Is the landmark real, and does the magenta route pass it on that side?</p>
     </div>
     <div class="tally" id="tally"></div>
   </header>
@@ -94,14 +94,10 @@ textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--
       <div class="legend">
         <span><i style="background:var(--route)"></i>labelled route (the one this instruction describes)</span>
         <span><i style="background:repeating-linear-gradient(90deg,var(--ink) 0 5px,transparent 5px 9px)"></i>straight line entry → goal (the side is measured from it)</span>
+        <span id="tgtleg" hidden><i style="background:#00e6ff"></i>outlined target (the geometry's choice)</span>
         <span id="altleg"><i style="background:var(--alt)"></i>the other-side route Cosmos was also shown</span>
       </div>
-      <div class="verdicts" id="verdicts">
-        <button id="v-ok" data-v="ok" aria-pressed="false"><kbd>1</kbd><span><strong>Correct</strong><small>Landmark is there and the route goes that side of it</small></span></button>
-        <button id="v-landmark" data-v="landmark" aria-pressed="false"><kbd>2</kbd><span><strong>Wrong landmark</strong><small>Object not in the frame, misnamed, or not what the route bends around</small></span></button>
-        <button id="v-side" data-v="side" aria-pressed="false"><kbd>3</kbd><span><strong>Wrong side</strong><small>Route goes the other way round the named object</small></span></button>
-        <button id="v-unsure" data-v="unsure" aria-pressed="false"><kbd>4</kbd><span><strong>Can't tell</strong><small>Too ambiguous to judge from this frame</small></span></button>
-      </div>
+      <div class="verdicts" id="verdicts"></div>
       <label class="note" for="note">Note (optional, saved when you leave the box)
         <textarea id="note" placeholder="e.g. 'sofa' is actually an armchair"></textarea>
       </label>
@@ -125,17 +121,30 @@ const items = DATA.items;
 const marks = {};           // id -> {verdict, note}
 let idx = 0, db = null, mode = "connecting";
 const $ = (id) => document.getElementById(id);
-const LS = "instr-audit-v2";
+const LS = `instr-audit-${DATA.mode || "labels"}`;
+const VERDICTS = DATA.verdicts;
+const tone = (v) => (v === "ok" || v === "none_ok") ? "ok" : v === "unsure" ? "unsure" : "bad";
+if (DATA.mode === "geometry") {
+  document.title = "Landmark Geometry Audit";
+  $("h1").textContent = "Landmark Geometry Audit";
+  $("sub").textContent = "Each frame shows a route (magenta), its straight entry → goal line (dashed) and the target the geometry picked (cyan outline): the opening the route passes through, or the object it bends around. Is that the thing an instruction for this route should name?";
+}
+VERDICTS.forEach((d, i) => {
+  const b = document.createElement("button");
+  b.dataset.v = d.v; b.dataset.tone = tone(d.v); b.setAttribute("aria-pressed", "false");
+  b.innerHTML = `<kbd>${i + 1}</kbd><span><strong></strong><small></small></span>`;
+  b.querySelector("strong").textContent = d.label; b.querySelector("small").textContent = d.help;
+  $("verdicts").appendChild(b);
+});
 
 function loadLocal() { try { return JSON.parse(localStorage.getItem(LS) || "{}"); } catch { return {}; } }
 function saveLocal() { try { localStorage.setItem(LS, JSON.stringify(marks)); } catch {} }
 
 function tally() {
-  const c = { ok: 0, landmark: 0, side: 0, unsure: 0 };
-  for (const m of Object.values(marks)) if (c[m.verdict] !== undefined) c[m.verdict]++;
+  const c = Object.fromEntries(VERDICTS.map((d) => [d.v, 0]));
+  for (const it of items) { const m = marks[it.id]; if (m && c[m.verdict] !== undefined) c[m.verdict]++; }
   const n = Object.values(c).reduce((a, b) => a + b, 0);
-  $("tally").innerHTML = `<span class="t-ok">correct <b>${c.ok}</b></span><span class="t-bad">landmark <b>${c.landmark}</b></span>` +
-    `<span class="t-bad">side <b>${c.side}</b></span><span class="t-unsure">can't tell <b>${c.unsure}</b></span>`;
+  $("tally").innerHTML = VERDICTS.map((d) => `<span class="t-${tone(d.v)}">${d.label.toLowerCase()} <b>${c[d.v]}</b></span>`).join("");
   $("done").textContent = `${n} of ${items.length} marked`;
 }
 
@@ -143,13 +152,13 @@ function strip() {
   const s = $("strip");
   if (!s.children.length) items.forEach((it, i) => {
     const b = document.createElement("button");
-    b.textContent = i + 1; b.title = it.instruction; b.setAttribute("aria-label", `Sample ${i + 1}`);
+    b.textContent = i + 1; b.title = it.instruction || `target: ${it.target}`; b.setAttribute("aria-label", `Sample ${i + 1}`);
     b.onclick = () => go(i);
     s.appendChild(b);
   });
   [...s.children].forEach((b, i) => {
     const m = marks[items[i].id];
-    if (m) b.dataset.v = m.verdict; else delete b.dataset.v;
+    if (m) b.dataset.tone = tone(m.verdict); else delete b.dataset.tone;
     b.setAttribute("aria-current", i === idx ? "true" : "false");
   });
 }
@@ -159,7 +168,9 @@ function render() {
   $("img").src = it.img;
   $("pos").textContent = `${idx + 1} / ${items.length}`;
   $("rid").textContent = it.id;
-  $("instr").textContent = `“${it.instruction}”`;
+  $("instr").textContent = it.instruction ? `“${it.instruction}”`
+    : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})` : `Target: ${it.target}`;
+  $("tgtleg").hidden = !it.target || it.target === "none";
   $("side").textContent = `bows ${it.side} of the line`;
   $("kind").textContent = it.kind === "opposite" ? "other side of a two-route pair" : (it.has_alt ? "one side of a two-route pair" : "single-route frame");
   $("altleg").hidden = !it.has_alt;
@@ -202,7 +213,7 @@ $("note").addEventListener("change", () => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA") return;
-  const v = { "1": "ok", "2": "landmark", "3": "side", "4": "unsure" }[e.key];
+  const v = VERDICTS[Number(e.key) - 1]?.v;
   if (v) { e.preventDefault(); mark(v); }
   else if (e.key === "ArrowRight") go(idx + 1);
   else if (e.key === "ArrowLeft") go(idx - 1);

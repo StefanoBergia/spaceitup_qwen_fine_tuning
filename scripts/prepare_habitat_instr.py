@@ -22,6 +22,14 @@ docs/superpowers/specs/2026-09-25-instruction-general-model-design.md):
     uv run scripts/prepare_habitat_instr.py finalize-general \
         --instructions outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl
 
+Grounded landmarks (2026-09-28, docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md):
+one geometry-chosen target per labelset record, before i4 labelling. CPU, ~40 min, 4 workers
+of single-threaded numpy:
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py landmarks
+    uv run scripts/prepare_habitat_instr.py landmarks --limit 200      # smoke run
+
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
 belong to the unrotated camera.
@@ -31,12 +39,14 @@ import argparse
 import json
 import statistics
 from collections import Counter
+from multiprocessing import Pool
 from pathlib import Path
 
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
 )
+from rover_vlm.landmarks import select_target
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "data" / "prepared_habitat_v4"
@@ -233,6 +243,40 @@ def stage_finalize_general(args):
     (d / "meta_v2.json").write_text(json.dumps(meta, indent=2))
 
 
+LANDMARK_WORKERS = 4   # shared 96-core box: modest, and each worker is single-threaded numpy
+
+
+def landmark_row(rec):
+    """One landmarks JSONL row for a labelset record (see rover_vlm.landmarks.select_target)."""
+    hm = rec["habitat_meta"]
+    sample_dir = Path(rec["image"][0]).parent
+    try:
+        t = select_target(sample_dir, hm["candidate_index"])
+    except Exception as e:  # noqa: BLE001 — one bad sample is a counted reason, not a dead stage
+        t = {"target": "none", "reason": "error", "polygon": [], "bbox": None,
+             "world_xz": None, "diag": {"error": f"{type(e).__name__}: {e}"}}
+    return {"id": rec["id"], "sample_dir": str(sample_dir), "candidate_index": hm["candidate_index"],
+            "side": hm["side"], "kind": hm.get("kind"), "pair_id": hm.get("pair_id"), **t}
+
+
+def stage_landmarks(args):
+    d = args.out_dir
+    meta = {}
+    for name in SPLITS:
+        recs = json.loads((d / f"labelset_{name}.json").read_text())
+        if args.limit:
+            recs = recs[: args.limit]
+        with Pool(LANDMARK_WORKERS) as pool:
+            rows = pool.map(landmark_row, recs, chunksize=32)
+        out = d / f"landmarks_{name}.jsonl"
+        out.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        counts = Counter(r["target"] if r["target"] != "none" else f"none:{r['reason']}" for r in rows)
+        pairs = Counter(r["target"] for r in rows if r["pair_id"])
+        meta[name] = {"records": len(rows), "targets": dict(counts), "pair_targets": dict(pairs)}
+        print(f"{name}: {json.dumps(meta[name])} -> {out}")
+    (d / "landmarks_meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
@@ -252,9 +296,12 @@ def main() -> None:
     e.add_argument("--instructions", type=Path, nargs="+", required=True, help="label JSONL files")
     e.add_argument("--allow-missing", action="store_true",
                    help="assemble even if more than 1%% of records have no label row")
+    g = sub.add_parser("landmarks", help="v2: grounded landmark target per labelset record (CPU)")
+    g.add_argument("--out-dir", type=Path, default=V2_OUT)
+    g.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general}[args.stage](args)
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks}[args.stage](args)
 
 
 if __name__ == "__main__":
