@@ -10,7 +10,18 @@
 # duplicating them invites fixing a startup bug in one copy only.
 
 MODEL="${MODEL:-nvidia/Cosmos3-Nano}"
-PORT="${PORT:-8000}"
+# thor is shared: a fixed 8000 collided with another server on 2026-09-28 (job 91926,
+# "Address already in use"). Unless PORT is given, take the first free port from a
+# job-dependent start, checked with bash's /dev/tcp (no python: the repo's .python-version
+# breaks bare python3 here).
+cosmos3_free_port() {
+    local p=$((8000 + ${SLURM_JOB_ID:-0} % 500))
+    while (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null; do
+        p=$((p + 1))
+    done
+    echo "$p"
+}
+PORT="${PORT:-$(cosmos3_free_port)}"
 VENV="${VENV:-.venv-cosmos3}"
 ENDPOINT_FILE="${ENDPOINT_FILE:-outputs/cosmos3_endpoint.txt}"
 
