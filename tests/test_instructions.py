@@ -259,9 +259,21 @@ def test_instruction_rejects_side_rules():
     assert instruction_rejects(ok, side="left") == []
     assert "side:missing" in instruction_rejects(ok, side="right")
     both = "Pass left of the sofa, keeping the table on your right side."
-    assert instruction_rejects(both, side="left") == ["side:opposite"]
+    assert instruction_rejects(both, side="left") == ["side:opposite", "side:egocentric"]
     assert "no_landmark" in instruction_rejects("Go around the obstacle to the left side.", side="left")
     assert instruction_rejects(ok) == []                  # no side given -> i1 rules only
+
+
+def test_instruction_rejects_egocentric_side():
+    # "Pass the bed on your right" places the bed on the rover's right, i.e. the route goes
+    # LEFT of it — the opposite of our convention, where the side word is the route's side
+    for text in ("Pass the bed on your right.", "Go around the wooden table to your right.",
+                 "Pass the column to your Right side."):
+        assert "side:egocentric" in instruction_rejects(text, side="right")
+    for text in ("Pass the bed on the right.", "Go right around the wooden table.",
+                 "Keep right of the tall bookshelf."):
+        assert instruction_rejects(text, side="right") == []
+    assert instruction_rejects("Pass the bed on your right.") == []   # i1 rules only
 
 
 def test_rescore_row_reapplies_side_rules_for_i2():

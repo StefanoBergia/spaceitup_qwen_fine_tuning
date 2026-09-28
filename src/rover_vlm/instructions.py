@@ -340,7 +340,15 @@ def instruction_rejects(text, side=None):
             out.append("side:opposite")
         if is_side_only(text):
             out.append("no_landmark")
+        if _EGOCENTRIC.search(text):
+            out.append("side:egocentric")
     return out
+
+
+# "Pass the bed on your right" places the landmark on that side, so the route goes the
+# OTHER way round — the reverse of our convention (the side word is the route's side).
+# ~4% of the v2 labels were phrased so (2026-09-28); dropped rather than flipped.
+_EGOCENTRIC = re.compile(r"\b(?:on|to) your (?:left|right)\b", re.I)
 
 
 _SIDE_FILLER = set(

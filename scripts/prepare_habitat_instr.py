@@ -35,7 +35,7 @@ from pathlib import Path
 
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
-    render_check_image, render_generation_image, with_instruction,
+    render_check_image, render_generation_image, rescore_row, with_instruction,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -185,7 +185,14 @@ def _label_rows(paths):
 
 
 def stage_finalize_general(args):
-    rows = _label_rows(args.instructions)
+    # re-judge with the current text rules, so a rule added after labelling (e.g.
+    # side:egocentric) applies without re-running Cosmos
+    raw = _label_rows(args.instructions)
+    rows = {i: rescore_row(r) for i, r in raw.items()}
+    newly = Counter(x for i, r in rows.items() if raw[i].get("passed") and not r.get("passed")
+                    for x in r["rejects"])
+    print(f"rescore: {sum(raw[i].get('passed') and not r.get('passed') for i, r in rows.items())} "
+          f"previously passed rows now rejected {dict(newly)}")
     meta = {"instructions": [str(p) for p in args.instructions]}
     # an unlabelled record is not a rejection: a label job that timed out part-way would
     # otherwise yield a silently shrunken training set (v2 review I3)
