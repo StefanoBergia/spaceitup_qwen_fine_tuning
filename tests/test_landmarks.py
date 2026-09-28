@@ -49,3 +49,108 @@ def test_densify_components_hull():
     assert n == 2 and lab[0, 0] != lab[5, 5]
     h = convex_hull([(0, 0), (1, 0), (1, 1), (0, 1), (0.5, 0.5)])
     assert len(h) == 4 and (0.5, 0.5) not in h
+
+
+from rover_vlm.landmarks import (  # noqa: E402
+    REASONS, crossing_excursion, select_target,
+)
+
+
+def _write(d, state, route, *, flavor="detour", pose=(2.5, 0.2), heading=(0.0, 1.0)):
+    """A synthetic sample dir: 5 m x 5 m map at 5 cm, camera at `pose` facing +z."""
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez(d / "state.npz", state=state, mpp=0.05, x_min=0.0, z_min=0.0)
+    cands = [{"label": "left", "polyline_xz": [list(map(float, p)) for p in route]}]
+    meta = {"pose_xz": list(pose), "heading_xz": list(heading), "flavor": flavor,
+            "chord": {"goal": [route[-1][0], 0.0, route[-1][1]], "floor_height": 0.0},
+            "candidates": cands}
+    (d / "meta.json").write_text(json.dumps(meta))
+    return d
+
+
+def _free():
+    return np.full((100, 100), FREE, np.uint8)
+
+
+# image-left for heading +z: right = (-h_z, h_x) = (-1, 0), so left = (+1, 0)
+LEFT = np.array([1.0, 0.0])
+
+
+def _box_route():
+    return [(2.5, 0.2), tuple(np.array([2.5, 1.5]) + 0.9 * LEFT),
+            tuple(np.array([2.5, 3.5]) + 0.9 * LEFT), (2.5, 4.6)]
+
+
+def test_object_between_route_and_chord(tmp_path):
+    s = _free()
+    s[45:56, 45:56] = OCC                                # 0.55 m box centred (2.5, 2.5)
+    t = select_target(_write(tmp_path / "s", s, _box_route()), 0)
+    assert t["target"] == "object" and t["reason"] is None
+    assert np.allclose(t["world_xz"], [2.5, 2.5], atol=0.2)
+    u0, v0, u1, v1 = t["bbox"]
+    # only the part of the box between chord (x = 2.5, image centre) and route (image left)
+    # is enclosed, so the outline sits just left of centre
+    assert u0 < 0.5 and u1 <= 0.55
+    assert len(t["polygon"]) >= 3
+
+
+def test_opening_in_doorway_wall(tmp_path):
+    s = _free()
+    s[60:62, :] = OCC                                    # wall across z = 3.0
+    s[60:62, 55:75] = FREE                               # 1.0 m gap, x = 2.75 .. 3.75
+    route = [(2.5, 0.2), (3.25, 2.0), (3.25, 3.6), (2.5, 4.6)]
+    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway"), 0)
+    assert t["target"] == "opening"
+    assert t["diag"]["width_m"] == pytest.approx(1.0, abs=0.15)
+
+
+def test_hidden_opening_falls_back_to_the_blocking_object(tmp_path):
+    s = _free()
+    s[60:62, :] = OCC
+    s[60:62, 55:75] = FREE
+    s[30:32, 55:72] = OCC                                # screen x 2.75..3.6 at z 1.5, on the camera->gap ray
+    # route stays on the image-left side of the chord (x >= 2.5) and passes outside the screen
+    route = [(2.5, 0.2), (3.9, 1.0), (3.9, 2.0), (3.25, 2.6), (3.25, 3.6), (2.5, 4.6)]
+    assert crossing_excursion(np.array(route, float)) == 0.0
+    t = select_target(_write(tmp_path / "s", s, route, flavor="doorway"), 0)
+    assert t["target"] == "object"
+    assert 2.6 < t["world_xz"][0] < 3.7 and 1.3 < t["world_xz"][1] < 1.8   # the screen, not the wall
+
+
+def test_route_crossing_chord_dropped(tmp_path):
+    s = _free()
+    s[45:56, 45:56] = OCC
+    route = [(2.5, 0.2), (3.5, 1.5), (1.5, 3.0), (2.5, 4.6)]   # bends one way then the other
+    assert crossing_excursion(np.array(route, float)) > 0.3
+    t = select_target(_write(tmp_path / "s", s, route), 0)
+    assert t["target"] == "none" and t["reason"] == "route_crosses_chord"
+
+
+def test_nothing_visible(tmp_path):
+    route = [(2.5, 0.2), (3.4, 2.0), (2.5, 4.6)]
+    t = select_target(_write(tmp_path / "s", _free(), route), 0)
+    assert (t["target"], t["reason"]) == ("none", "no_visible_target")
+
+
+def test_bad_inputs_are_reasons_not_crashes(tmp_path):
+    d = _write(tmp_path / "s", _free(), [(2.5, 0.2), (2.5, 4.6)])
+    assert select_target(d, 7)["reason"] == "bad_candidate"
+    (d / "state.npz").unlink()
+    assert select_target(d, 0)["reason"] == "no_state"
+    assert set(REASONS) >= {"bad_candidate", "no_state", "no_visible_target",
+                            "route_crosses_chord", "both_sides", "target_too_small"}
+
+
+REAL = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train/"
+            "00366-fxbzYAGkrtm/samples/00366-fxbzYAGkrtm_c012")
+
+
+@pytest.mark.skipif(not REAL.exists(), reason="shared Habitat dataset not mounted")
+def test_projection_matches_stored_goal_pixel():
+    meta = json.loads((REAL / "meta.json").read_text())
+    fpv = json.loads((REAL / "fpv_paths.json").read_text())
+    g = np.array(meta["chord"]["goal"])[[0, 2]]
+    uv, _ = Camera(meta["pose_xz"], meta["heading_xz"]).uv([g])
+    W, H = fpv["image_size"]
+    assert uv[0, 0] * W == pytest.approx(fpv["goal"]["uv"][0], abs=1.0)
+    assert uv[0, 1] * H == pytest.approx(fpv["goal"]["uv"][1], abs=1.0)

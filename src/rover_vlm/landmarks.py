@@ -9,9 +9,12 @@ into the image; Cosmos only names it (prompt i4, instructions.py).
 Pure numpy + PIL, CPU only. Spec: docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md
 """
 
+import json
 from collections import deque
+from pathlib import Path
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 UNKNOWN, FREE, OCC = 0, 1, 2
 CAM_HEIGHT_M = 0.8        # Habitat camera height above the floor
@@ -129,3 +132,156 @@ def convex_hull(points):
 
     lo, up = half(p), half(p[::-1])
     return lo[:-1] + up[:-1]
+
+
+MIN_OPENING_M, MAX_OPENING_M = 0.6, 2.5   # a rover-passable gap, not a whole room
+DOOR_HEIGHT_M = 2.0                       # top of an opening's outline
+OBJECT_TOP_M = 1.0                        # top of an object's outline (the 2D map has no heights)
+MIN_VISIBLE_CELLS = 4                     # visible occupied cells for an object to count
+MAX_CROSSING_M = 0.3                      # route may stray this far to the other side of the chord
+MIN_POLY_AREA = 0.002                     # outline area as a fraction of the image
+REASONS = ("bad_candidate", "no_state", "route_crosses_chord", "no_visible_target",
+           "both_sides", "target_too_small")
+
+
+def _none(reason, **diag):
+    return {"target": "none", "reason": reason, "polygon": [], "bbox": None,
+            "world_xz": None, "diag": diag}
+
+
+def _chord_frame(route):
+    a, g = route[0], route[-1]
+    ch = (g - a) / max(np.linalg.norm(g - a), 1e-9)
+    return a, np.array([-ch[1], ch[0]])
+
+
+def crossing_excursion(route):
+    """How far (m) the route strays to the opposite side of the straight start->goal line
+    from the side it mostly takes. Large = the route bends both ways (no single side word)."""
+    pts = densify(route, 0.05)
+    a, n = _chord_frame(route)
+    off = (pts - a) @ n
+    main = np.sign(off.mean()) or 1.0
+    return float(max(0.0, (-main * off).max()))
+
+
+def _poly_area(poly):
+    if len(poly) < 3:
+        return 0.0
+    x, y = np.array(poly).T
+    return 0.5 * abs(float(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))))
+
+
+def _finish(kind, poly, world_xz, **diag):
+    poly = [[float(np.clip(u, 0, 1)), float(np.clip(v, 0, 1))] for u, v in poly]
+    area = _poly_area(poly)
+    if area < MIN_POLY_AREA:
+        return _none("target_too_small", area=round(area, 5), **diag)
+    us, vs = zip(*poly)
+    return {"target": kind, "reason": None, "polygon": poly,
+            "bbox": [min(us), min(vs), max(us), max(vs)],
+            "world_xz": [float(world_xz[0]), float(world_xz[1])],
+            "diag": {"area": round(area, 5), **diag}}
+
+
+def find_opening(grid, route):
+    """Narrowest rover-passable gap between occupied cells that the route passes through.
+
+    At each route point, scan perpendicular both ways for the first occupied cell; a point
+    with a hit on both sides within MAX_OPENING_M is a gap. Returns the narrowest one with
+    width in [MIN_OPENING_M, MAX_OPENING_M] as {"width_m", "centre", "flanks"} or None.
+    """
+    pts = densify(route, 0.05)
+    best = None
+    for i in range(1, len(pts) - 1):
+        d = pts[i + 1] - pts[i - 1]
+        d = d / (np.linalg.norm(d) + 1e-9)
+        n = np.array([-d[1], d[0]])
+        hits = []
+        for sgn in (1.0, -1.0):
+            hit = None
+            for t in np.arange(grid.mpp, MAX_OPENING_M, grid.mpp / 2):
+                q = pts[i] + sgn * n * t
+                if grid.cell(grid.rc(q)[0]) == OCC:
+                    hit = q
+                    break
+            hits.append(hit)
+        if hits[0] is None or hits[1] is None:
+            continue
+        w = float(np.linalg.norm(hits[0] - hits[1]))
+        if MIN_OPENING_M <= w <= MAX_OPENING_M and (best is None or w < best["width_m"]):
+            best = {"width_m": w, "centre": pts[i], "flanks": (hits[0], hits[1])}
+    return best
+
+
+def enclosed_blobs(grid, cam, route):
+    """Occupied blobs inside the region between the route and its straight chord.
+
+    Each: {"label", "cells", "visible_xz" (cells the camera sees first, in frame),
+    "side" (mean signed offset from the chord; its sign is the side the blob is on)}.
+    """
+    H, W = grid.s.shape
+    ring = grid.rc(np.vstack([route, route[:1]]))
+    im = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(im).polygon([(float(c) + 0.5, float(r) + 0.5) for r, c in ring], fill=1)
+    inside = (np.asarray(im) > 0) & (grid.s == OCC)
+    lab, n = components(inside)
+    a, nrm = _chord_frame(route)
+    out = []
+    for k in range(1, n + 1):
+        rcs = np.argwhere(lab == k)
+        xz = grid.xz(rcs)
+        uv, fwd = cam.uv(xz)
+        ok = cam.in_frame(uv, fwd)
+        vis = np.zeros(len(xz), bool)
+        for i in np.nonzero(ok)[0]:
+            first = grid.first_occupied(cam.pos, xz[i])
+            vis[i] = first is None or lab[first] == k
+        out.append({"label": k, "cells": len(rcs), "visible_xz": xz[vis],
+                    "side": float(((xz - a) @ nrm).mean())})
+    return out
+
+
+def select_target(sample_dir, candidate_index):
+    """The thing an instruction for this route should name, or a reason there is none.
+
+    Order: the opening the route passes through (doorway frames, if the camera sees it),
+    else the most visible occupied blob between the route and its chord, else none.
+    """
+    sd = Path(sample_dir)
+    meta = json.loads((sd / "meta.json").read_text())
+    cands = meta.get("candidates", [])
+    if not (0 <= candidate_index < len(cands)) or len(cands[candidate_index].get("polyline_xz") or []) < 2:
+        return _none("bad_candidate")
+    if not (sd / "state.npz").exists():
+        return _none("no_state")
+    route = np.asarray(cands[candidate_index]["polyline_xz"], float)
+    exc = crossing_excursion(route)
+    if exc > MAX_CROSSING_M:
+        return _none("route_crosses_chord", excursion_m=round(exc, 3))
+    grid = Grid.load(sd / "state.npz")
+    cam = Camera(meta["pose_xz"], meta["heading_xz"])
+
+    if meta.get("flavor") == "doorway":
+        op = find_opening(grid, route)
+        if op is not None:
+            c = op["centre"]
+            uvc, fc = cam.uv([c])
+            a, b = op["flanks"]
+            _, fab = cam.uv([a, b])
+            if (cam.in_frame(uvc, fc)[0] and (fab > MIN_FWD_M).all()
+                    and grid.first_occupied(cam.pos, c) is None):
+                quad = np.vstack([cam.uv([a])[0], cam.uv([b])[0],
+                                  cam.uv([b], DOOR_HEIGHT_M)[0], cam.uv([a], DOOR_HEIGHT_M)[0]])
+                return _finish("opening", quad, c, width_m=round(op["width_m"], 3))
+
+    blobs = [b for b in enclosed_blobs(grid, cam, route) if len(b["visible_xz"]) >= MIN_VISIBLE_CELLS]
+    if not blobs:
+        return _none("no_visible_target")
+    if len({np.sign(b["side"]) for b in blobs if abs(b["side"]) > 0.05}) > 1:
+        return _none("both_sides", n_blobs=len(blobs))
+    best = max(blobs, key=lambda b: len(b["visible_xz"]))
+    xz = best["visible_xz"]
+    pts = np.vstack([cam.uv(xz)[0], cam.uv(xz, OBJECT_TOP_M)[0]])
+    return _finish("object", convex_hull(pts), xz.mean(0),
+                   visible_cells=len(xz), blob_cells=best["cells"])
