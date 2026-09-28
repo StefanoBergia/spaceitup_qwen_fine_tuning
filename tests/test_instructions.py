@@ -503,7 +503,7 @@ def test_resolve_i4_prefers_valid_paraphrase_then_template():
 def test_resolve_i4_rejects_a_name_with_a_side_word():
     reply = {"name": "right cabinet", "beside": None, "single": True, "instruction": "Go left."}
     r = resolve_i4(reply, "left", "Go {side} around the {name}.")
-    assert not r["passed"] and "side:opposite" in r["rejects"]
+    assert not r["passed"] and r["rejects"] == ["name:bad"]     # caught before any template
 
 
 def test_render_target_jpeg(tmp_path):
@@ -551,3 +551,12 @@ def test_finalize_general_keeps_instruction_source(two_sided_sample):
     rows = {i: {k: v for k, v in r.items() if k != "instruction_source"} for i, r in rows.items()}
     out = finalize_general([f["plain"]], labels, rows)                 # i3 rows: no source field
     assert all(r["habitat_meta"]["instruction_source"] == "cosmos" for r in out["pairs"])
+
+
+def test_resolve_i4_rejects_a_side_word_in_name_or_beside():
+    # review: "left cabinet" with side=left let "Go around the left cabinet." pass with no route side
+    tpl = "Go {side} around the {name}."
+    reply = {"name": "left cabinet", "beside": None, "single": True, "instruction": "Go around the left cabinet."}
+    assert resolve_i4(reply, "left", tpl)["rejects"] == ["name:bad"]
+    reply = {"name": "doorway", "beside": "right sofa", "single": True, "instruction": "Go left through the doorway."}
+    assert resolve_i4(reply, "left", "Take the {name} on the {side}.")["rejects"] == ["name:bad"]

@@ -599,7 +599,10 @@ def resolve_i4(reply, side, template):
         return {"instruction": None, "instruction_source": None, "rejects": ["parse"], "passed": False}
     if not reply["single"]:
         return {"instruction": None, "instruction_source": None, "rejects": ["mask_ambiguous"], "passed": False}
-    if len(reply["name"].split()) > 5 or _DRAWING.search(reply["name"]):
+    # a side word inside the name ("left cabinet") would carry the side instead of the route:
+    # the side must come from the metadata only
+    words = f"{reply['name']} {reply.get('beside') or ''}"
+    if len(reply["name"].split()) > 5 or _DRAWING.search(reply["name"]) or re.search(r"\b(?:left|right)\b", words, re.I):
         return {"instruction": None, "instruction_source": None, "rejects": ["name:bad"], "passed": False}
     para = reply.get("instruction")
     if para and not _i4_rejects(para, side, reply["name"]):
