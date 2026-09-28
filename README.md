@@ -1379,6 +1379,35 @@ instructed prompt not worse; pair success ≥ 75% and not significantly below th
 The blocked-side probe (`probe_wrong_side`) tells single-route frames to take the side where
 Habitat has no route and reports which way the prediction bends (`metrics.json` → `wrong_side`).
 
+### Grounded landmarks (i4, 2026-09-28)
+
+A 100-label human audit of the i3 labels found ~20% wrong (75% on pairs' second route): Cosmos
+names real objects well but not the one the route goes around. i4 lets **geometry pick the
+target** — the opening the route passes through (doorway frames), else the object it bends
+around — on the rover's own occupancy map, and Cosmos only **names** it. Routes that bend
+both ways, or whose target the camera cannot see, get no instruction (reason-coded; their
+plain copy stays). Spec: `docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md`.
+
+1. Targets (CPU, ~45 min, 4 workers):
+   `OMP_NUM_THREADS=1 uv run scripts/prepare_habitat_instr.py landmarks` →
+   `data/prepared_habitat_instr_v2/landmarks_{train,eval}.jsonl`, `landmarks_meta.json` (reason counts)
+2. Geometry audit (human, gate ≥ 95% right):
+   `uv run scripts/audit_instruction_labels.py --mode geometry --landmarks data/prepared_habitat_instr_v2/landmarks_train.jsonl`
+   → `outputs/instr_geometry_audit.html` (publish as an artifact with the `db` capability; marks in collection `marks`)
+3. HM3D semantic frames (full A100, habitat conda env, resumable): `sbatch slurm/render_semantic_frames.sbatch`
+   → `outputs/landmark_semantics/<sample>.npz`
+4. i4 gate (100 eval pairs + 100 single-route records, then the job stops): `sbatch slurm/label_instructions.sbatch`
+   → `outputs/instr_labels_v2/gate_i4.jsonl`
+5. Checks on the gate — HM3D name agreement:
+   `uv run scripts/audit_instruction_labels.py --mode semantic --labels outputs/instr_labels_v2/gate_i4.jsonl --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl`
+   → `outputs/landmark_name_check.json`, `outputs/landmark_name_mismatches.jsonl`;
+   human audit (gate < 5% wrong overall and on pairs):
+   `uv run scripts/audit_instruction_labels.py --labels outputs/instr_labels_v2/gate_i4.jsonl --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl`
+   → `outputs/instr_i4_audit.html`
+6. Full run (~8 h): `STAGE=full sbatch slurm/label_instructions.sbatch` → `outputs/instr_labels_v2/{eval,train}_i4.jsonl`,
+   then `finalize-general --instructions outputs/instr_labels_v2/train_i4.jsonl outputs/instr_labels_v2/eval_i4.jsonl`
+   (kept records carry `habitat_meta.instruction_source` = `cosmos` paraphrase or `template`)
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
