@@ -11,11 +11,23 @@ id = record id), so they can be read back with the Artifact tool's read_db.
 entry->goal line and the target rover_vlm.landmarks chose (cyan outline), and asks whether
 that target is right. 30 pair records + 70 single-route records from labelset_train.json.
 
+--labels (i4 gate, 2026-09-28): labels mode reads label rows instead of train_general.json —
+the passed rows' instructions on their labelset_eval records, target outline drawn.
+
+--mode semantic: no page; for passed i4 rows in scenes with HM3D semantics
+(outputs/landmark_semantics/, from scripts/render_semantic_frames.py) compare the name with
+the HM3D category under the target; writes outputs/landmark_name_check.json and
+outputs/landmark_name_mismatches.jsonl.
+
 Run (CPU, login node is fine):
     uv run scripts/audit_instruction_labels.py            # -> outputs/instr_label_audit.html
     uv run scripts/audit_instruction_labels.py --n 150 --seed 1
     uv run scripts/audit_instruction_labels.py --mode geometry \
         --landmarks data/prepared_habitat_instr_v2/landmarks_train.jsonl   # -> outputs/instr_geometry_audit.html
+    uv run scripts/audit_instruction_labels.py --labels outputs/instr_labels_v2/gate_i4.jsonl \
+        --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl --out outputs/instr_i4_audit.html
+    uv run scripts/audit_instruction_labels.py --mode semantic --labels outputs/instr_labels_v2/gate_i4.jsonl \
+        --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl
 """
 
 import argparse
@@ -27,7 +39,10 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from rover_vlm.instructions import _answer_path, render_generation_jpeg
+import numpy as np
+
+from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
+from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_category
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 V2 = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
@@ -109,6 +124,58 @@ def item(rec, landmark=None):
     return out
 
 
+def label_rows(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def sample_labelled(records, rows, n, seed):
+    """Passed i4 rows as records carrying their instruction; pairs first so both sides show."""
+    by_id = {r["id"]: r for r in records}
+    ok = [r for r in rows if r.get("passed") and r["id"] in by_id]
+    recs = [with_instruction(by_id[r["id"]], r["instruction"], r.get("instruction_source") or "cosmos")
+            for r in ok]
+    pairs = [r for r in recs if r["habitat_meta"].get("pair_id")]
+    single = [r for r in recs if not r["habitat_meta"].get("pair_id")]
+    rng = random.Random(seed)
+    picked = pairs[: n // 2] + rng.sample(single, min(n - min(len(pairs), n // 2), len(single)))
+    rng.shuffle(picked)
+    return picked, {"passed_pair": len(pairs), "passed_single": len(single), "rows": len(rows)}
+
+
+def semantic_report(rows, landmarks, sem_dir):
+    """Agreement between i4 names and HM3D categories, by target type and pair/single."""
+    table, mismatches, no_frame = {}, [], 0
+    for r in rows:
+        lm = landmarks.get(r["id"])
+        if not (r.get("passed") and lm and r.get("reply")):
+            continue
+        f = sem_dir / f"{Path(lm['sample_dir']).name}.npz"
+        if not f.exists():
+            no_frame += 1
+            continue
+        z = np.load(f)
+        ids, cats = z["ids"], str(z["categories"])
+        name, beside = r["reply"]["name"], r["reply"].get("beside")
+        key = f"{lm['target']}/{'pair' if r.get('pair_id') else 'single'}"
+        if lm["target"] == "object":
+            cat = target_category(ids, cats, lm["polygon"])
+            ok, ref = cat is not None and name_matches(name, cat), cat
+        else:
+            near = sorted(beside_categories(ids, cats, lm["bbox"]))
+            ok = any(w in OPENING_WORDS for w in name.split()) and (
+                not beside or any(name_matches(beside, c) for c in near))
+            ref = near
+        cell = table.setdefault(key, {"n": 0, "agree": 0})
+        cell["n"] += 1
+        cell["agree"] += int(ok)
+        if not ok:
+            mismatches.append({"id": r["id"], "target": lm["target"], "name": name, "beside": beside,
+                               "hm3d": ref, "instruction": r.get("instruction")})
+    for cell in table.values():
+        cell["rate"] = round(cell["agree"] / cell["n"], 3)
+    return {"cells": table, "no_semantic_frame": no_frame}, mismatches
+
+
 def load_landmarks_rows(paths):
     rows = {}
     for p in paths or []:
@@ -125,19 +192,40 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic"], default="labels")
+    ap.add_argument("--labels", type=Path, default=None,
+                    help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
+    ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
+                    help="labelset the --labels rows came from")
+    ap.add_argument("--semantics", type=Path, default=REPO_ROOT / "outputs" / "landmark_semantics")
     ap.add_argument("--landmarks", type=Path, nargs="+", default=None,
                     help="landmarks_*.jsonl: draw each record's target (required for --mode geometry)")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
     landmarks = load_landmarks_rows(args.landmarks)
+    if args.mode == "semantic":
+        if not (args.labels and landmarks):
+            raise SystemExit("--mode semantic needs --labels <i4 rows> and --landmarks <landmarks jsonl>")
+        report, mismatches = semantic_report(label_rows(args.labels), landmarks, args.semantics)
+        out_dir = REPO_ROOT / "outputs"
+        (out_dir / "landmark_name_check.json").write_text(json.dumps(report, indent=2))
+        (out_dir / "landmark_name_mismatches.jsonl").write_text("".join(json.dumps(m) + "\n" for m in mismatches))
+        for key, cell in sorted(report["cells"].items()):
+            print(f"{key:16s} n={cell['n']:4d}  agree {cell['rate']:.1%}")
+        print(f"{report['no_semantic_frame']} passed rows have no semantic frame (scene without HM3D semantics)")
+        print(f"{len(mismatches)} mismatches -> outputs/landmark_name_mismatches.jsonl")
+        return
     if args.mode == "geometry":
         if not landmarks:
             raise SystemExit("--mode geometry needs --landmarks data/prepared_habitat_instr_v2/landmarks_train.jsonl")
         source = V2 / "labelset_train.json"
         picked, pop = sample_geometry(json.loads(source.read_text()), landmarks, 30, args.n - 30, args.seed)
         out = args.out or REPO_ROOT / "outputs" / "instr_geometry_audit.html"
+    elif args.labels:
+        source = args.split
+        picked, pop = sample_labelled(json.loads(source.read_text()), label_rows(args.labels), args.n, args.seed)
+        out = args.out or REPO_ROOT / "outputs" / "instr_i4_audit.html"
     else:
         source = DATA
         picked, pop = sample(json.loads(source.read_text()), args.n, args.opposite_share, args.seed)

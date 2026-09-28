@@ -170,3 +170,49 @@ def test_landmark_row_carries_record_fields(tmp_path):
     row = prep.landmark_row(rec)
     assert row["id"] == "scene_c000_L" and row["side"] == "left" and row["target"] == "object"
     json.dumps(row)                                      # serialisable as a JSONL row
+
+
+from rover_vlm.landmark_check import (  # noqa: E402
+    OPENING_WORDS, beside_categories, canonical, name_matches, target_category,
+)
+
+
+def test_name_matching():
+    assert canonical("couch") == canonical("sofa")
+    assert name_matches("grey sofa", "couch")
+    assert name_matches("kitchen island", "kitchen island")
+    assert name_matches("wooden cabinet", "cabinet")
+    assert not name_matches("armchair", "table")
+    assert {"doorway", "hallway"} <= OPENING_WORDS
+
+
+def test_target_category_majority_inside_polygon():
+    ids = np.zeros((10, 10), np.uint16)
+    ids[2:8, 2:8] = 5
+    ids[0:10, 0:2] = 9
+    cats = json.dumps({"5": "couch", "9": "wall", "0": "floor"})
+    assert target_category(ids, cats, [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]) == "couch"
+    assert "wall" in beside_categories(ids, cats, [0.2, 0.2, 0.8, 0.8])
+
+
+def test_semantic_report_counts_agreement_and_mismatches(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    ids = np.zeros((10, 10), np.uint16)
+    ids[2:8, 2:8] = 5
+    np.savez(tmp_path / "s_c000.npz", ids=ids, categories=json.dumps({"5": "couch", "0": "floor"}))
+    box = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+    lms = {i: {"sample_dir": "/x/s_c000", "target": "object", "polygon": box, "bbox": [0.2, 0.2, 0.8, 0.8]}
+           for i in ("a", "b")}
+    lms["c"] = {"sample_dir": "/x/other_c001", "target": "object", "polygon": box, "bbox": None}
+    rows = [{"id": "a", "passed": True, "reply": {"name": "grey sofa"}, "pair_id": None},
+            {"id": "b", "passed": True, "reply": {"name": "bookshelf"}, "pair_id": "p"},
+            {"id": "c", "passed": True, "reply": {"name": "sofa"}, "pair_id": None}]
+    report, mism = audit.semantic_report(rows, lms, tmp_path)
+    assert report["cells"]["object/single"] == {"n": 1, "agree": 1, "rate": 1.0}
+    assert report["cells"]["object/pair"]["agree"] == 0
+    assert report["no_semantic_frame"] == 1
+    assert [m["id"] for m in mism] == ["b"] and mism[0]["hm3d"] == "couch"
