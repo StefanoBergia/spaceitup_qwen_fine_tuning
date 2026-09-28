@@ -737,7 +737,10 @@ def finalize_general(plain_recs, label_recs, rows_by_id):
     groups = _by_pair([r for r in label_recs if r["habitat_meta"].get("pair_id")],
                       lambda r: r["habitat_meta"]["pair_id"])
     bad_pairs = {pid for pid, rs in groups.items() if len(rs) != 2 or not all(r["id"] in passed for r in rs)}
-    kept = [with_instruction(r, rows_by_id[r["id"]]["instruction"], "cosmos") for r in label_recs
+    # i4 rows say whether the text is Cosmos's paraphrase or the filled template
+    kept = [with_instruction(r, rows_by_id[r["id"]]["instruction"],
+                             rows_by_id[r["id"]].get("instruction_source") or "cosmos")
+            for r in label_recs
             if r["id"] in passed and r["habitat_meta"].get("pair_id") not in bad_pairs]
 
     def kind(k):

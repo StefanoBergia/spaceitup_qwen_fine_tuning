@@ -536,3 +536,18 @@ def test_load_landmarks_refuses_incomplete_coverage(tmp_path):
     assert set(load_landmarks([p], {"a"})) == {"a"}
     with pytest.raises(SystemExit, match="1 of 2 records have no landmark row"):
         load_landmarks([p], {"a", "b"})
+
+
+def test_finalize_general_keeps_instruction_source(two_sided_sample):
+    f = build_frame(_src(two_sided_sample))
+    labels = f["labelset"]
+    rows = {r["id"]: {"id": r["id"], "passed": True,
+                      "instruction": f"Go {r['habitat_meta']['side']} around the sofa.",
+                      "instruction_source": "template", "prompt_version": "i4"} for r in labels}
+    out = finalize_general([f["plain"]], labels, rows)
+    kept = [r for r in out["train_or_all"] if r["habitat_meta"].get("instruction")]
+    assert len(kept) == 2
+    assert all(r["habitat_meta"]["instruction_source"] == "template" for r in kept)
+    rows = {i: {k: v for k, v in r.items() if k != "instruction_source"} for i, r in rows.items()}
+    out = finalize_general([f["plain"]], labels, rows)                 # i3 rows: no source field
+    assert all(r["habitat_meta"]["instruction_source"] == "cosmos" for r in out["pairs"])
