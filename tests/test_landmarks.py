@@ -216,3 +216,13 @@ def test_semantic_report_counts_agreement_and_mismatches(tmp_path):
     assert report["cells"]["object/pair"]["agree"] == 0
     assert report["no_semantic_frame"] == 1
     assert [m["id"] for m in mism] == ["b"] and mism[0]["hm3d"] == "couch"
+
+
+def test_target_category_skips_the_wall_behind_an_object():
+    # review: an object outline (floor to 1 m) often covers more wall than object
+    ids = np.full((10, 10), 9, np.uint16)
+    ids[5:8, 3:7] = 5
+    cats = json.dumps({"5": "couch", "9": "wall"})
+    box = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    assert target_category(ids, cats, box) == "couch"
+    assert target_category(ids, cats, box, name="white wall") == "wall"   # the name is the wall

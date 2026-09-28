@@ -10,6 +10,9 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 IGNORED = {"floor", "ceiling", "unknown", "carpet", "rug", "floor mat", "mat"}
+# surfaces behind an object: its outline (floor to 1 m) often covers more of them than of the
+# object, so they only count when the name itself says wall (spec §3)
+BACKDROP = {"wall", "door frame", "window", "window frame"}
 OPENING_WORDS = {"door", "doorway", "opening", "hallway", "corridor", "passage", "entrance",
                  "entry", "archway", "arch", "gap", "hall", "passageway"}
 _SYNONYMS = [
@@ -49,14 +52,16 @@ def _mask(shape, polygon):
     return np.asarray(im) > 0
 
 
-def target_category(ids, categories, polygon):
-    """Most frequent non-floor category inside the target outline, or None."""
+def target_category(ids, categories, polygon, name=None):
+    """Most frequent category inside the target outline, ignoring floor-like surfaces and,
+    unless `name` is a wall, the walls/windows behind the object. None if nothing is left."""
     cats = json.loads(categories) if isinstance(categories, str) else categories
     inside = ids[_mask(ids.shape, polygon)]
+    skip = IGNORED if name and canonical((name.split() or [""])[-1]) == canonical("wall") else IGNORED | BACKDROP
     counts = {}
     for i, n in zip(*np.unique(inside, return_counts=True)):
         c = cats.get(str(int(i)), "unknown")
-        if c not in IGNORED:
+        if c not in skip:
             counts[c] = counts.get(c, 0) + int(n)
     return max(counts, key=counts.get) if counts else None
 

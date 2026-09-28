@@ -158,7 +158,7 @@ def semantic_report(rows, landmarks, sem_dir):
         name, beside = r["reply"]["name"], r["reply"].get("beside")
         key = f"{lm['target']}/{'pair' if r.get('pair_id') else 'single'}"
         if lm["target"] == "object":
-            cat = target_category(ids, cats, lm["polygon"])
+            cat = target_category(ids, cats, lm["polygon"], name=name)
             ok, ref = cat is not None and name_matches(name, cat), cat
         else:
             near = sorted(beside_categories(ids, cats, lm["bbox"]))
