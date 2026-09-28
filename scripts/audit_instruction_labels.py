@@ -234,6 +234,8 @@ def main() -> None:
     payload = {"items": items, "population": pop, "seed": args.seed, "mode": args.mode,
                "verdicts": VERDICTS[args.mode], "source": str(source.relative_to(REPO_ROOT))}
     html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+    if args.mode == "geometry":   # the gallery names an artifact by its <title>
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Landmark Geometry Audit</title>", 1)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html)
     print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")

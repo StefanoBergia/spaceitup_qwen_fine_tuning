@@ -121,7 +121,7 @@ const items = DATA.items;
 const marks = {};           // id -> {verdict, note}
 let idx = 0, db = null, mode = "connecting";
 const $ = (id) => document.getElementById(id);
-const LS = `instr-audit-${DATA.mode || "labels"}`;
+const LS = `instr-audit-${DATA.mode || "labels"}-${DATA.seed}`;
 const VERDICTS = DATA.verdicts;
 const tone = (v) => (v === "ok" || v === "none_ok") ? "ok" : v === "unsure" ? "unsure" : "bad";
 if (DATA.mode === "geometry") {
