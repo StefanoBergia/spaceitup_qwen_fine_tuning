@@ -560,3 +560,63 @@ def test_resolve_i4_rejects_a_side_word_in_name_or_beside():
     assert resolve_i4(reply, "left", tpl)["rejects"] == ["name:bad"]
     reply = {"name": "doorway", "beside": "right sofa", "single": True, "instruction": "Go left through the doorway."}
     assert resolve_i4(reply, "left", "Take the {name} on the {side}.")["rejects"] == ["name:bad"]
+
+
+# --- i4 phrasing fixes (label audit 2026-09-29) -----------------------------------------
+
+from rover_vlm.instructions import STYLES, choose_style, normalize_name  # noqa: E402
+
+
+def test_space_names_go_through_or_into_not_around():
+    tpl = "Go {side} around the {name}."
+    door = {"name": "open doorway", "beside": None, "single": True,
+            "instruction": "Go left around the open doorway."}
+    r = resolve_i4(door, "left", tpl)
+    assert r["passed"] and "through" in r["instruction"] and "around" not in r["instruction"]
+    assert "left" in r["instruction"] and "doorway" in r["instruction"]
+    ok = {**door, "instruction": "Slip through the open doorway on the left."}
+    assert resolve_i4(ok, "left", tpl)["instruction"] == "Slip through the open doorway on the left."
+    room = {"name": "empty room", "beside": None, "single": True,
+            "instruction": "Go left around the empty room."}
+    r = resolve_i4(room, "left", tpl)
+    assert r["passed"] and "into" in r["instruction"] and "around" not in r["instruction"]
+
+
+def test_wall_panel_becomes_wall():
+    assert normalize_name("white rectangular wall panel") == "white rectangular wall"
+    assert normalize_name("wooden panel") == "wooden panel"        # a real panel stays a panel
+    reply = {"name": "white wall panel", "beside": None, "single": True,
+             "instruction": "Keep left of the white wall panel."}
+    r = resolve_i4(reply, "left", "Go {side} around the {name}.")
+    assert r["passed"] and r["instruction"] == "Keep left of the white wall."
+
+
+def test_prompt_uses_the_records_own_pattern_and_style():
+    tpl = "Swing {side} past the {name}."
+    p = naming_prompt("object", "right", tpl, STYLES[1])
+    assert "Swing right past the <name>" in p and STYLES[1] in p
+    assert "wall" in p and "panel" in p                  # tells Cosmos to say wall, not panel
+    assert "through" in p                                # openings are gone through, not around
+
+
+def test_templates_and_styles_are_varied_and_valid():
+    objs = TARGET_TEMPLATES["object"]
+    assert len(objs) >= 16 and len(set(objs)) == len(objs)
+    assert all("{side}" in t and "{name}" in t for t in objs)
+    assert len({t.split()[0] for t in objs}) >= 8        # not all "Go ..."
+    assert len(STYLES) >= 4
+    picks = {choose_style(f"r{i}") for i in range(200)}
+    assert picks == set(STYLES)                          # every style gets used
+    for t in objs:                                       # every template passes the text rules
+        s = fill_template(t, "left", "grey sofa", None)
+        assert not instruction_rejects(s, side="left"), s
+
+
+def test_head_noun_ignores_trailing_phrases():
+    assert head_noun("white cabinet with glass door") == "cabinet"
+    assert head_noun("staircase leading to the dining area") == "staircase"
+    assert head_noun("table next to the window") == "table"
+    reply = {"name": "white cabinet with glass door", "beside": None, "single": True,
+             "instruction": "Go right around the white cabinet with glass door."}
+    assert resolve_i4(reply, "right", "Go {side} around the {name}.")["instruction"] == \
+        "Go right around the white cabinet with glass door."

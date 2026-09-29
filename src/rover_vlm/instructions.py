@@ -487,6 +487,9 @@ def rescore_row(row):
 
 TARGET_OUTLINE_COLOR = (0, 230, 255)
 TARGET_TEMPLATES = {
+    # 2026-09-29: widened for phrasing variety (the fine-tune should understand many ways of
+    # saying it). Every pattern keeps the convention: the side word is the side the route
+    # passes the object on.
     "object": [
         "Go {side} around the {name}.",
         "Pass the {name} on the {side}.",
@@ -496,6 +499,16 @@ TARGET_TEMPLATES = {
         "Steer {side} around the {name}.",
         "Pass {side} of the {name}.",
         "Head {side} around the {name}.",
+        "Swing {side} past the {name}.",
+        "Stay {side} of the {name} and keep going.",
+        "Bear {side} to get around the {name}.",
+        "Work your way {side} around the {name}.",
+        "Get past the {name} on the {side}.",
+        "Move {side} around the {name}.",
+        "Drive {side} of the {name}.",
+        "Skirt {side} around the {name}.",
+        "Head past the {name}, keeping {side}.",
+        "Route {side} around the {name}.",
     ],
     "opening": [
         "Go through the {name} on the {side}.",
@@ -508,6 +521,44 @@ TARGET_TEMPLATES = {
         "Head for the {name} on the {side}, by the {beside}.",
     ],
 }
+
+
+# Openings and open space are gone through or into, never "around" (label audit 2026-09-29:
+# "Go left around the open doorway / the empty room" were the wrong landmarks).
+SPACE_WORDS = {
+    "through": {"doorway", "door", "doors", "opening", "entrance", "entryway", "archway", "arch",
+                "passage", "passageway", "gap"},
+    "into": {"room", "area", "space", "hallway", "corridor", "hall", "lobby"},
+}
+SPACE_TEMPLATES = {
+    "through": ["Go {side} through the {name}.", "Take the {name} on the {side}.",
+                "Head {side} through the {name}.", "Go through the {name} on the {side}."],
+    "into": ["Head {side} into the {name}.", "Go {side} into the {name}.",
+             "Bear {side} into the {name}.", "Move {side} into the {name}."],
+}
+# A speaking style per record, so the same target is not always described the same way.
+STYLES = [
+    "a short, direct command",
+    "a casual remark, the way you would tell a friend",
+    "a polite request",
+    "a command that also says briefly why or where it leads",
+]
+
+
+def space_kind(name):
+    """'through' / 'into' when the name is an opening or open space, else None."""
+    noun = head_noun(name)
+    return next((k for k, words in SPACE_WORDS.items() if noun in words), None)
+
+
+def normalize_name(name):
+    """'white wall panel' -> 'white wall' (Cosmos calls wall surfaces panels; audit 2026-09-29).
+    A bare 'panel' stays: some are real panels or partitions."""
+    return re.sub(r"\bwall panels?\b", "wall", name)
+
+
+def choose_style(record_id):
+    return STYLES[_stable_index("style:" + record_id, len(STYLES))]
 
 
 def _stable_index(key, n):
@@ -524,8 +575,12 @@ def fill_template(template, side, name, beside):
     return template.format(side=side, name=name, beside=beside or "")
 
 
+_TRAILING = re.compile(r"\b(?:with|leading|next|near|by|of|on|in|under|beside|behind|against)\b.*$")
+
+
 def head_noun(name):
-    words = re.findall(r"[a-z]+", (name or "").lower())
+    """Last word of the first noun phrase: 'white cabinet with glass door' -> 'cabinet'."""
+    words = re.findall(r"[a-z]+", _TRAILING.sub("", (name or "").lower()))
     return words[-1] if words else None
 
 
@@ -544,11 +599,16 @@ def render_target_jpeg(record, polygon):
     return buf.getvalue()
 
 
-def naming_prompt(target, side):
-    """Ask Cosmos to name the outlined target and phrase the instruction (prompt i4)."""
+def naming_prompt(target, side, template=None, style=None):
+    """Ask Cosmos to name the outlined target and phrase the instruction (prompt i4).
+
+    `template` is the record's own sentence pattern (choose_template) and `style` its speaking
+    style (choose_style); both vary per record so the labels do not all read alike.
+    """
     what = ("an opening the rover drives through — a doorway, a passage, a hallway or a gap "
             "between two things" if target == "opening" else "the object the rover drives around")
-    pattern = TARGET_TEMPLATES[target][0].format(side=side, name="<name>", beside="<beside>")
+    pattern = (template or TARGET_TEMPLATES[target][0]).format(side=side, name="<name>", beside="<beside>")
+    style = style or STYLES[0]
     beside = ('"beside": "<the most prominent object right next to the opening, or null>", '
               if target == "opening" else '"beside": null, ')
     return f"""{SCENE_INTRO}
@@ -557,12 +617,16 @@ One region of the image is outlined; everything outside it is dimmed. The outlin
 {what}. The rover will pass it on its {side}.
 
 1. Name what is inside the outline in 1 to 5 words, the way a person would say it
-   ("grey sofa", "open doorway", "kitchen island"). Never use the words left or right in
-   the name.
+   ("grey sofa", "stone column", "kitchen island"). Never use the words left or right in
+   the name. If the outlined thing is part of a wall, call it a wall ("white wall"), not a
+   panel.
 2. Say whether the outline covers one single thing (true) or several unrelated things (false).
-3. Write one instruction a person standing behind the rover would say, in your own words,
-   meaning the same as: "{pattern}". It must contain the word '{side}' and the name, and must
-   not mention the outline, the dimming, colours of the drawing, or "your left/right".
+3. Write one instruction a person standing behind the rover would say, in your own words and
+   as {style}, meaning the same as: "{pattern}". Vary the wording; do not just copy the
+   example. It must contain the word '{side}' and the name, and must not mention the
+   outline, the dimming, colours of the drawing, or "your left/right". If the outlined thing
+   is an opening or open space (a doorway, a room), the rover goes through or into it, not
+   around it.
 
 {_answer_block('{"name": "<name>", ' + beside + '"single": true, "instruction": "<the instruction>"}')}"""
 
@@ -604,11 +668,19 @@ def resolve_i4(reply, side, template):
     words = f"{reply['name']} {reply.get('beside') or ''}"
     if len(reply["name"].split()) > 5 or _DRAWING.search(reply["name"]) or re.search(r"\b(?:left|right)\b", words, re.I):
         return {"instruction": None, "instruction_source": None, "rejects": ["name:bad"], "passed": False}
+    name = normalize_name(reply["name"])
     para = reply.get("instruction")
-    if para and not _i4_rejects(para, side, reply["name"]):
+    para = normalize_name(para) if para else para
+    space = space_kind(name)
+    if space:
+        # an opening/room is gone through or into: a paraphrase saying "around" is rewritten
+        template = SPACE_TEMPLATES[space][_stable_index(name + side, len(SPACE_TEMPLATES[space]))]
+        if para and re.search(r"\baround\b", para, re.I):
+            para = None
+    if para and not _i4_rejects(para, side, name):
         return {"instruction": para, "instruction_source": "cosmos", "rejects": [], "passed": True}
-    filled = fill_template(template, side, reply["name"], reply.get("beside"))
-    rejects = _i4_rejects(filled, side, reply["name"])
+    filled = fill_template(template, side, name, reply.get("beside"))
+    rejects = _i4_rejects(filled, side, name)
     return {"instruction": filled if not rejects else None, "instruction_source": "template",
             "rejects": rejects, "passed": not rejects}
 

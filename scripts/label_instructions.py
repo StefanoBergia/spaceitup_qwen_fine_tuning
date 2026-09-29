@@ -53,7 +53,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.instructions import (
-    choose_template, gate_failures, generation_prompt, instruction_rejects, is_side_only,
+    choose_style, choose_template, gate_failures, generation_prompt, instruction_rejects, is_side_only,
     load_landmarks, naming_prompt, parse_instruction, parse_target_reply, render_generation_jpeg,
     render_target_jpeg, rescore_row, resolve_i4, retry_ids, summarize_labels,
 )
@@ -175,10 +175,11 @@ def main() -> None:
             if lm["target"] == "none":
                 return {**row, "reply": None, "rejects": [f"no_target:{lm['reason']}"], "passed": False}
             template = choose_template(rec["id"], lm["target"], has_beside=True)
+            style = choose_style(rec["id"])
             t0 = time.time()
             try:
                 raw, fin = chat_with_image(client, model, render_target_jpeg(rec, lm["polygon"]),
-                                           naming_prompt(lm["target"], hm["side"]),
+                                           naming_prompt(lm["target"], hm["side"], template, style),
                                            max_tokens=args.max_tokens, seed=seed)
             except Exception as e:  # noqa: BLE001 — one bad sample must not kill the run
                 return {**row, "error": f"{type(e).__name__}: {e}"}
@@ -186,7 +187,8 @@ def main() -> None:
             # a template needing {beside} is only usable when Cosmos gave one
             if "{beside}" in template and not (reply and reply.get("beside")):
                 template = choose_template(rec["id"], lm["target"], has_beside=False)
-            row.update({"template": template, "reply": reply, **resolve_i4(reply, hm["side"], template),
+            row.update({"template": template, "style": style, "reply": reply,
+                        **resolve_i4(reply, hm["side"], template),
                         "finish": fin, "latency_s": round(time.time() - t0, 2)})
             if args.show or not row["passed"]:
                 row["raw_gen"] = raw
