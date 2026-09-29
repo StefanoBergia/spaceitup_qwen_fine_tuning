@@ -29,14 +29,19 @@ _SYNONYMS = [
     {"bed", "mattress"},
     {"fridge", "refrigerator"},
     {"tv", "television", "monitor", "screen"},
+    {"stairs", "staircase", "stair", "stairway", "steps"},
 ]
 _CANON = {w: sorted(g)[0] for g in _SYNONYMS for w in g}
 
 
 def canonical(word):
     w = word.lower().strip()
-    w = w[:-1] if w.endswith("s") and w[:-1] in _CANON else w
-    return _CANON.get(w, w)
+    if w in _CANON:
+        return _CANON[w]
+    for stem in (w[:-2] if w.endswith("es") else None, w[:-1] if w.endswith("s") else None):
+        if stem and len(stem) > 2:                 # "curtains" -> "curtain", "benches" -> "bench"
+            return _CANON.get(stem, stem)
+    return w
 
 
 def name_matches(name, category):
@@ -64,6 +69,20 @@ def target_category(ids, categories, polygon, name=None):
         if c not in skip:
             counts[c] = counts.get(c, 0) + int(n)
     return max(counts, key=counts.get) if counts else None
+
+
+def target_categories(ids, categories, polygon, name=None, min_frac=0.10):
+    """Every category covering >= min_frac of the outline (same skips as target_category).
+    Composite objects need this: a dining table's outline is mostly chair pixels."""
+    cats = json.loads(categories) if isinstance(categories, str) else categories
+    inside = ids[_mask(ids.shape, polygon)]
+    skip = IGNORED if name and canonical((name.split() or [""])[-1]) == canonical("wall") else IGNORED | BACKDROP
+    out = set()
+    for i, n in zip(*np.unique(inside, return_counts=True)):
+        c = cats.get(str(int(i)), "unknown")
+        if c not in skip and n >= min_frac * max(len(inside), 1):
+            out.add(c)
+    return out
 
 
 def beside_categories(ids, categories, bbox, grow=0.5, min_frac=0.02):

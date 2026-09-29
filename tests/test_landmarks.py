@@ -277,7 +277,7 @@ def test_semantic_report_counts_agreement_and_mismatches(tmp_path):
     assert report["cells"]["object/single"] == {"n": 1, "agree": 1, "rate": 1.0}
     assert report["cells"]["object/pair"]["agree"] == 0
     assert report["no_semantic_frame"] == 1
-    assert [m["id"] for m in mism] == ["b"] and mism[0]["hm3d"] == "couch"
+    assert [m["id"] for m in mism] == ["b"] and mism[0]["hm3d"] == ["couch"]   # every object in the outline
 
 
 def test_target_category_skips_the_wall_behind_an_object():
@@ -288,3 +288,36 @@ def test_target_category_skips_the_wall_behind_an_object():
     box = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
     assert target_category(ids, cats, box) == "couch"
     assert target_category(ids, cats, box, name="white wall") == "wall"   # the name is the wall
+
+
+def test_semantic_report_skips_frames_without_object_labels(tmp_path):
+    # 2026-09-29: some val scenes replay with no HM3D labels (all ids 0, empty category map);
+    # scoring names against them reported every such row as a mismatch
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    np.savez(tmp_path / "s_c000.npz", ids=np.zeros((10, 10), np.uint16), categories=json.dumps({}))
+    box = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+    lms = {"a": {"sample_dir": "/x/s_c000", "target": "object", "polygon": box, "bbox": [0.2, 0.2, 0.8, 0.8]}}
+    rows = [{"id": "a", "passed": True, "reply": {"name": "sofa"}, "pair_id": None}]
+    report, mism = audit.semantic_report(rows, lms, tmp_path)
+    assert report["no_semantic_frame"] == 1 and report["cells"] == {} and mism == []
+
+
+def test_name_matching_handles_plurals_and_stairs():
+    assert name_matches("window with sheer curtains", "curtain")
+    assert name_matches("ornate staircase", "stairs railing")
+    assert name_matches("wooden benches", "bench")
+
+
+def test_target_categories_lists_every_sizeable_object_in_the_outline():
+    # a dining table outline is mostly chairs by pixel count: the table must still count
+    from rover_vlm.landmark_check import target_categories
+    ids = np.zeros((10, 10), np.uint16)
+    ids[2:8, 2:8] = 5                                    # chairs, 36 px
+    ids[4:6, 3:7] = 6                                    # table, 8 px (of the 36 in the box)
+    cats = json.dumps({"5": "chair", "6": "table", "0": "floor"})
+    box = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+    assert target_categories(ids, cats, box) == {"chair", "table"}

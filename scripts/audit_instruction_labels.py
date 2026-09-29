@@ -42,7 +42,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
-from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_category
+from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 V2 = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
@@ -157,11 +157,16 @@ def semantic_report(rows, landmarks, sem_dir):
             continue
         z = np.load(f)
         ids, cats = z["ids"], str(z["categories"])
+        if not json.loads(cats):     # scene replayed without HM3D labels (some val scenes)
+            no_frame += 1
+            continue
         name, beside = r["reply"]["name"], r["reply"].get("beside")
         key = f"{lm['target']}/{'pair' if r.get('pair_id') else 'single'}"
         if lm["target"] == "object":
-            cat = target_category(ids, cats, lm["polygon"], name=name)
-            ok, ref = cat is not None and name_matches(name, cat), cat
+            # any sizeable object in the outline counts: composite objects (a table ringed by
+            # chairs, an island with a dishwasher) are rarely the majority-pixel category
+            found = target_categories(ids, cats, lm["polygon"], name=name)
+            ok, ref = any(name_matches(name, c) for c in found), sorted(found) or None
         else:
             near = sorted(beside_categories(ids, cats, lm["bbox"]))
             ok = any(w in OPENING_WORDS for w in name.split()) and (
