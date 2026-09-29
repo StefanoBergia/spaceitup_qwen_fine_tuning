@@ -243,6 +243,8 @@ def main() -> None:
     html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
     if args.mode == "geometry":   # the gallery names an artifact by its <title>
         html = html.replace("<title>Instruction Label Audit</title>", "<title>Landmark Geometry Audit</title>", 1)
+    elif args.labels:             # i4 labels: Cosmos's sentence on the geometry-chosen target
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Grounded Label Audit</title>", 1)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html)
     print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
