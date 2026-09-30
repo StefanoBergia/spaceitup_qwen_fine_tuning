@@ -55,9 +55,9 @@ One landmark per route under-specifies a path; the goal point in today's prompt 
 round-4 frames ─► events            (CPU)  prepare_habitat_instr.py events
                   └► events_{train,eval}.jsonl   one row per route
                   └► objects_{train,eval}.jsonl  one row per (frame, object), deduplicated
-               ─► name              (GPU)  label_instructions.py --prompt d1 --stage name
+               ─► name              (GPU)  label_descriptions.py --stage name
                   └► outputs/instr_labels_v3/names_{split}_d1.jsonl
-               ─► compose           (GPU)  label_instructions.py --prompt d1 --stage compose
+               ─► compose           (GPU)  label_descriptions.py --stage compose
                   └► outputs/instr_labels_v3/desc_{split}_d1.jsonl
                ─► finalize-descriptions (CPU)  prepare_habitat_instr.py finalize-descriptions
                   └► data/prepared_habitat_instr_v3/{train_desc,eval_desc_*}.json
@@ -72,8 +72,9 @@ New modules (instead of growing `instructions.py`, 832 lines):
   rules, template fallback, style/shape choice (reuses i4's `STYLES`, `_stable_index`).
 
 Changed: `scripts/prepare_habitat_instr.py` (stages `events`, `finalize-descriptions`),
-`scripts/label_instructions.py` (`--prompt d1 --stage {name,compose}`, same resume / retry /
-gate machinery), `scripts/audit_instruction_labels.py` (modes `events` and `d1`),
+a new `scripts/label_descriptions.py` (`--stage {name,compose}`; reuses `labelling_io`'s
+endpoint, resume and output rules — `label_instructions.py`'s main loop is record/pair-shaped
+and stays for i1–i4), `scripts/audit_instruction_labels.py` (modes `events` and `d1`),
 `src/rover_vlm/habitat_data.py` (`description_entry_prompt`), `src/rover_vlm/eval.py`
 (description-followed metric), a new sbatch `slurm/label_descriptions.sbatch` (serve + both
 stages in one job, resumable, `STAGE=gate|full`). `landmarks.select_target` and i4 stay
@@ -84,8 +85,9 @@ for reproducibility.
 On the frame's own `state.npz` and camera; route resampled every 5 cm; obstacles are
 gap-merged occupied blobs (1-cell dilation, as `crossing_target`).
 
-**Occlusion fix (group C).** A visibility ray ignores occupied cells whose floor-to-1 m
-column is not in the image (below the frame, ≈ < 0.8 m ahead).
+**Occlusion fix (group C).** Occupied cells within `NEAR_CAMERA_M = 0.35` m of the camera are
+neither occluders nor candidates: the rover's start pose is collision-free, and in 00372 such a
+strip (0.31 m ahead, bare floor in the image) hid the armchair from every ray.
 
 **Candidates.** A blob with (a) closest approach ≤ `PASS_M = 0.7` m, ignoring the first
 0.3 m of route, (b) ≥ 4 visible cells, (c) depth-trimmed outline ≥ `MIN_AREA = 0.01` of
@@ -122,7 +124,8 @@ whose depth lies in the object's own `fwd` range ± 0.3 m; outline = hull of the
 crop = mask box + 15% margin. Fit residual > 0.3 m → column outline as today, object flagged
 `depth_fallback`.
 
-**Rows.** `events_*.jsonl`: `id, sample_dir, candidate_index, kind (gt|second), pair_id,
+**Rows.** `events_*.jsonl`: `id, sample_dir, candidate_index, kind (labelset kind: `instructed` = ground
+truth, `opposite` = second route), pair_id,
 events[{type, side, object_ids, arc_m}], stop{type, relation, object_id, distance_words},
 reason`. `objects_*.jsonl`: `object_id (frame + blob), polygon, bbox, crop_box, kind_hint
 (object|opening), depth_fallback, area`. Drop reasons are counted and printed:
@@ -130,13 +133,14 @@ reason`. `objects_*.jsonl`: `object_id (frame + blob), polygon, bbox, crop_box, 
 
 ## Cosmos stages (`descriptions.py`, prompt d1)
 
-**name** — one call per object row, shared by both routes of a frame. Images: the full frame
-with a thin outline (context) and the crop. Reply `{"name", "kind"}`. Rejected: > 4 words,
+**name** — one call per object row, shared by both routes of a frame. One composite image
+(multi-image requests are untested on the Cosmos server): left, the full frame with the object
+outlined and the rest dimmed (as i4); right, the crop enlarged. Reply `{"name", "kind"}`. Rejected: > 4 words,
 generic ("object", "thing", "area", "item"), drawing words ("outline", "box", "highlighted",
 "marked"), kind ≠ event need (a `through` gap named as an object). One retry with seed + 1;
 still rejected → object unnamed → routes needing it dropped (`unnamed_object`).
 
-**compose** — one text-only call per route. Input: the ordered events with names and sides,
+**compose** — one text-only call per route (new `labelling_io.chat_text`). Input: the ordered events with names and sides,
 the stop phrase, one of the 4 i4 speaking styles and a sentence-shape hint (stable hash of
 the id). Output: 1–2 sentences, ≤ 45 words. Text rules (`description_rejects`):
 - every name's head noun appears, in route order;
@@ -173,14 +177,17 @@ Eval files (scene-disjoint round-4 eval):
 
 ## Evaluation (`eval.py`)
 
-- Point error and **endpoint error** (the goal is not given in B form).
+- Point error and **endpoint error** (the goal is not given in B form), reported next to a
+  **constant-goal baseline** (every prediction ends at the set's mean goal): 41% of goals sit at
+  x = 0.5 and goal y spans only 0.545–0.629 (10th–90th pct), so a text-blind guess is close.
 - **Description followed**: back-project the predicted image path to the floor (level camera,
   inverse of `landmarks.Camera.uv`) on the frame's map; `pass` → obstacle on the stated side
   at the closest point; `between` → both on their sides; `through` → path crosses the gap
   segment; stop → endpoint within 0.75 m of the true goal. A route is followed when all hold.
 - **Pair success**: both routes of a frame followed (text-blind ≈ 0%).
 - Shuffled-text control: followed-rate should fall well below the matched set.
-- mp4 videos of predicted paths for a fixed sample of eval frames (standing rule).
+- mp4 videos of predicted paths for a fixed sample of eval frames (standing rule;
+  `scripts/render_desc_videos.py`, ffmpeg like `render_clip_predictions.py`).
 
 ## Testing
 
