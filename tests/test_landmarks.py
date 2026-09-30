@@ -321,3 +321,18 @@ def test_target_categories_lists_every_sizeable_object_in_the_outline():
     cats = json.dumps({"5": "chair", "6": "table", "0": "floor"})
     box = [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
     assert target_categories(ids, cats, box) == {"chair", "table"}
+
+
+def test_sample_labelled_draws_pairs_at_random(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    recs = [{"id": f"p{i}", "habitat_meta": {"pair_id": f"P{i}"}} for i in range(40)]
+    rows = [{"id": r["id"], "passed": True, "instruction": "Go left around the sofa."} for r in recs]
+    audit.with_instruction = lambda rec, text, source: rec              # no image paths needed here
+    a, _ = audit.sample_labelled(recs, rows, 10, seed=1)
+    b, _ = audit.sample_labelled(recs, rows, 10, seed=2)
+    assert {r["id"] for r in a} != {r["id"] for r in b}                  # seed changes which pairs
+    assert {r["id"] for r in a} != {f"p{i}" for i in range(5)}           # not just the first ones

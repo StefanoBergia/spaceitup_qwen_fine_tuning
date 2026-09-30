@@ -131,17 +131,18 @@ def label_rows(path):
 
 
 def sample_labelled(records, rows, n, seed):
-    """Passed i4 rows as records carrying their instruction; pairs first so both sides show."""
+    """A uniform random sample of the passed i4 rows, as records carrying their instruction.
+
+    (Pairs used to come first so both sides showed; after the route_bends_both_ways drop
+    almost no pair keeps both sides, and over-sampling them would skew a spot check.)
+    """
     by_id = {r["id"]: r for r in records}
     ok = [r for r in rows if r.get("passed") and r["id"] in by_id]
-    recs = [with_instruction(by_id[r["id"]], r["instruction"], r.get("instruction_source") or "cosmos")
-            for r in ok]
-    pairs = [r for r in recs if r["habitat_meta"].get("pair_id")]
-    single = [r for r in recs if not r["habitat_meta"].get("pair_id")]
     rng = random.Random(seed)
-    picked = pairs[: n // 2] + rng.sample(single, min(n - min(len(pairs), n // 2), len(single)))
-    rng.shuffle(picked)
-    return picked, {"passed_pair": len(pairs), "passed_single": len(single), "rows": len(rows)}
+    picked = [with_instruction(by_id[r["id"]], r["instruction"], r.get("instruction_source") or "cosmos")
+              for r in rng.sample(ok, min(n, len(ok)))]
+    n_pair = sum(1 for r in ok if by_id[r["id"]]["habitat_meta"].get("pair_id"))
+    return picked, {"passed_pair": n_pair, "passed_single": len(ok) - n_pair, "rows": len(rows)}
 
 
 def semantic_report(rows, landmarks, sem_dir):
@@ -230,7 +231,7 @@ def main() -> None:
         picked, pop = sample_geometry(json.loads(source.read_text()), landmarks, 30, args.n - 30, args.seed)
         out = args.out or REPO_ROOT / "outputs" / "instr_geometry_audit.html"
     elif args.labels:
-        source = args.split
+        source = args.split.resolve()
         picked, pop = sample_labelled(json.loads(source.read_text()), label_rows(args.labels), args.n, args.seed)
         out = args.out or REPO_ROOT / "outputs" / "instr_i4_audit.html"
     else:
