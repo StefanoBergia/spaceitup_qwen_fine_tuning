@@ -48,3 +48,21 @@ def test_chat_text_sends_a_plain_text_message():
     client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     assert chat_text(client, "m", "hello", max_tokens=5, seed=1) == ("hi", "stop")
     assert seen["messages"] == [{"role": "user", "content": "hello"}] and seen["seed"] == 1
+
+
+def test_prepare_output_drops_a_truncated_last_line(tmp_path, capsys):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"id": "a", "passed": true}\n{"id": "b", "passed": tr')   # killed mid-write
+    done, mode = prepare_output(p, resume=True, overwrite=False)
+    assert done == {"a"} and mode == "a"
+    assert p.read_text() == '{"id": "a", "passed": true}\n'
+    assert "unparseable" in capsys.readouterr().out
+
+
+def test_prepare_output_refuses_a_corrupt_middle_line(tmp_path):
+    p = tmp_path / "x.jsonl"
+    original = '{"id": "a"}\n{"id": "b", "pa\n{"id": "c"}\n'
+    p.write_text(original)
+    with pytest.raises(SystemExit, match="line 2"):
+        prepare_output(p, resume=True, overwrite=False)
+    assert p.read_text() == original                                      # left untouched

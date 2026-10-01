@@ -7,6 +7,8 @@ killed and resumed. The rules for that file live here once:
 * a non-empty output is never truncated unless --overwrite says so (a full run is hours);
 * --resume keeps every finished row and drops error rows, so a failed request is retried
   rather than shadowed — a row that ran and merely failed a check is a result, not an error.
+* a last line cut off by a kill is dropped (with a warning) and redone; a bad line anywhere
+  else stops the run untouched.
 """
 
 import base64
@@ -38,7 +40,17 @@ def prepare_output(out_path, *, resume, overwrite):
             return set(), "w"
         raise SystemExit(f"{out_path} exists and is not empty. Pass --resume to continue it, "
                          "or --overwrite to replace it.")
-    kept = [json.loads(line) for line in out_path.open() if line.strip()]
+    lines = [(n, line) for n, line in enumerate(out_path.open(), 1) if line.strip()]
+    kept = []
+    for k, (n, line) in enumerate(lines):
+        try:
+            kept.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            if k < len(lines) - 1:   # only a hard kill mid-write explains a bad LAST line
+                raise SystemExit(f"{out_path}: line {n} is not valid JSON ({e}) and is not the last "
+                                 "line, so this is not a killed write. Inspect the file; nothing was changed.")
+            print(f"resume:   WARNING dropped 1 unparseable last line of {out_path.name} "
+                  "(a write cut off by a kill); that row will be redone")
     failed = sum(1 for r in kept if r.get("error"))
     kept = [r for r in kept if not r.get("error")]
     tmp = out_path.with_suffix(".jsonl.tmp")
