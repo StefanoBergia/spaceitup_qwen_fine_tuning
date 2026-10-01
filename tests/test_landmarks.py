@@ -336,3 +336,18 @@ def test_sample_labelled_draws_pairs_at_random(tmp_path):
     b, _ = audit.sample_labelled(recs, rows, 10, seed=2)
     assert {r["id"] for r in a} != {r["id"] for r in b}                  # seed changes which pairs
     assert {r["id"] for r in a} != {f"p{i}" for i in range(5)}           # not just the first ones
+
+
+def test_audit_template_text_gets_the_rows_kinds():
+    # final review M-audit: events/d1 modes built the template without kinds, so a wall inside a
+    # between lost its "past the end of the wall" stop
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    row = {"events": [{"type": "between", "side": None, "objects": ["f:b1", "f:b2"]}],
+           "stop": {"type": "distance", "relation": "past", "amount": "well", "distance_m": 4.0, "object": "f:b1"}}
+    objects = {"f:b1": {"kind_hint": "wall"}, "f:b2": {"kind_hint": "object"}, "f:b9": {"kind_hint": "wall"}}
+    assert audit.row_kinds(row, objects) == {"f:b1": "wall", "f:b2": "object"}   # only the row's ids
+    assert "past the end of the object 1" in audit.template_text(row, objects)

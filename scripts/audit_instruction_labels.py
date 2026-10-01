@@ -250,6 +250,16 @@ def placeholder_names(row):
     return {oid: f"object {i + 1}" for i, oid in enumerate(dict.fromkeys(ids))}
 
 
+def row_kinds(row, objects):
+    """{object_id: kind_hint} for the ids this row uses (the template marks walls with it)."""
+    return {o: objects[o]["kind_hint"] for o in placeholder_names(row)}
+
+
+def template_text(row, objects):
+    """The template sentence with "object N" names and the row's kinds."""
+    return template_description(row["events"], row["stop"], placeholder_names(row), kinds=row_kinds(row, objects))
+
+
 def draw_numbered(img, objects, names, stop_id=None):
     """Outline each named object with its number; the stop object in green, events orange."""
     draw = ImageDraw.Draw(img)
@@ -271,7 +281,7 @@ def events_item(rec, row, objects, text=None):
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=80)
     m = rec["habitat_meta"]
-    return {"id": rec["id"], "instruction": text or template_description(row["events"], row["stop"], names),
+    return {"id": rec["id"], "instruction": text or template_text(row, objects),
             "side": m["side"], "kind": m["kind"], "has_alt": bool(m.get("alt_path")), "scene": m["scene_id"],
             "target": "object", "reason": None,
             "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
