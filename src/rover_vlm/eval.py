@@ -11,6 +11,8 @@ from collections import Counter
 
 import numpy as np
 
+from .landmarks import CAM_HEIGHT_M, Camera, densify
+
 # Matches the outermost [[x, y], ...] list in generated text; inner pairs may use
 # [] or () (the prompt says "list of tuples", so models sometimes emit parens)
 _LIST_RE = re.compile(r"\[\s*[\[(].*?[\])]\s*\]", re.DOTALL)
@@ -226,7 +228,12 @@ def habitat_metrics(pred, gt, n_resample=10):
 
 
 def aggregate_habitat_metrics(records):
-    """Aggregate per-sample habitat eval records (as written by scripts/evaluate.py)."""
+    """Aggregate per-sample habitat eval records (as written by scripts/evaluate.py).
+
+    Records carrying habitat_meta.desc_check (route-description sets) also get a
+    "description" block from aggregate_description_metrics: follow rate (every event and
+    the stop), per-event-type rates, pair success, endpoint error next to the
+    constant-goal baseline."""
     n = len(records)
     parsed = [r for r in records if r.get("parsed") is not None]
     summary = {
@@ -250,6 +257,9 @@ def aggregate_habitat_metrics(records):
     win = baseline_win_rate(records)
     if win is not None:
         summary["win_vs_to_goal"] = win
+    desc = aggregate_description_metrics(records)
+    if desc is not None:
+        summary["description"] = desc
     return summary
 
 
@@ -635,3 +645,89 @@ def wrong_side_metrics(records):
         else:
             counts["straight"] += 1
     return {"n": len(rows), **{k: v / len(rows) for k, v in counts.items()}}
+
+
+# --- route descriptions (prompt d1, 2026-09-30) ---------------------------------------
+FOLLOW_NEAR_M = 2.0    # a prediction farther than this from an obstacle did not "pass" it
+STOP_TOL_M = 0.75      # the predicted end within this of the true goal = stopped right
+MAX_FLOOR_M = 15.0
+
+
+def image_to_floor(path, pose_xz, heading_xz):
+    """Floor xz of each [x, y, v] waypoint below the horizon (level camera at CAM_HEIGHT_M,
+    the inverse of landmarks.Camera.uv at height 0); points on or above it are dropped."""
+    cam = Camera(pose_xz, heading_xz)
+    out = []
+    for p in path:
+        x, y = float(p[0]), float(p[1])
+        if y <= 0.5 + 1e-3:
+            continue
+        fwd = min(0.5 * CAM_HEIGHT_M / (y - 0.5), MAX_FLOOR_M)
+        out.append(cam.pos + fwd * cam.h + (x - 0.5) * 2 * fwd * cam.right)
+    return np.array(out, float).reshape(-1, 2)
+
+
+def _pass_side(route, cells):
+    """(side the route passes the cells on, closest distance)."""
+    pts = densify(route, 0.05)
+    cells = np.asarray(cells, float).reshape(-1, 2)
+    d = np.linalg.norm(pts[:, None] - cells[None], axis=2)
+    i, j = np.unravel_index(d.argmin(), d.shape)
+    t = pts[min(i + 1, len(pts) - 1)] - pts[max(i - 1, 0)]
+    t /= np.linalg.norm(t) + 1e-9
+    right = np.array([-t[1], t[0]])
+    return ("left" if (cells[j] - pts[i]) @ right > 0 else "right"), float(d[i, j])
+
+
+def description_follow(pred_path, check):
+    """Did a predicted path do what its description says? Per event and the stop."""
+    floor = image_to_floor(pred_path or [], check["pose_xz"], check["heading_xz"])
+    n = len(check["events"])
+    if len(floor) < 2:
+        return {"follows": 0, "events": [0] * n, "stop": 0}
+    res = []
+    for e in check["events"]:
+        if e["type"] == "pass":
+            side, dist = _pass_side(floor, e["obstacles"][0])
+            res.append(int(side == e["side"] and dist <= FOLLOW_NEAR_M))
+        else:
+            groups = e["obstacles"] if e["type"] == "between" else [[p] for p in e["gap_xz"]]
+            a, b = (_pass_side(floor, g) for g in groups[:2])
+            res.append(int(a[0] != b[0] and max(a[1], b[1]) <= FOLLOW_NEAR_M))
+    stop = int(np.linalg.norm(floor[-1] - np.asarray(check["goal_xz"], float)) <= STOP_TOL_M)
+    return {"follows": int(all(res) and stop), "events": res, "stop": stop}
+
+
+def aggregate_description_metrics(records):
+    """Summary for records carrying habitat_meta.desc_check, else None. Unparseable
+    predictions count as not followed and stay in every denominator."""
+    rows = [r for r in records if (r.get("habitat_meta") or {}).get("desc_check")]
+    if not rows:
+        return None
+    follows, stops, by_type, pairs = {}, [], {}, {}
+    for r in rows:
+        chk = r["habitat_meta"]["desc_check"]
+        path = (r.get("parsed") or {}).get("path")
+        f = description_follow(path, chk) if path else {"follows": 0, "events": [0] * len(chk["events"]), "stop": 0}
+        follows[r["id"]] = f["follows"]
+        stops.append(f["stop"])
+        for e, ok in zip(chk["events"], f["events"]):
+            by_type.setdefault(e["type"], []).append(ok)
+        if r["habitat_meta"].get("pair_id"):
+            pairs.setdefault(r["habitat_meta"]["pair_id"], []).append(r["id"])
+    full = [p for p in pairs.values() if len(p) == 2]
+    goals = np.array([r["gt"]["goal"][:2] for r in rows if r.get("gt")], float)
+    ep = [r["metrics"]["goal_point_error"] for r in rows if r.get("metrics")]
+    return {
+        "n_records": len(rows),
+        "follow_rate": float(np.mean(list(follows.values()))),
+        "stop_rate": float(np.mean(stops)),
+        "event_rate_by_type": {k: float(np.mean(v)) for k, v in sorted(by_type.items())},
+        "n_pairs": len(full),
+        "pair_success": float(np.mean([all(follows[i] for i in p) for p in full])) if full else None,
+        "endpoint_error_median": float(np.median(ep)) if ep else None,
+        # every prediction ending at the set's mean goal: 41% of goals sit at x = 0.5 and goal y
+        # spans 0.545-0.629, so a text-blind endpoint is close — read endpoint error against this
+        "constant_goal_endpoint_error_median": (float(np.median(np.linalg.norm(goals - goals.mean(0), axis=1)))
+                                                if len(goals) else None),
+    }
