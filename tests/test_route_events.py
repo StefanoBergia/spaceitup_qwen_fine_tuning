@@ -209,9 +209,9 @@ def test_outline_excludes_a_second_object_joined_only_by_floor(tmp_path):
     assert trim["bbox"][2] < u_far - 0.1
 
 
-def test_outline_with_no_seeded_piece_falls_back(tmp_path):
+def test_outline_with_no_seeded_piece_hulls_the_floor_free_band(tmp_path):
     frame, vis, _ = _two_things_frame(tmp_path, floor_between=True)
-    # a very low object: its pixels hold none of the seeds (heights top/2, top)
+    # a very low object: its pixels hold none of the seeds (heights min(top, 0.25), top/2, top)
     low = column_outline(frame, vis, top=0.1)["polygon"]
     m = Image.new("L", (128, 128), 0)
     ImageDraw.Draw(m).polygon([(u * 128, v * 128) for u, v in low], fill=1)
@@ -219,7 +219,33 @@ def test_outline_with_no_seeded_piece_falls_back(tmp_path):
     far_floor = _depth_image(frame.cam, [[0, 0], [0, 0], [0, 0]], 1.3)
     frame.depth = np.where(np.asarray(m, bool), depth, far_floor)
     frame.depth_fit = calibrate_depth(frame.depth, frame.cam, frame.grid) or frame.depth_fit
-    assert object_outline(frame, vis)["depth_fallback"] is True
+    o = object_outline(frame, vis)
+    # final review I2: not the column outline (the group-B shape) but the band with the floor cut
+    assert o["depth_fallback"] is False
+    assert o["area"] < column_outline(frame, vis)["area"]
+
+
+def test_outline_with_only_floor_in_the_band_falls_back_to_the_column(tmp_path):
+    frame, vis = _box_frame(tmp_path)
+    frame.depth = _depth_image(frame.cam, [[0, 0], [0, 0], [0, 0]], 1.3)   # bare floor + far wall
+    frame.depth_fit = calibrate_depth(frame.depth, frame.cam, frame.grid)
+    o = object_outline(frame, vis)
+    assert o["depth_fallback"] is True and o["polygon"] == column_outline(frame, vis)["polygon"]
+
+
+def test_low_object_below_half_the_outline_top_gets_a_trimmed_outline(tmp_path):
+    # final review I2: a 0.3 m tall object ~1.5 m ahead -- the top/2 and top seeds land on the far wall
+    s = _free()
+    s[30:36, 48:54] = OCC                        # box x 2.4..2.7, z 1.5..1.8 (1.3-1.6 m ahead)
+    route = [(2.5, 0.2), (3.2, 1.2), (3.2, 1.9), (2.5, 3.0)]
+    f0 = load_frame(write_sample(tmp_path / "noimg", s, [route]))[1]
+    b = int(f0.lab[32, 50])
+    vis = visible_cells(f0, np.argwhere(f0.lab == b), b)
+    shape = column_outline(f0, vis, top=0.3)["polygon"]
+    frame = load_frame(write_sample(tmp_path / "d", s, [route], depth=_depth_image(f0.cam, shape, 1.5)))[1]
+    col, o = column_outline(frame, vis), object_outline(frame, vis)
+    assert o["depth_fallback"] is False
+    assert o["bbox"][1] > col["bbox"][1] + 0.05 and o["area"] < 0.6 * col["area"]
 
 
 def test_no_depth_png_falls_back_to_the_column_outline(tmp_path):

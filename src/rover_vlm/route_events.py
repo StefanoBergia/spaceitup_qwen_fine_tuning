@@ -195,7 +195,9 @@ def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
     if keep.sum() < MIN_MASK_PX:
         return col
     keep, seeded = _seeded_pieces(frame, keep, metres, vis_xz, top)
-    if not seeded:
+    # no seeded piece: hull the floor-free band itself; the column outline (the group-B shape) only
+    # when nothing but floor was at the object's depth (final review I2: low objects, no visible top)
+    if not seeded and keep.sum() < MIN_MASK_PX:
         return col
     ys, xs = np.nonzero(keep)
     pts = np.stack([(xs + 0.5) / W, (ys + 0.5) / H], 1)[:: max(1, len(xs) // 4000)]
@@ -204,12 +206,14 @@ def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
 
 FLOOR_TOL_M = 0.2    # floor at the object's depth would join neighbouring objects into one piece
 PIECE_MAX_PX = 128   # the connected-pieces labelling runs on a mask at most this many px on its long side
+LOW_SEED_M = 0.25    # extra seed height: an object lower than top/2 still holds a seed (final review I2)
 
 
 def _seeded_pieces(frame, keep, metres, vis_xz, top):
     """(keep', True) with `keep` cut to its 8-connected pieces that hold a seed pixel (the cells'
-    projections at heights top/2, top; height 0 lands on floor); floor pixels are removed first;
-    (keep, False) when no piece holds one. Gate 1: a hull over
+    projections at heights min(top, 0.25), top/2, top -- the low seed catches objects shorter than
+    top/2; height 0 lands on floor); floor pixels are removed first;
+    (floor-free keep, False) when no piece holds one. Gate 1: a hull over
     several things at one depth (two chairs and a doorway) made Cosmos name the wrong object."""
     H, W = keep.shape
     v = (np.arange(H)[:, None] + 0.5) / H
@@ -219,7 +223,7 @@ def _seeded_pieces(frame, keep, metres, vis_xz, top):
     small = keep[::st, ::st]
     lab, _ = components(small)
     ids = set()
-    for h in (top / 2, top):
+    for h in (min(top, LOW_SEED_M), top / 2, top):
         uv, fwd = frame.cam.uv(np.asarray(vis_xz), h)
         uv = np.nan_to_num(uv[fwd > 1e-6], nan=0.0, posinf=1.0, neginf=0.0)
         c = np.clip((uv[:, 0] * W).astype(int), 0, W - 1) // st
