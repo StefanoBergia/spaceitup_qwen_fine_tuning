@@ -129,6 +129,15 @@ if (DATA.mode === "geometry") {
   $("h1").textContent = "Landmark Geometry Audit";
   $("sub").textContent = "Each frame shows a route (magenta), its straight entry → goal line (dashed) and the object the geometry picked (cyan outline). Would the instruction above the buttons be true for this route: is the outlined object something the route goes around, on that side? Other objects may be just as good; mark it true if this one is correct.";
 }
+if (DATA.mode === "events") {
+  document.title = "Route Events Audit";
+  $("h1").textContent = "Route events audit";
+  $("sub").textContent = "Each route (magenta) is described by geometry: numbered orange outlines are the obstacles in route order, the green one is where it stops. Is the sentence TRUE of this route, and does it name what you would?";
+  $("tgtleg").hidden = false;
+  $("tgtleg").innerHTML = '<i style="background:#ffaa00"></i>orange = steps, in route order &nbsp; <i style="background:#3cdc3c"></i>green = stop object';
+  $("altleg").hidden = true;
+  document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1–${DATA.verdicts.length} mark and advance, ← → move.`;
+}
 VERDICTS.forEach((d, i) => {
   const b = document.createElement("button");
   b.dataset.v = d.v; b.dataset.tone = tone(d.v); b.setAttribute("aria-pressed", "false");
@@ -171,10 +180,10 @@ function render() {
   $("instr").textContent = it.instruction ? `“${it.instruction}”`
     : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})`
     : `“Go ${it.side} around the outlined object.”`;
-  $("tgtleg").hidden = !it.target || it.target === "none";
+  $("tgtleg").hidden = DATA.mode === "events" ? false : (!it.target || it.target === "none");
   $("side").textContent = `bows ${it.side} of the line`;
   $("kind").textContent = it.kind === "opposite" ? "other side of a two-route pair" : (it.has_alt ? "one side of a two-route pair" : "single-route frame");
-  $("altleg").hidden = !it.has_alt;
+  $("altleg").hidden = DATA.mode === "events" || !it.has_alt;
   document.querySelectorAll("#verdicts button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === m.verdict)));
   if (document.activeElement !== $("note")) $("note").value = m.note || "";
   $("prev").disabled = idx === 0; $("next").disabled = idx === items.length - 1;

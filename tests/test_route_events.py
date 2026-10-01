@@ -366,3 +366,22 @@ def test_event_row_carries_record_fields(tmp_path):
     assert row["image"].endswith("fpv_enhanced.png") and row["sample_id"] == "s1"
     rec["habitat_meta"]["candidate_index"] = 9
     assert prepare_instr.event_row(rec)["reason"] == "bad_candidate"
+
+
+def test_stop_falls_back_to_distance_past_the_last_event(tmp_path):
+    """Rough distance past the last thing passed, when nothing visible is near the goal."""
+    s = _free()
+    s[10:20, 52:58] = OCC                             # box A: x 2.6..2.9, z 0.5..1.0
+    route = [(2.5, 0.2), (3.3, 0.8), (3.3, 2.0), (3.3, 3.0), (4.6, 3.0)]   # ends heading sideways, off the box's line
+    d = write_sample(tmp_path / "s00002", s, [route])
+    _, frame = load_frame(d)
+    cands = candidates(frame, np.array(route))
+    ev = build_events(frame, cands)
+    st = stop_phrase(frame, np.array(route), ev, cands)
+    assert st["type"] == "distance" and st["relation"] == "past"
+    rem = route_geometry(np.array(route))["arc"][-1] - ev[-1]["arc_m"]
+    assert st["distance_m"] == min((1.0, 1.5, 2.0, 3.0, 4.0), key=lambda v: abs(v - rem))
+    out = describe_route(d, 0)
+    assert out["reason"] is None and out["stop"]["type"] == "distance"
+    assert out["stop"]["object"] == out["events"][-1]["objects"][0]
+    assert len(out["objects"]) == 1

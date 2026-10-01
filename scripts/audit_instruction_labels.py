@@ -122,7 +122,7 @@ def sample_geometry(records, landmarks, n_pair, n_single, seed):
     pairs = [r for r in have if r["habitat_meta"].get("pair_id")]
     single = [r for r in have if not r["habitat_meta"].get("pair_id")]
     rng = random.Random(seed)
-    picked = rng.sample(pairs, min(n_pair, len(pairs))) + rng.sample(single, min(n_single, len(single)))
+    picked = rng.sample(pairs, min(n_pair, len(pairs))) + rng.sample(single, min(max(0, n_single), len(single)))
     rng.shuffle(picked)
     return picked, {"pair": len(pairs), "single": len(single)}
 

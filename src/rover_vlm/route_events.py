@@ -364,7 +364,18 @@ def _blobs_near(frame, goal, max_dist):
     return out
 
 
-def stop_phrase(frame, route_xz, events):
+def _event_anchor(event, cands):
+    """The stop anchor standing for an event: its first candidate, or the opening of a through event."""
+    if event["type"] == "through":
+        blobs = [cands[m]["blob"] for m in event["members"]]
+        gap = event["opening"]["gap_xz"]
+        return {"blob": blobs[0], "vis_xz": gap, "outline": event["opening"],
+                "key": _gap_key(blobs, gap), "kind": "opening"}
+    c = cands[event["members"][0]]
+    return {"blob": c["blob"], "vis_xz": c["vis_xz"], "outline": c["outline"]}
+
+
+def stop_phrase(frame, route_xz, events, cands=None):
     """Where the route ends: near an object, just after the last event, or a rough distance
     from an object on the line of approach; None when nothing fits (the route is dropped).
     Visibility and outlines (the expensive part) are only computed for the blobs each rule needs."""
@@ -384,6 +395,13 @@ def stop_phrase(frame, route_xz, events):
         return {"type": "near", "relation": rel, "anchor": x}
     if events and rg["arc"][-1] - events[-1]["arc_m"] <= AFTER_LAST_M:
         return {"type": "after_last", "relation": "just after", "anchor": None}
+    # rough distance past the last thing passed, when nothing visible is near the goal
+    if events and cands is not None:
+        remaining = rg["arc"][-1] - events[-1]["arc_m"]
+        if remaining <= STOP_FAR_M:
+            step = min(DISTANCE_STEPS, key=lambda s: abs(s - remaining))
+            return {"type": "distance", "relation": "past", "distance_m": step,
+                    "anchor": _event_anchor(events[-1], cands)}
     far = []
     for b, cells, xz, d in blobs:
         v = xz[d.argmin()] - goal
@@ -431,7 +449,7 @@ def describe_route(sample_dir, candidate_index):
     route = np.asarray(cm[candidate_index]["polyline_xz"], float)
     cands = candidates(frame, route)
     events = build_events(frame, cands)
-    stop = stop_phrase(frame, route, events)
+    stop = stop_phrase(frame, route, events, cands)
     if stop is None:
         return _none("no_stop_anchor", n_events=len(events))
     objects = {}
@@ -457,7 +475,7 @@ def describe_route(sample_dir, candidate_index):
     st = {"type": stop["type"], "relation": stop["relation"], "distance_m": stop.get("distance_m"), "object": None}
     if stop["anchor"] is not None:
         a = stop["anchor"]
-        st["object"] = add(f"b{a['blob']}", "object", a["outline"], a["vis_xz"])
+        st["object"] = add(a.get("key", f"b{a['blob']}"), a.get("kind", "object"), a["outline"], a["vis_xz"])
     return {"reason": None, "events": rows, "stop": st, "objects": objects,
             "goal_xz": [round(float(v), 3) for v in route[-1]],
             "pose_xz": [float(v) for v in meta["pose_xz"]], "heading_xz": [float(v) for v in meta["heading_xz"]],
