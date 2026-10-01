@@ -11,6 +11,7 @@ Pure and CPU-only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-de
 
 import io
 import re
+from collections import Counter
 
 from PIL import Image, ImageDraw
 
@@ -312,3 +313,30 @@ def label_route(ask_text, row, names, seed):
     return {**out, "description": tpl if not trej else None, "instruction_source": "template",
             "passed": not trej, "rejects": trej, "cosmos_rejects": rejects, "style": style, "shape": shape,
             "attempts": 2, "raw": raws}
+
+
+def select_routes(rows, limit=None):
+    ok = [r for r in rows if r.get("reason") is None]
+    return ok[:limit] if limit else ok
+
+
+def summarize_d1(rows, stage):
+    ok = [r for r in rows if not r.get("error")]
+    out = {"n": len(rows), "errors": len(rows) - len(ok),
+           "accept_rate": round(sum(bool(r.get("passed")) for r in ok) / len(ok), 4) if ok else 0.0,
+           "rejects": dict(Counter(x for r in ok for x in r.get("rejects", [])).most_common(15))}
+    if stage == "compose":
+        passed = [r for r in ok if r.get("passed")]
+        out["template_share"] = round(sum(r.get("instruction_source") == "template" for r in passed)
+                                      / len(passed), 4) if passed else 0.0
+        out["cosmos_rejects"] = dict(Counter(x for r in ok for x in r.get("cosmos_rejects", [])).most_common(15))
+    return out
+
+
+def d1_gate_failures(summary, stage, min_accept=0.9, max_template=0.1):
+    fails = []
+    if summary["accept_rate"] < min_accept:
+        fails.append(f"accept rate {summary['accept_rate']:.3f} < {min_accept}")
+    if stage == "compose" and summary.get("template_share", 0) > max_template:
+        fails.append(f"template share {summary['template_share']:.3f} > {max_template}")
+    return fails

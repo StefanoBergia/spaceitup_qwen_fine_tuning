@@ -223,3 +223,21 @@ def test_failure_rows_keep_both_raw_replies():
     r = {"id": "f_L", "pair_id": None, "kind": "instructed", "events": [PASS_L], "stop": NEAR}
     out = label_route(lambda p, s: (f"junk{s}", "stop"), r, NAMES, seed=0)
     assert out["raw"] == ["junk0", "junk1"]
+
+
+from rover_vlm.descriptions import d1_gate_failures, select_routes, summarize_d1  # noqa: E402
+
+
+def test_select_routes_and_gate():
+    rows = [{"id": "a", "reason": None}, {"id": "b", "reason": "no_stop_anchor"}, {"id": "c", "reason": None}]
+    assert [r["id"] for r in select_routes(rows)] == ["a", "c"]
+    assert [r["id"] for r in select_routes(rows, limit=1)] == ["a"]
+    comp = [{"id": str(i), "passed": True, "instruction_source": "cosmos", "rejects": []} for i in range(8)]
+    comp += [{"id": "t", "passed": True, "instruction_source": "template", "rejects": []},
+             {"id": "e", "error": "Timeout"}]
+    s = summarize_d1(comp, "compose")
+    assert s["n"] == 10 and s["errors"] == 1 and s["accept_rate"] == 1.0
+    assert s["template_share"] == pytest.approx(1 / 9, abs=1e-3)
+    assert d1_gate_failures(s, "compose") == ["template share 0.111 > 0.1"]
+    names = [{"id": "o1", "passed": True, "rejects": []}, {"id": "o2", "passed": False, "rejects": ["name:long"]}]
+    assert d1_gate_failures(summarize_d1(names, "name"), "name") == ["accept rate 0.500 < 0.9"]

@@ -28,6 +28,13 @@ description TRUE of this route, and does it name what a person would? Gate >= 90
         --events data/prepared_habitat_instr_v2/events_train.jsonl \
         --objects data/prepared_habitat_instr_v2/objects_train.jsonl     # -> outputs/instr_events_audit.html
 
+--mode d1 (label gate): 100 passed descriptions from desc_*_d1.jsonl drawn with their numbered
+objects. Gate >= 90% correct.
+    uv run scripts/audit_instruction_labels.py --mode d1 \
+        --events data/prepared_habitat_instr_v2/events_eval.jsonl \
+        --objects data/prepared_habitat_instr_v2/objects_eval.jsonl \
+        --desc outputs/instr_labels_v3/desc_gate_d1.jsonl
+
 Run (CPU, login node is fine):
     uv run scripts/audit_instruction_labels.py            # -> outputs/instr_label_audit.html
     uv run scripts/audit_instruction_labels.py --n 150 --seed 1
@@ -82,6 +89,14 @@ VERDICTS = {
         {"v": "object", "label": "Wrong object", "help": "A step names something the route does not pass that way"},
         {"v": "missing", "label": "Misses an obstacle", "help": "An obvious obstacle the route goes around is left out"},
         {"v": "stop", "label": "Wrong stop", "help": "The stop phrase does not match where the route ends"},
+        {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+    ],
+    "d1": [
+        {"v": "ok", "label": "Correct", "help": "Names, sides and the stop are all right, and it reads naturally"},
+        {"v": "name", "label": "Wrong name", "help": "An object is misnamed or is not the numbered thing"},
+        {"v": "side", "label": "Wrong side", "help": "A side word does not match how the route passes"},
+        {"v": "stop", "label": "Wrong stop", "help": "The stop phrase is wrong"},
+        {"v": "unnatural", "label": "Unnatural", "help": "True, but nobody would say it like that"},
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
     ],
 }
@@ -268,7 +283,7 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1"], default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -278,6 +293,7 @@ def main() -> None:
                     help="landmarks_*.jsonl: draw each record's target (required for --mode geometry)")
     ap.add_argument("--events", type=Path, default=None, help="events_*.jsonl (--mode events)")
     ap.add_argument("--objects", type=Path, default=None, help="objects_*.jsonl (--mode events)")
+    ap.add_argument("--desc", type=Path, default=None, help="desc_*_d1.jsonl (--mode d1)")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -298,6 +314,29 @@ def main() -> None:
         out.write_text(html)
         print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
         return
+    if args.mode == "d1":
+        if not (args.events and args.objects and args.desc):
+            raise SystemExit("--mode d1 needs --events, --objects and --desc desc_*_d1.jsonl")
+        split = V2 / ("labelset_eval.json" if "eval" in args.events.name else "labelset_train.json")
+        by_id = {r["id"]: r for r in json.loads(split.read_text())}
+        ev = {r["id"]: r for r in jsonl(args.events)}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        ok = [r for r in jsonl(args.desc) if r.get("passed")]
+        rows = random.Random(args.seed).sample(ok, min(args.n, len(ok)))
+        items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"]) for r in rows]
+        for it, r in zip(items, rows):
+            it["source"] = r["instruction_source"]
+        pop = {"passed": len(ok), "template": sum(r["instruction_source"] == "template" for r in ok)}
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "d1",
+                   "verdicts": VERDICTS["d1"], "source": str(args.desc)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Route Description Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "instr_d1_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
+
     if args.mode == "semantic":
         if not (args.labels and landmarks):
             raise SystemExit("--mode semantic needs --labels <i4 rows> and --landmarks <landmarks jsonl>")
