@@ -339,3 +339,105 @@ def test_shuffled_texts_come_from_other_frames():
         assert src["habitat_meta"]["sample_id"] != by[r["id"]]["habitat_meta"]["sample_id"]
         assert r["habitat_meta"]["instruction_source"] == "shuffled"
         assert r["habitat_meta"]["desc_check"] == by[r["id"]]["habitat_meta"]["desc_check"]
+
+
+# --- final-review fixes (F1-F4) -----------------------------------------------------------
+from rover_vlm.route_events import DISTANCE_STEPS  # noqa: E402
+
+SOFA_PAST = {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b3"}
+NAMES_F = dict(NAMES, **{"f:b7": "armchair"})
+
+
+def test_pronoun_stop_accepted_when_stop_object_is_the_last_events():
+    t = "Go right of the grey sofa, then stop about two metres past it."
+    assert description_rejects(t, [PASS_R], SOFA_PAST, NAMES) == []
+    near = {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b3"}
+    assert description_rejects("Go right of the grey sofa and stop beside them.", [PASS_R], near, NAMES) == []
+
+
+def test_pronoun_stop_rejected_for_a_new_object():
+    t = "Go left of the coffee table, then stop about two metres before it."
+    assert "stop:name" in description_rejects(t, [PASS_L], DIST, NAMES)
+
+
+def test_template_keeps_the_explicit_stop_name():
+    t = template_description([PASS_R], SOFA_PAST, NAMES)
+    assert t.endswith("stop about two metres past the grey sofa.")
+    assert description_rejects(t, [PASS_R], SOFA_PAST, NAMES) == []
+
+
+def test_right_in_stop_phrases_is_not_a_side_word():
+    ev = [PASS_L, PASS_R]
+    assert description_rejects("Go left of the coffee table, then right of the grey sofa, and stop right after it.",
+                               ev, AFTER, NAMES) == []
+    near = {"type": "near", "relation": "in front of", "distance_m": None, "object": "f:b7"}
+    assert description_rejects("Go left of the coffee table and stop right in front of the armchair.",
+                               [PASS_L], near, NAMES_F) == []
+    nxt = {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b7"}
+    assert description_rejects("Go left of the coffee table and stop right next to the armchair.",
+                               [PASS_L], nxt, NAMES_F) == []
+    assert description_rejects("Go left of the coffee table and stop right by the armchair.",
+                               [PASS_L], nxt, NAMES_F) == []
+
+
+def test_real_side_word_still_binds():
+    # "go right of" still counts; only the "right in front of" in the stop clause is neutral
+    assert "side:missing:0" in description_rejects(
+        "Go right of the coffee table and stop right in front of the fridge.", [PASS_L], NEAR, NAMES)
+    assert description_rejects(
+        "Go right of the grey sofa and stop right in front of the fridge.", [PASS_R], NEAR, NAMES) == []
+    assert "side:stray" in description_rejects(
+        "Go right of the grey sofa and stop in front of the fridge on the right.", [PASS_R], NEAR, NAMES)
+
+
+@pytest.mark.parametrize("name", ["table and chairs", "sofa or couch", "shelf then wall"])
+def test_name_rejects_conjunctions(name):
+    assert "name:conjunction" in name_rejects(name, "object", "object")
+
+
+@pytest.mark.parametrize("name", ["furniture", "piece of furniture", "obstacle", "storage unit", "wooden piece"])
+def test_name_rejects_more_generic_names(name):
+    assert "name:generic" in name_rejects(name, "object", "object")
+
+
+@pytest.mark.parametrize("text,stop", [
+    ("Go left of the coffee table and stop about two metres before the fridge.",
+     {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b5"}),
+    ("Go left of the coffee table and stop about two metres past the fridge.", DIST),
+    ("Go left of the coffee table and stop just past the fridge.", NEAR),
+    ("Go left of the coffee table and stop next to the fridge.", NEAR),
+    ("Go left of the coffee table and stop in front of the fridge.",
+     {"type": "near", "relation": "just past", "distance_m": None, "object": "f:b5"}),
+    ("Go left of the coffee table and stop at the fridge.",
+     {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b5"}),
+])
+def test_swapped_stop_relation_rejected(text, stop):
+    assert "stop:relation" in description_rejects(text, [PASS_L], stop, NAMES)
+
+
+@pytest.mark.parametrize("text,stop", [
+    ("Go left of the coffee table and stop just in front of the fridge.", NEAR),
+    ("Go left of the coffee table and stop just beyond the fridge.",
+     {"type": "near", "relation": "just past", "distance_m": None, "object": "f:b5"}),
+    ("Go left of the coffee table and stop alongside the fridge.",
+     {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b5"}),
+    ("Go left of the coffee table and stop about two metres short of the fridge.", DIST),
+    ("Go left of the coffee table and stop about two metres beyond the fridge.",
+     {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b5"}),
+])
+def test_stop_relation_synonyms_pass(text, stop):
+    assert description_rejects(text, [PASS_L], stop, NAMES) == [], text
+
+
+_ALL_STOPS = ([{"type": "near", "relation": r, "distance_m": None, "object": o}
+               for r in ("in front of", "just past", "next to") for o in ("f:b5", "f:b3")]
+              + [{"type": "distance", "relation": r, "distance_m": d, "object": o}
+                 for r in ("before", "past") for d in DISTANCE_STEPS for o in ("f:b5", "f:b3")]
+              + [AFTER])
+
+
+@pytest.mark.parametrize("stop", _ALL_STOPS, ids=lambda s: f"{s['type']}-{s['relation']}-{s['distance_m']}-{s['object']}")
+@pytest.mark.parametrize("events", [[PASS_R], [PASS_L, PASS_R], [THROUGH, PASS_R], [BETWEEN]])
+def test_template_passes_for_every_stop(events, stop):
+    text = template_description(events, stop, NAMES)
+    assert description_rejects(text, events, stop, NAMES) == [], text

@@ -32,7 +32,22 @@ _STOP = re.compile(r"\b(?:stop|stops|stopping|halt|park|come to rest|end up)\b",
 _AFTER = re.compile(r"\b(?:just|right) (?:after|past|beyond)\b", re.I)
 _SIDE = re.compile(r"\b(left|right)\b", re.I)
 _BREAK = re.compile(r"[,;.]|\bthen\b|\band\b", re.I)
-GENERIC_NAMES = {"object", "thing", "item", "area", "region", "stuff", "something", "space", "structure"}
+GENERIC_NAMES = {"object", "thing", "item", "area", "region", "stuff", "something", "space", "structure",
+                 "furniture", "obstacle", "piece", "unit"}   # head_noun("piece of furniture") == "piece"
+_CONJUNCTION = re.compile(r"\b(?:and|then|or)\b", re.I)     # would split the name at _BREAK
+# "right" meaning "exactly", not a side: blanked out before any side-word check
+_RIGHT_ADVERB = re.compile(r"\bright(?= (?:after|past|beyond|before|in front of|next to|by|beside)\b)", re.I)
+_PRONOUN = re.compile(r"\b(?:it|them)\b", re.I)
+# The words that say each stop relation. The stop clause (the text after the last stop word)
+# must hold one of its own relation's words, so a swapped relation ("two metres before the
+# armchair" for a past stop) is rejected as stop:relation. after_last is checked by _AFTER.
+STOP_RELATION_WORDS = {
+    ("near", "in front of"): ("in front of", "right in front of", "just in front of"),
+    ("near", "just past"): ("just past", "right past", "just beyond", "just after"),
+    ("near", "next to"): ("next to", "beside", "by", "alongside"),
+    ("distance", "before"): ("before", "short of"),
+    ("distance", "past"): ("past", "after", "beyond"),
+}
 
 
 def event_phrase(ev, names):
@@ -82,6 +97,7 @@ def _find_name(text, name, start):
 def _side_rejects(text, events, spans):
     """Each side word belongs to the next name in its clause, else to the previous name."""
     got = {}
+    text = _RIGHT_ADVERB.sub(lambda m: " " * len(m.group(0)), text)   # same length: spans stay valid
     for m in _SIDE.finditer(text):
         after = [s for s in spans if s[0] >= m.end()]
         nxt = min(after, key=lambda s: s[0]) if after else None
@@ -131,14 +147,22 @@ def description_rejects(text, events, stop, names):
             out.append(f"between:missing:{i}")
         if e["type"] == "through" and not re.search(r"\bthrough\b", text, re.I):
             out.append(f"through:missing:{i}")
+    stops = list(_STOP.finditer(text))
+    clause = stops[-1].end() if stops else len(text)        # the stop clause: text after the stop word
     if stop["object"]:
         m = _find_name(text, names[stop["object"]], pos)
+        if m is None and events and stop["object"] in events[-1]["objects"] and clause >= pos:
+            m = _PRONOUN.search(text, clause)                # "...right of the sofa, then stop past it"
         if m is None:
             out.append("stop:name")
         else:
             spans.append((m.start(), m.end(), "stop"))
-    if not _STOP.search(text):
+    if not stops:
         out.append("stop:missing")
+    else:
+        words = STOP_RELATION_WORDS.get((stop["type"], stop["relation"]))
+        if words and not re.search(r"\b(?:" + "|".join(map(re.escape, words)) + r")\b", text[clause:], re.I):
+            out.append("stop:relation")
     if stop["type"] == "after_last" and not _AFTER.search(text):
         out.append("stop:after")
     if stop["type"] == "distance":
@@ -161,6 +185,8 @@ def name_rejects(name, kind, need):
         out.append("name:drawing")
     if _SIDE.search(name):
         out.append("name:side")
+    if _CONJUNCTION.search(name):
+        out.append("name:conjunction")
     if re.search(r"\d", name):
         out.append("name:digits")
     if re.search(r"[,/;()\"'`\u2018\u2019\u201c\u201d]", name):
