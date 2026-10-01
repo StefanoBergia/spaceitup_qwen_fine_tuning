@@ -13,7 +13,8 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
         --events data/prepared_habitat_instr_v2/events_eval.jsonl \
         --names outputs/instr_labels_v3/names_eval_d1.jsonl \
         --out outputs/instr_labels_v3/desc_eval_d1.jsonl --concurrency 8 --resume
-    # gate: --limit 300 --gate on both stages (exit 2 when a threshold fails)
+    # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
+    # slurm/label_descriptions.sbatch keeps the name stage report-only)
 
 Each object/route gets up to two Cosmos attempts (seed, seed + 1) inside one row; compose then
 falls back to the template sentence. Rows are flushed as they finish, so a killed run keeps

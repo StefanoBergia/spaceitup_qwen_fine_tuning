@@ -4,10 +4,16 @@
 #     sbatch slurm/label_descriptions.sbatch              # gate: 300 eval routes, then stop for the audit
 #     STAGE=full sbatch slurm/label_descriptions.sbatch   # eval + train (resumes after a TIMEOUT)
 #
+# Per split: name pass 1, name pass 2 (--resume retries request errors), compose pass 1,
+# compose pass 2 (--resume retries). The name passes are report-only (read their summary in
+# the log); in the gate run only compose pass 2 passes --gate, so one transient HTTP error
+# cannot fail it and a weak name pass never stops compose from running.
+#
 # Needs data/prepared_habitat_instr_v2/{events,objects}_{eval,train}.jsonl
 # (uv run scripts/prepare_habitat_instr.py events). Spec:
 # docs/superpowers/specs/2026-09-30-route-descriptions-design.md. Safe to re-submit: every
-# call passes --resume. After a prompt fix, re-run the gate from scratch:
+# call passes --resume. After a prompt fix, re-run the gate from scratch (OVERWRITE applies to
+# the first pass of each stage only; the retry passes always resume):
 #     OVERWRITE=1 sbatch slurm/label_descriptions.sbatch
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions
@@ -44,7 +50,7 @@ cosmos3_wait_healthy
 label() {  # label <split> <tag> [--limit N] [--gate]
     local s=$1 tag=$2; shift 2
     local first=--resume gate=() limit=()
-    [ -n "${OVERWRITE:-}" ] && first=--overwrite
+    [ -n "${OVERWRITE:-}" ] && first=--overwrite   # only the first call of each stage overwrites
     while [ $# -gt 0 ]; do
         case "$1" in
             --gate) gate=(--gate) ;;
@@ -52,23 +58,25 @@ label() {  # label <split> <tag> [--limit N] [--gate]
         esac
         shift
     done
-    # name pass 1 may leave request-error rows; pass 2 (--resume) retries them, and only it gates
+    # Each stage runs twice: pass 1 may leave request-error rows, pass 2 (--resume) retries
+    # them. Names are report-only (their summary is printed, never gated), so a weak name
+    # pass still lets compose run and the audit sees both; only compose pass 2 gates.
+    local name_args=(--stage name --events "$D/events_$s.jsonl" --objects "$D/objects_$s.jsonl"
+                     --out "$OUT/names_${tag}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}_d1.jsonl"
+                     --out "$OUT/desc_${tag}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== name: $tag (pass 1) ==============="
-    "$UV" run scripts/label_descriptions.py --stage name --events "$D/events_$s.jsonl" \
-        --objects "$D/objects_$s.jsonl" --out "$OUT/names_${tag}_d1.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "$first" "${limit[@]}"
-    echo; echo "=============== name: $tag (pass 2, retries errors) ==============="
-    "$UV" run scripts/label_descriptions.py --stage name --events "$D/events_$s.jsonl" \
-        --objects "$D/objects_$s.jsonl" --out "$OUT/names_${tag}_d1.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume "${limit[@]}" "${gate[@]}"
-    echo; echo "=============== compose: $tag ==============="
-    "$UV" run scripts/label_descriptions.py --stage compose --events "$D/events_$s.jsonl" \
-        --names "$OUT/names_${tag}_d1.jsonl" --out "$OUT/desc_${tag}_d1.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "$first" "${limit[@]}" "${gate[@]}"
+    "$UV" run scripts/label_descriptions.py "${name_args[@]}" "$first" "${limit[@]}"
+    echo; echo "=============== name: $tag (pass 2, retries errors; summary is report-only) ==============="
+    "$UV" run scripts/label_descriptions.py "${name_args[@]}" --resume "${limit[@]}"
+    echo; echo "=============== compose: $tag (pass 1) ==============="
+    "$UV" run scripts/label_descriptions.py "${comp_args[@]}" "$first" "${limit[@]}"
+    echo; echo "=============== compose: $tag (pass 2, retries errors${gate[*]:+, gated}) ==============="
+    "$UV" run scripts/label_descriptions.py "${comp_args[@]}" --resume "${limit[@]}" "${gate[@]}"
 }
 
 if [ "$STAGE" = "gate" ]; then
-    # set -e: a failed gate (exit 2) ends the job; the EXIT trap stops the server
+    # set -e: a failed compose gate (exit 2) ends the job; the EXIT trap stops the server
     label eval gate --limit 300 --gate
     echo "gate labelled — audit it, then: STAGE=full sbatch slurm/label_descriptions.sbatch"
     exit 0
