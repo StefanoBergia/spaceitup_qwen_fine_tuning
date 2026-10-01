@@ -583,15 +583,17 @@ def describe_route(sample_dir, candidate_index):
     stop = stop_phrase(frame, route, events, cands)
     if stop is None:
         return _none("no_stop_anchor", n_events=len(events))
+    # Object rows in two explicit passes. Events first: an event member's kind_hint is its event role
+    # (pass member -> "object", wall member -> "wall", opening -> "opening"). Then the stop anchor:
+    # it reuses an event's object row unchanged, and sets kind_hint / outline only for a new object.
     objects = {}
 
     def add(key, kind, outline, cells):
         oid = f"{frame.name}:{key}"
-        if kind == "wall" and oid in objects:            # a blob met as an object first, then as a wall stop anchor
-            objects[oid]["kind_hint"] = "wall"
-        objects.setdefault(oid, {"object_id": oid, "kind_hint": kind,
-                                 **{k: outline[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")},
-                                 "cells_xz": _cells(cells)})
+        if oid not in objects:
+            objects[oid] = {"object_id": oid, "kind_hint": kind,
+                            **{k: outline[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")},
+                            "cells_xz": _cells(cells)}
         return oid
 
     rows = []
@@ -608,7 +610,7 @@ def describe_route(sample_dir, candidate_index):
         rows.append(row)
     st = {"type": stop["type"], "relation": stop["relation"], "amount": stop.get("amount"),
           "distance_m": stop.get("distance_m"), "object": None}
-    if stop["anchor"] is not None:
+    if stop["anchor"] is not None:                       # after every event row (see above)
         a = stop["anchor"]
         st["object"] = add(a.get("key", f"b{a['blob']}"), a.get("kind", "object"), a["outline"], a["vis_xz"])
     return {"reason": None, "events": rows, "stop": st, "objects": objects,

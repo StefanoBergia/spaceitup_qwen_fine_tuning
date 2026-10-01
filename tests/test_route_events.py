@@ -653,8 +653,21 @@ def test_wall_ahead_of_the_goal_is_in_front_of(tmp_path):
     st = stop_phrase(frame, np.array(route), [])
     assert st["type"] == "near" and st["relation"] == "in front of"
     assert np.hypot(*np.ptp(frame.grid.xz(np.argwhere(frame.lab == st["anchor"]["blob"])), axis=0)) >= WALL_EXTENT_M
+    # the blob is also a pass member (the route comes within PASS_M of it, but not alongside):
+    # its event role wins -> "object" (fix round 2 ruling)
     out = describe_route(write_sample(tmp_path / "s00007", s, [route]), 0)
     assert out["stop"]["relation"] == "in front of"
+    assert [e["type"] for e in out["events"]] == ["pass"] and out["events"][0]["objects"] == [out["stop"]["object"]]
+    assert out["objects"][out["stop"]["object"]]["kind_hint"] == "object"
+
+
+def test_wall_like_stop_anchor_in_no_event_is_a_wall(tmp_path):
+    s = _free()
+    s[64:66, 5:95] = OCC                                 # wall z 3.2..3.3 across the map
+    route = [(2.5, 0.2), (2.5, 2.45)]                    # ends 0.75 m before it: beyond PASS_M, within STOP_NEAR_M
+    out = describe_route(write_sample(tmp_path / "s00008", s, [route]), 0)
+    assert out["reason"] is None and out["events"] == []
+    assert out["stop"]["type"] == "near" and out["stop"]["relation"] == "in front of"
     assert out["objects"][out["stop"]["object"]]["kind_hint"] == "wall"
 
 
