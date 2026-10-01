@@ -378,7 +378,11 @@ def test_describe_route_rows_and_object_ids(tmp_path):
     d = write_sample(tmp_path / "s00001", _stop_state(), [route])
     out = describe_route(d, 0)
     assert out["reason"] is None
-    assert out["events"][0]["type"] == "pass" and out["events"][0]["side"] == "left"
+    # Addendum A: box A (passed on the left) and the cabinet (passed on the right) are adjacent,
+    # opposite and < MERGE_ARC_M apart -> one "between" of both (was pass-left + pass)
+    assert out["events"][0]["type"] == "between" and out["events"][0]["side"] is None
+    assert len(out["events"][0]["objects"]) == 2
+    assert out["stop"]["amount"] is None and out["stop"]["relation"] == "in front of"
     oid = out["events"][0]["objects"][0]
     assert oid.startswith("s00001:b") and out["objects"][oid]["kind_hint"] == "object"
     assert out["stop"]["object"] in out["objects"]
@@ -452,8 +456,196 @@ def test_stop_falls_back_to_distance_past_the_last_event(tmp_path):
     st = stop_phrase(frame, np.array(route), ev, cands)
     assert st["type"] == "distance" and st["relation"] == "past"
     rem = route_geometry(np.array(route))["arc"][-1] - ev[-1]["arc_m"]
-    assert st["distance_m"] == min((1.0, 1.5, 2.0, 3.0, 4.0), key=lambda v: abs(v - rem))
+    # Addendum A: a coarse amount + the raw metres (info only), no longer the nearest metre step
+    assert st["amount"] == ("a little" if rem < 3.0 else "well")
+    assert st["distance_m"] == pytest.approx(rem, abs=0.051)
     out = describe_route(d, 0)
     assert out["reason"] is None and out["stop"]["type"] == "distance"
     assert out["stop"]["object"] == out["events"][-1]["objects"][0]
     assert len(out["objects"]) == 1
+
+
+# --- Addendum A (Task 14): walls, between/pass merging, coarse stop amounts ---------------
+from rover_vlm.route_events import (  # noqa: E402
+    ALONG_MIN_M, AMOUNT_STEPS, MERGE_ARC_M, WALL_EXTENT_M, WALL_KEEP_M,
+)
+
+
+def test_addendum_constants():
+    assert (ALONG_MIN_M, WALL_KEEP_M, MERGE_ARC_M) == (1.0, 0.8, 3.0)
+    assert AMOUNT_STEPS == ((1.5, "just"), (3.0, "a little"), (float("inf"), "well"))
+
+
+def _wall_left_state():
+    s = _free()
+    s[10:90, 68:70] = OCC                                # wall x 3.4..3.5, z 0.5..4.5
+    return s
+
+
+def test_long_wall_alongside_is_a_wall_event_on_the_rovers_side(tmp_path):
+    route = [(2.5, 0.2), (2.9, 0.8), (2.9, 2.6)]          # runs alongside, ends well before the wall's end
+    _, frame = load_frame(write_sample(tmp_path / "s", _wall_left_state(), [route]))
+    cs = candidates(frame, np.array(route))
+    assert len(cs) == 1 and cs[0]["wall"] is True and cs[0]["along_m"] >= ALONG_MIN_M
+    assert cs[0]["side"] == "right"                      # the route passes it on its right ...
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["wall"] and ev[0]["side"] == "left"   # ... the wall is on the rover's left
+    b = cs[0]["blob"]
+    whole = column_outline(frame, visible_cells(frame, np.argwhere(frame.lab == b), b))
+    o = cs[0]["outline"]
+    assert o["bbox"][2] - o["bbox"][0] < whole["bbox"][2] - whole["bbox"][0]
+    route_pts = route_geometry(route)["pts"]
+    assert np.linalg.norm(cs[0]["vis_xz"][:, None] - route_pts[None], axis=2).min(1).max() <= WALL_KEEP_M + 1e-6
+
+
+def test_s_route_opposite_passes_merge_into_one_between(tmp_path):
+    _, frame = load_frame(write_sample(tmp_path / "s", _s_state(), [S_ROUTE]))
+    cs = candidates(frame, np.array(S_ROUTE))
+    assert abs(cs[1]["arc_m"] - cs[0]["arc_m"]) > 0.5     # far beyond the old 0.5 m pairing
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["between"] and ev[0]["side"] is None
+    assert sorted(ev[0]["members"]) == [0, 1]
+    assert ev[0]["score"] == pytest.approx(cs[0]["score"] + cs[1]["score"])
+
+
+def _same_side_state():
+    s = _free()
+    s[30:36, 55:61] = OCC                                # box x 2.75..3.05, z 1.5..1.8
+    s[52:58, 55:61] = OCC                                # box x 2.75..3.05, z 2.6..2.9 (~1.1 m on)
+    return s
+
+
+def test_two_objects_on_the_same_side_merge_into_one_pass(tmp_path):
+    route = [(2.5, 0.2), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", _same_side_state(), [route]))
+    cs = candidates(frame, np.array(route))
+    assert [c["side"] for c in cs] == ["right", "right"] and not any(c["wall"] for c in cs)
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["pass"] and ev[0]["side"] == "right"
+    assert sorted(ev[0]["members"]) == [0, 1]
+
+
+def test_passes_farther_apart_than_merge_arc_stay_separate(tmp_path):
+    s = _free()
+    s[16:22, 55:61] = OCC                                # left of the route, z 0.8..1.1
+    s[84:92, 32:44] = OCC                                # right of the route, x 1.6..2.2, z 4.2..4.6 (~3.4 m on)
+    route = [(2.5, 0.2), (2.5, 4.8)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    assert len(cs) == 2 and cs[1]["arc_m"] - cs[0]["arc_m"] > MERGE_ARC_M
+    assert [e["type"] for e in build_events(frame, cs)] == ["pass", "pass"]
+
+
+def _wall_and_box_state():
+    s = _wall_left_state()
+    s[44:50, 38:44] = OCC                                # box x 1.9..2.2, z 2.2..2.5 (route's right)
+    return s
+
+
+WALL_BOX_ROUTE = [(2.5, 0.2), (2.8, 0.8), (2.8, 3.2)]
+
+
+def test_wall_and_object_on_opposite_sides_are_between(tmp_path):
+    d = write_sample(tmp_path / "s00003", _wall_and_box_state(), [WALL_BOX_ROUTE])
+    _, frame = load_frame(d)
+    cs = candidates(frame, np.array(WALL_BOX_ROUTE))
+    assert sorted(c["wall"] for c in cs) == [False, True]
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["between"]
+    out = describe_route(d, 0)
+    assert out["reason"] is None, out
+    (row,) = out["events"]
+    assert row["type"] == "between" and row["side"] is None and len(row["objects"]) == 2
+    assert sorted(out["objects"][o]["kind_hint"] for o in row["objects"]) == ["object", "wall"]
+
+
+def test_doorway_wall_the_route_runs_alongside_stays_through(tmp_path):
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    d = write_sample(tmp_path / "s", _doorway_state((44, 56)), [route], pose=(2.5, 0.8))
+    _, frame = load_frame(d)
+    cs = candidates(frame, np.array(route))
+    assert any(c["gap"] is not None and c["wall"] for c in cs)   # a wall by the wall rule ...
+    assert [e["type"] for e in build_events(frame, cs)] == ["through"]   # ... but the gap wins
+
+
+def test_two_separate_wall_halves_with_an_opening_are_through(tmp_path):
+    s = _free()
+    s[40:42, 10:44] = OCC                                # two unjoined halves, opening x 2.2..2.8
+    s[40:42, 56:90] = OCC
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8)))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert [e["type"] for e in ev] == ["through"]
+
+
+def test_merging_never_joins_a_through_event(tmp_path):
+    s = _doorway_state((44, 56))
+    s[50:56, 56:62] = OCC                                # box x 2.8..3.1, z 2.5..2.8, just past the door
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8)))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    types = [e["type"] for e in ev]
+    assert "through" in types and "between" not in types
+    assert all(len(e["members"]) == 1 for e in ev if e["type"] == "through")
+
+
+def test_near_stop_with_a_dominating_lateral_offset_is_not_next_to(tmp_path):
+    s = _free()
+    s[20:30, 52:58] = OCC                                # box A x 2.6..2.9, z 1.0..1.5 (passed)
+    s[46:50, 72:78] = OCC                                # box C x 3.6..3.9, z 2.3..2.5: beside the goal
+    route = [(2.5, 0.2), (3.3, 1.0), (3.3, 2.4)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    st = stop_phrase(frame, np.array(route), build_events(frame, cs), cs)
+    assert st is not None and st["type"] != "near" and st["relation"] != "next to"
+
+
+def _long_state(nz=200):
+    s = np.full((nz, 100), FREE, np.uint8)
+    s[18:22, 54:58] = OCC                                # post x 2.7..2.9, z 0.9..1.1
+    return s
+
+
+@pytest.mark.parametrize("goal_z,amount", [(7.8, "well"), (3.2, "a little")])
+def test_distance_past_the_last_event_uses_coarse_amounts(tmp_path, goal_z, amount):
+    route = [(2.5, 0.2), (2.5, goal_z)]
+    d = write_sample(tmp_path / "s00004", _long_state(), [route])
+    _, frame = load_frame(d)
+    cs = candidates(frame, np.array(route))
+    ev = build_events(frame, cs)
+    st = stop_phrase(frame, np.array(route), ev, cs)
+    rem = route_geometry(np.array(route))["arc"][-1] - ev[-1]["arc_m"]
+    assert st["type"] == "distance" and st["relation"] == "past" and st["amount"] == amount
+    assert st["distance_m"] == pytest.approx(rem, abs=0.051)     # raw metres, rounded to 0.1 (info only)
+    row = describe_route(d, 0)["stop"]
+    assert set(row) == {"type", "relation", "amount", "distance_m", "object"}
+    assert row["amount"] == amount and row["object"] is not None
+
+
+def test_short_remaining_is_after_last_with_no_amount(tmp_path):
+    route = [(2.5, 0.2), (2.5, 2.1)]                     # ~1.1 m after the post
+    d = write_sample(tmp_path / "s00005", _long_state(100), [route])
+    row = describe_route(d, 0)["stop"]
+    assert row["type"] == "after_last" and row["amount"] is None and row["distance_m"] is None
+
+
+def test_wall_like_anchor_just_past_the_goal_is_not_a_near_stop(tmp_path):
+    s = _free()
+    s[10:44, 40:42] = OCC                                # wall x 2.0..2.1, z 0.5..2.2 (1.7 m)
+    route = [(2.5, 0.2), (2.5, 2.3), (1.6, 2.6)]         # rounds its end; the goal is just past it
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    wall = int(frame.lab[20, 40])
+    cs = candidates(frame, np.array(route))
+    st = stop_phrase(frame, np.array(route), build_events(frame, cs), cs)
+    assert not (st is not None and st["anchor"] is not None and st["anchor"]["blob"] == wall
+                and st["relation"] not in ("in front of", "before")), st and (st["type"], st["relation"])
+
+
+def test_wall_ahead_of_the_goal_is_in_front_of(tmp_path):
+    s = _free()
+    s[60:62, 5:95] = OCC                                 # wall z 3.0..3.1 across the map
+    route = [(2.5, 0.2), (2.5, 2.5)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    st = stop_phrase(frame, np.array(route), [])
+    assert st["type"] == "near" and st["relation"] == "in front of"
+    assert np.hypot(*np.ptp(frame.grid.xz(np.argwhere(frame.lab == st["anchor"]["blob"])), axis=0)) >= WALL_EXTENT_M
