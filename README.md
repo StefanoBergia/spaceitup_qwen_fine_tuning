@@ -1421,20 +1421,32 @@ decides what is true; Cosmos only names objects (one call per object, on its own
 phrases the sentence (a text-only call). Training mixes 70% "image + entry + description" with
 30% "image + entry + goal + description". Spec: `docs/superpowers/specs/2026-09-30-route-descriptions-design.md`.
 
-Geometry rules (`src/rover_vlm/route_events.py`):
+Geometry rules (`src/rover_vlm/route_events.py`; Addendum A of the spec, after the Gate 1 audit
+found 72% true):
 - Occupied cells within `NEAR_CAMERA_M = 0.5` m (the rover radius) of the camera are neither
-  occluders nor candidates (group C). Object outlines are depth-trimmed (group B; poor depth fit
-  falls back to the column outline).
-- Events are `pass` (obstacle within 0.7 m of the route, side from the route normal),
-  `between` (obstacles on opposite sides within 0.5 m along the route) and `through` (two
-  wall-like blobs with a gap of at least 0.5 m that the route crosses). The 3 highest-scoring
-  (sqrt outline area x route offset from the entry-goal line) are kept, in route order.
+  occluders nor candidates (group C).
+- Outlines are tight: the object's depth band (own depth range +- 0.3 m) with floor pixels
+  removed, keeping only the connected pieces that hold the object's projected cells (poor depth
+  fit falls back to the column outline). A wall's outline covers only the stretch within 0.8 m
+  of the route. `MIN_AREA = 0.005` of the image.
+- Events (the 3 highest-scoring, sqrt outline area x route offset from the entry-goal line, are
+  kept, in route order):
+  - `pass`: 1 or 2 same-side objects within 0.7 m of the route, side = the side the route passes
+    on ("go right of the table", "go left of the A and the B").
+  - `wall`: a long blob the route runs alongside; the side is the **rover's own** ("keep the white
+    wall on your left"), the opposite of a pass. A wall is never a `pass` object. Only the
+    "on/to your left|right" form may say a side for a wall; for objects "your left/right" is rejected.
+  - `between`: consecutive opposite-side passes or walls with nothing in between and at most 3 m
+    of route apart merge ("go between the A and the B").
+  - `through`: two wall-like blobs with a gap of at least 0.5 m that the route crosses (doorways).
 - Stop phrase, first rule that fits: `near` (salient visible object within 1 m of the goal:
-  "in front of" / "just past" / "next to"), `after_last` ("just after" the last event, goal
-  within 1.5 m of it), `distance` ("N metres past the last obstacle" when nothing visible is near
-  the goal, at most 4 m; otherwise a rough distance before/past an object in the approach cone),
-  else the route is dropped (`no_stop_anchor`). About 30% of routes, the long ones with the goal
-  5-10 m past the last obstacle, are dropped this way.
+  "in front of" | "just past"; there is no "next to" any more, and a wall only takes "in front of"),
+  `after_last` ("just after it", goal within 1.5 m of route after the last event; for a wall
+  measured from where the route leaves the wall), `distance` (coarse amounts instead of metres:
+  "stop just / a little / well past (or before) X"; just < 1.5 m, a little 1.5-3 m, well > 3 m;
+  "past the end of the wall" when the anchor is a wall). The distance past the last obstacle has
+  no upper limit, so long routes are described and no longer dropped (smoke run: 98% described);
+  only a route with no anchor at all is dropped (`no_stop_anchor`).
 
 1. Events (CPU, 4 workers; smoke run first):
    `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`
@@ -1446,8 +1458,12 @@ Geometry rules (`src/rover_vlm/route_events.py`):
    → `outputs/instr_events_audit.html` (publish with the `db` capability)
 3. Label gate (GPU, unattended: Cosmos server + name stage + compose stage in one job, 300
    eval routes, then the job stops): `sbatch slurm/label_descriptions.sbatch` →
-   `outputs/instr_labels_v3/{names,desc}_*_d1.jsonl`. After a prompt fix restart the gate with
-   `OVERWRITE=1 sbatch slurm/label_descriptions.sbatch`. The same stages by hand:
+   `outputs/instr_labels_v3/{names,desc}_*_d1.jsonl`. Per split the job runs name pass 1 and 2
+   (report-only: read their summary in the log, a weak name pass never blocks compose), then
+   compose pass 1 and 2; only **compose pass 2** carries `--gate`, so one transient HTTP error
+   cannot fail the job. After a prompt fix restart the gate from scratch with
+   `OVERWRITE=1 sbatch slurm/label_descriptions.sbatch` (applies to the first pass of each stage;
+   the retry passes always resume). The same stages by hand:
    `uv run scripts/label_descriptions.py --stage name ...` (run once per split), then
    `--stage compose ...` (see the script's docstring; `--gate` exits 2 below accept 0.9 or above
    0.1 template fallback)
@@ -1468,8 +1484,12 @@ Geometry rules (`src/rover_vlm/route_events.py`):
 
 Reading the metrics: `metrics.json` gets a `description` block (`eval.aggregate_habitat_metrics`).
 `follow_rate` = the back-projected predicted path satisfies every event and the stop (`pass`:
-obstacle on the stated side; `between`: both sides; `through`: crosses the gap; stop: endpoint
-within 0.75 m of the true goal); `event_rate_by_type` and `stop_rate` split it; `pair_success` =
+every object on the stated side; `wall`: the wall stays on the rover's stated side;
+`between`: both sides; `through`: crosses the gap; stop: judged in image space, the path's last
+waypoint within `STOP_TOL_UV = 0.03` of the GT end; a route that only grazes an obstacle, closer
+than `PASS_TIE_M = 0.15` m, counts either way); `event_rate_by_type` and `stop_rate` split it.
+`gt_follow_rate` is the same check run on the ground-truth path itself: the ceiling any model
+can reach, so read `follow_rate` against it; `pair_success` =
 both routes of a frame followed (a text-blind model is near 0%). `endpoint_error_median` has no
 goal in the entry form, so read it against `constant_goal_endpoint_error_median` (every
 prediction ending at the set's mean goal; goals cluster near x = 0.5, so that baseline is close).

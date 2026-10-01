@@ -107,12 +107,15 @@ the route become one `between` event (counts as one of the 3). If both are wall-
 **Stop phrase** (separate from the 3 events), from the goal and the route's final heading:
 1. `near`: a salient visible object (candidate rules (b)(c)) within 1.0 m of the goal;
    relation from its position vs the final heading: `in front of` (ahead), `just past`
-   (behind), `next to` (side).
+   (behind), `next to` (side). (`next to` removed -- superseded by Addendum A.)
 2. `after_last`: the goal lies ≤ 1.5 m of route after the last event's closest point →
    "…and stop just after it".
 3. `distance`: a visible object within 4 m on the line of approach → "about N metres
    before/past X", N ∈ {1, 1.5, 2, 3, 4} (nearest), written in words.
 4. none → drop the route (`no_stop_anchor`).
+
+(Rule 3's "about N metres" and the 4 m limit are superseded by Addendum A: coarse amounts
+"just / a little / well", no limit past the last obstacle.)
 
 A route with 0 events is kept when it has a stop phrase.
 
@@ -183,7 +186,10 @@ Eval files (scene-disjoint round-4 eval):
 - **Description followed**: back-project the predicted image path to the floor (level camera,
   inverse of `landmarks.Camera.uv`) on the frame's map; `pass` → obstacle on the stated side
   at the closest point; `between` → both on their sides; `through` → path crosses the gap
-  segment; stop → endpoint within 0.75 m of the true goal. A route is followed when all hold.
+  segment; stop → endpoint within 0.75 m of the true goal (superseded by Addendum A: image space,
+  within `STOP_TOL_UV = 0.03` of the GT end; also `wall` events, multi-object passes, a graze
+  under `PASS_TIE_M = 0.15` m ties, and `gt_follow_rate` = the check on the GT path, the
+  ceiling). A route is followed when all hold.
 - **Pair success**: both routes of a frame followed (text-blind ≈ 0%).
 - Shuffled-text control: followed-rate should fall well below the matched set.
 - mp4 videos of predicted paths for a fixed sample of eval frames (standing rule;
@@ -196,7 +202,8 @@ and `tests/test_descriptions.py`:
 - side per obstacle, S-route with two events of opposite sides, top-3 by score, arclength order;
 - `between` / `through` merging; the grazed-wall case (group A: a pillar beats a wall the line
   only grazes); occluder below the frame no longer hides a far obstacle (group C);
-- each stop rule and the fallback order; `no_stop_anchor` drop;
+- each stop rule and the fallback order; `no_stop_anchor` drop (distances in metres here are
+  superseded by Addendum A: coarse amounts, thresholds 1.5 / 3 m);
 - depth calibration recovers a known range; trimming drops background pixels; poor fit →
   `depth_fallback`;
 - text rules: accept correct sentences, reject missing/misordered names, swapped sides,
@@ -238,3 +245,10 @@ User decisions:
 Eval: a `wall` event with side s is followed when the wall stays on the rover's side s
 (the obstacle is on the route's side s); a multi-object pass needs every object on the stated
 side. Stop checking is unchanged (image space).
+
+Implemented as (README "Route descriptions"): outlines use the depth band minus floor pixels and
+only the connected pieces that hold the object, `MIN_AREA = 0.005`; names are report-only in the
+labelling job (two passes), compose runs twice and only compose pass 2 carries `--gate`;
+`OVERWRITE=1` restarts the gate. Eval: stop judged within `STOP_TOL_UV = 0.03` of the GT end in
+image space, a graze under `PASS_TIE_M = 0.15` m ties, `gt_follow_rate` is the ceiling, and the
+constant-goal baseline stays. Smoke run: 98% of routes described.
