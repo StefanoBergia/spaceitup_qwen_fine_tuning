@@ -422,6 +422,8 @@ def test_real_frame_names_the_obstacle_a_person_would(sd, cand, xz, why):
     near = [o for o in event_objects
             if np.linalg.norm(np.array(out["objects"][o]["cells_xz"]) - xz, axis=1).min() <= 0.4]
     assert near, f"{why}: events {out['events']}"
+    if why.startswith("A:"):                             # a pillar / a post: objects, not walls
+        assert any(out["objects"][o]["kind_hint"] == "object" for o in near), out["objects"]
 
 
 import importlib.util  # noqa: E402
@@ -634,11 +636,13 @@ def test_wall_like_anchor_just_past_the_goal_is_not_a_near_stop(tmp_path):
     s[10:44, 40:42] = OCC                                # wall x 2.0..2.1, z 0.5..2.2 (1.7 m)
     route = [(2.5, 0.2), (2.5, 2.3), (1.6, 2.6)]         # rounds its end; the goal is just past it
     _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
-    wall = int(frame.lab[20, 40])
     cs = candidates(frame, np.array(route))
-    st = stop_phrase(frame, np.array(route), build_events(frame, cs), cs)
-    assert not (st is not None and st["anchor"] is not None and st["anchor"]["blob"] == wall
-                and st["relation"] not in ("in front of", "before")), st and (st["type"], st["relation"])
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["wall"]
+    # by design nothing fits: the wall is the only blob -- not "just past" it (near), not "just after"
+    # it (the goal is still within PASS_M of it), not "past" it (the route never leaves it), and the
+    # line-of-approach rule never stops a wall-like blob "past"
+    assert stop_phrase(frame, np.array(route), ev, cs) is None
 
 
 def test_wall_ahead_of_the_goal_is_in_front_of(tmp_path):
@@ -649,6 +653,9 @@ def test_wall_ahead_of_the_goal_is_in_front_of(tmp_path):
     st = stop_phrase(frame, np.array(route), [])
     assert st["type"] == "near" and st["relation"] == "in front of"
     assert np.hypot(*np.ptp(frame.grid.xz(np.argwhere(frame.lab == st["anchor"]["blob"])), axis=0)) >= WALL_EXTENT_M
+    out = describe_route(write_sample(tmp_path / "s00007", s, [route]), 0)
+    assert out["stop"]["relation"] == "in front of"
+    assert out["objects"][out["stop"]["object"]]["kind_hint"] == "wall"
 
 
 # --- controller ruling on Task 14 concern 1: a wall anchors "past" only once the route has left it ---
@@ -697,3 +704,30 @@ def test_line_of_approach_stop_uses_coarse_amounts(tmp_path, goal_z, amount):
     _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
     st = stop_phrase(frame, np.array(route), [])
     assert st["type"] == "distance" and st["relation"] == "before" and st["amount"] == amount
+
+
+# --- fix round 1: a wall's event ends where the route leaves it -----------------------------
+@pytest.mark.parametrize("goal_z,after_last", [(2.0, False), (3.5, True)])
+def test_after_last_measures_a_wall_from_where_the_route_leaves_it(tmp_path, goal_z, after_last):
+    # wall z 0.5..2.5: goal 0.5 m before its end (still beside it) / 1 m after its end
+    route = [(2.5, 0.2), (2.9, 0.8), (2.9, goal_z)]
+    _, frame = load_frame(write_sample(tmp_path / "s", _short_wall_state(), [route]))
+    cs = candidates(frame, np.array(route))
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["wall"] and ev[0]["end_arc_m"] == cs[0]["along_end_arc_m"]
+    st = stop_phrase(frame, np.array(route), ev, cs)
+    assert (st is not None and st["type"] == "after_last") is after_last, st and (st["type"], st["relation"])
+
+
+def test_object_across_from_the_far_end_of_a_long_wall_merges_into_between(tmp_path):
+    s = np.full((200, 100), FREE, np.uint8)
+    s[10:110, 68:70] = OCC                               # wall x 3.4..3.5, z 0.5..5.5 (route's left)
+    s[100:110, 34:46] = OCC                              # box x 1.7..2.3, z 5.0..5.5 (route's right)
+    route = [(2.5, 0.2), (2.9, 0.8), (2.9, 7.5)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    assert [c["wall"] for c in cs] == [True, False]
+    assert cs[1]["arc_m"] - cs[0]["arc_m"] > MERGE_ARC_M  # far from the wall's closest approach ...
+    assert cs[1]["arc_m"] <= cs[0]["along_end_arc_m"]      # ... but still beside the wall
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["between"] and sorted(ev[0]["members"]) == [0, 1]

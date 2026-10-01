@@ -346,9 +346,15 @@ def opening_outline(frame, p, q):
 OTHER_SIDE = {"left": "right", "right": "left"}
 
 
+def _end_arc(c):
+    """Where the route is done with a candidate: a wall where the route leaves it, else its closest approach."""
+    return c["along_end_arc_m"] if c["wall"] else c["arc_m"]
+
+
 def _event(kind, side, members, cands, **extra):
-    arcs = [cands[m]["arc_m"] for m in members]
-    return {"type": kind, "side": side, "members": list(members), "arc_m": min(arcs), "end_arc_m": max(arcs),
+    """An event row; arc_m = where it starts, end_arc_m = where the route is done with its last member."""
+    return {"type": kind, "side": side, "members": list(members),
+            "arc_m": min(cands[m]["arc_m"] for m in members), "end_arc_m": max(_end_arc(cands[m]) for m in members),
             "score": sum(cands[m]["score"] for m in members), **extra}
 
 
@@ -362,7 +368,8 @@ def _merge(frame, a, b, cands):
     """One event for two adjacent ones (Addendum A 3), or None when they stay apart: obstacles on
     opposite sides -> between (two wall-long blobs flanking a crossing opening -> through, as before);
     two objects on the same side -> one pass of both. Never with a through event, never one blob twice,
-    never farther apart along the route than MERGE_ARC_M."""
+    never farther apart along the route than MERGE_ARC_M (from a's end -- a wall's end is where the route
+    leaves it -- to b's start). build_events pairs greedily left to right; each event merges at most once."""
     if "through" in (a["type"], b["type"]) or b["arc_m"] - a["end_arc_m"] > MERGE_ARC_M:
         return None
     members = a["members"] + b["members"]
@@ -475,6 +482,14 @@ def _event_anchor(event, cands, route_len):
             "kind": "wall" if c["wall"] else "object"}, arc
 
 
+def _just_after(event, cands, route_len):
+    """At most AFTER_LAST_M of route after the event; when its last member is a wall, the goal must
+    also be past the wall's end (a goal still beside the wall is not "just after" it)."""
+    remaining = route_len - event["end_arc_m"]
+    last = None if cands is None else max((cands[m] for m in event["members"]), key=_end_arc)
+    return remaining <= AFTER_LAST_M and (remaining > 1e-6 or last is None or not last["wall"])
+
+
 def _distance(relation, metres, anchor):
     return {"type": "distance", "relation": relation, "amount": amount(metres),
             "distance_m": round(float(metres), 1), "anchor": anchor}
@@ -510,8 +525,10 @@ def stop_phrase(frame, route_xz, events, cands=None):
             continue
         x = _anchor(frame, b, goal, cells, xz, d)
         if x is not None:
+            if _wall_like(xz):
+                x["kind"] = "wall"
             return {"type": "near", "relation": rel, "anchor": x}
-    if events and rg["arc"][-1] - events[-1]["end_arc_m"] <= AFTER_LAST_M:
+    if events and _just_after(events[-1], cands, rg["arc"][-1]):
         return {"type": "after_last", "relation": "just after", "anchor": None}
     # how far past the last thing passed, when nothing visible is near the goal
     last = next((a for a in (_event_anchor(e, cands, rg["arc"][-1]) for e in reversed(events)) if a), None) \
@@ -570,6 +587,8 @@ def describe_route(sample_dir, candidate_index):
 
     def add(key, kind, outline, cells):
         oid = f"{frame.name}:{key}"
+        if kind == "wall" and oid in objects:            # a blob met as an object first, then as a wall stop anchor
+            objects[oid]["kind_hint"] = "wall"
         objects.setdefault(oid, {"object_id": oid, "kind_hint": kind,
                                  **{k: outline[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")},
                                  "cells_xz": _cells(cells)})
