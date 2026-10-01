@@ -339,4 +339,18 @@ def d1_gate_failures(summary, stage, min_accept=0.9, max_template=0.1):
         fails.append(f"accept rate {summary['accept_rate']:.3f} < {min_accept}")
     if stage == "compose" and summary.get("template_share", 0) > max_template:
         fails.append(f"template share {summary['template_share']:.3f} > {max_template}")
+    if summary.get("errors", 0) > 0:
+        fails.append(f"request errors {summary['errors']} > 0")
     return fails
+
+
+def name_rows_split(rows):
+    """(named {id: name}, rejected {ids that ran but failed}); error rows are in neither."""
+    named = {r["id"]: r["name"] for r in rows if r.get("passed") and not r.get("error")}
+    rejected = {r["id"] for r in rows if not r.get("passed") and not r.get("error")}
+    return named, rejected
+
+
+def names_missing(row, named, rejected):
+    """Route objects with no name row or only an error row (a retryable gap, not a rejection)."""
+    return [o for o in route_objects(row) if o not in named and o not in rejected]

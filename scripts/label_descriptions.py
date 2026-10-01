@@ -28,7 +28,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.descriptions import (
-    d1_gate_failures, label_object, label_route, route_objects, select_routes, summarize_d1,
+    d1_gate_failures, label_object, label_route, name_rows_split, names_missing, route_objects, select_routes,
+    summarize_d1,
 )
 from rover_vlm.labelling_io import chat_text, chat_with_image, connect, prepare_output, resolve_endpoint
 
@@ -71,7 +72,7 @@ def main() -> None:
     else:
         if not (args.names and args.names.exists()):
             raise SystemExit("--stage compose needs --names from a finished stage name run")
-        names = {r["id"]: r["name"] for r in jsonl(args.names) if r.get("passed")}
+        names, rejected = name_rows_split(jsonl(args.names))
         items, key = routes, "id"
     args.out.parent.mkdir(parents=True, exist_ok=True)
     done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
@@ -91,6 +92,10 @@ def main() -> None:
 
         def work(it):
             t0 = time.time()
+            if args.stage == "compose":   # a name that never got an answer is retryable, not a rejection
+                gap = names_missing(it, names, rejected)
+                if gap:
+                    return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
                 row = (label_object(ask_image, it, args.seed) if args.stage == "name"
                        else label_route(ask_text, it, names, args.seed))

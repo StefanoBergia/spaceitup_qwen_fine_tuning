@@ -238,6 +238,22 @@ def test_select_routes_and_gate():
     s = summarize_d1(comp, "compose")
     assert s["n"] == 10 and s["errors"] == 1 and s["accept_rate"] == 1.0
     assert s["template_share"] == pytest.approx(1 / 9, abs=1e-3)
-    assert d1_gate_failures(s, "compose") == ["template share 0.111 > 0.1"]
+    assert d1_gate_failures(s, "compose") == ["template share 0.111 > 0.1", "request errors 1 > 0"]
     names = [{"id": "o1", "passed": True, "rejects": []}, {"id": "o2", "passed": False, "rejects": ["name:long"]}]
     assert d1_gate_failures(summarize_d1(names, "name"), "name") == ["accept rate 0.500 < 0.9"]
+
+
+def test_name_rows_split_and_missing():
+    from rover_vlm.descriptions import name_rows_split, names_missing
+    rows = [{"id": "a", "passed": True, "name": "sofa"}, {"id": "b", "passed": False, "rejects": ["parse"]},
+            {"id": "c", "error": "Timeout"}]
+    named, rejected = name_rows_split(rows)
+    assert named == {"a": "sofa"} and rejected == {"b"}
+    route = {"events": [{"objects": ["a", "b"]}, {"objects": ["c"]}], "stop": {"object": "d"}}
+    assert names_missing(route, named, rejected) == ["c", "d"]
+    assert names_missing({"events": [{"objects": ["a", "b"]}], "stop": {"object": None}}, named, rejected) == []
+
+
+def test_gate_fails_on_request_errors():
+    s = {"n": 10, "errors": 2, "accept_rate": 1.0, "rejects": {}}
+    assert d1_gate_failures(s, "name") == ["request errors 2 > 0"]

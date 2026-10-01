@@ -7,7 +7,9 @@
 # Needs data/prepared_habitat_instr_v2/{events,objects}_{eval,train}.jsonl
 # (uv run scripts/prepare_habitat_instr.py events). Spec:
 # docs/superpowers/specs/2026-09-30-route-descriptions-design.md. Safe to re-submit: every
-# call passes --resume. Afterwards, on the login node:
+# call passes --resume. After a prompt fix, re-run the gate from scratch:
+#     OVERWRITE=1 sbatch slurm/label_descriptions.sbatch
+# Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions
 #SBATCH --job-name=cosmos3-label-desc
 #SBATCH --partition=A100
@@ -39,16 +41,30 @@ cosmos3_start_server
 trap 'rm -f "$ENDPOINT_FILE"; kill $SERVER_PID 2>/dev/null || true' EXIT
 cosmos3_wait_healthy
 
-label() {  # label <split> <tag> [extra args]
+label() {  # label <split> <tag> [--limit N] [--gate]
     local s=$1 tag=$2; shift 2
-    echo; echo "=============== name: $tag ==============="
+    local first=--resume gate=() limit=()
+    [ -n "${OVERWRITE:-}" ] && first=--overwrite
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --gate) gate=(--gate) ;;
+            --limit) limit=(--limit "$2"); shift ;;
+        esac
+        shift
+    done
+    # name pass 1 may leave request-error rows; pass 2 (--resume) retries them, and only it gates
+    echo; echo "=============== name: $tag (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py --stage name --events "$D/events_$s.jsonl" \
         --objects "$D/objects_$s.jsonl" --out "$OUT/names_${tag}_d1.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume "$@"
+        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "$first" "${limit[@]}"
+    echo; echo "=============== name: $tag (pass 2, retries errors) ==============="
+    "$UV" run scripts/label_descriptions.py --stage name --events "$D/events_$s.jsonl" \
+        --objects "$D/objects_$s.jsonl" --out "$OUT/names_${tag}_d1.jsonl" \
+        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume "${limit[@]}" "${gate[@]}"
     echo; echo "=============== compose: $tag ==============="
     "$UV" run scripts/label_descriptions.py --stage compose --events "$D/events_$s.jsonl" \
         --names "$OUT/names_${tag}_d1.jsonl" --out "$OUT/desc_${tag}_d1.jsonl" \
-        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" --resume "$@"
+        --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "$first" "${limit[@]}" "${gate[@]}"
 }
 
 if [ "$STAGE" = "gate" ]; then
