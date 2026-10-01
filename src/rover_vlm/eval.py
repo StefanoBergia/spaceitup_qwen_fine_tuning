@@ -687,15 +687,23 @@ def _pass_side(route, cells):
     return ("left" if (cells[j] - pts[i]) @ right > 0 else "right"), float(d[i, j])
 
 
+_OPPOSITE = {"left": "right", "right": "left"}
+
+
 def _event_followed(floor, e):
-    """1 if the route does what one event says; malformed or empty event data counts as 0."""
+    """1 if the route does what one event says; malformed or empty event data counts as 0.
+
+    pass: every object is passed on `side` (the route's side). wall: the wall stays on the
+    rover's side `side`, i.e. the route passes it on the opposite side. Both within
+    FOLLOW_NEAR_M; a graze (< PASS_TIE_M) counts either way."""
     kind = e.get("type")
-    if kind == "pass":
+    if kind in ("pass", "wall"):
         obs = e.get("obstacles") or []
-        if not obs or not len(obs[0]):
+        want = e.get("side") if kind == "pass" else _OPPOSITE.get(e.get("side"))
+        if not obs or any(not len(g) for g in obs) or (kind == "wall" and len(obs) != 1):
             return 0
-        side, dist = _pass_side(floor, obs[0])
-        return int(dist < PASS_TIE_M or (side == e.get("side") and dist <= FOLLOW_NEAR_M))
+        sides = [_pass_side(floor, g) for g in obs]
+        return int(all(dist < PASS_TIE_M or (side == want and dist <= FOLLOW_NEAR_M) for side, dist in sides))
     if kind == "between":
         groups = e.get("obstacles") or []
     elif kind == "through":

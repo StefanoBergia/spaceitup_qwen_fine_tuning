@@ -157,3 +157,42 @@ def test_aggregate_uses_the_gt_terminus_and_reports_the_gt_ceiling():
     no_gt = [dict(rows[0], gt=None)]
     agg = aggregate_description_metrics(no_gt)
     assert agg["stop_rate"] == 0.0 and agg["gt_follow_rate"] is None   # floor fallback
+
+
+# --- Addendum A: wall events and multi-object passes (Task 15) ----------------------------
+# A wall with side s is on the ROVER's side s: the obstacle is on the route's side s, so the
+# route passes it on the opposite side (_pass_side returns the opposite word).
+WALL_X = [[[1.2, z] for z in (1.0, 1.5, 2.0, 2.5, 3.0)]]          # +x = the rover's left
+
+
+def test_wall_followed_when_it_stays_on_the_stated_side():
+    c = check([{"type": "wall", "side": "left", "obstacles": WALL_X, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [1]
+    c_r = check([{"type": "wall", "side": "right", "obstacles": WALL_X, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c_r)["events"] == [0]
+
+
+def test_wall_on_the_other_side_of_the_route_is_not_followed():
+    c = check([{"type": "wall", "side": "left", "obstacles": WALL_X, "gap_xz": None}])
+    beyond = [(2.0, 0.8), (2.0, 2.0), (2.0, 4.0)]                  # runs on the wall's far side (+x)
+    assert description_follow(to_image(beyond), c)["events"] == [0]
+
+
+def test_wall_far_away_or_grazing():
+    far = [[[3.5, z] for z in (1.0, 2.0, 3.0)]]
+    c = check([{"type": "wall", "side": "left", "obstacles": far, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [0]          # > FOLLOW_NEAR_M
+    graze = [[[0.05 + 0.5 * PASS_TIE_M, z] for z in (1.5, 2.0, 2.5)]]
+    c = check([{"type": "wall", "side": "right", "obstacles": graze, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [1]          # tie counts
+
+
+def test_two_object_pass_needs_every_object_on_the_side():
+    both_right = [[[-0.6, 1.5]], [[-0.6, 3.0]]]                   # both on the route's right
+    c = check([{"type": "pass", "side": "left", "obstacles": both_right, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [1]
+    split = [[[-0.6, 1.5]], [[0.6, 3.0]]]                         # second one on the route's left
+    c = check([{"type": "pass", "side": "left", "obstacles": split, "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [0]
+    c = check([{"type": "pass", "side": "left", "obstacles": [[[-0.6, 1.5]], []], "gap_xz": None}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [0]          # malformed second group
