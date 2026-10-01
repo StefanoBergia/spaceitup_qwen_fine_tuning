@@ -30,7 +30,7 @@ START_SKIP_M = 0.3        # ignore what the route passes in its first metres (th
 # or landmarks. 00372 (2026-09-30): a 2 m wide strip 0.22-0.45 m ahead blocked every ray at 0.35.
 NEAR_CAMERA_M = 0.5
 MIN_VISIBLE_CELLS = 4
-MIN_AREA = 0.01           # outline area as a fraction of the image
+MIN_AREA = 0.005          # outline area as a fraction of the image (tight floor-free outlines of thin posts are ~0.01)
 KEEP_NEAR_ROUTE_M = 1.5   # outline only the part of a long blob (a wall) near the route
 MAX_VIS_SAMPLES = 200     # visibility rays per blob (each ray is a python loop)
 OFFSET_FLOOR_M = 0.1      # score floor so obstacles near the start still count
@@ -189,7 +189,7 @@ def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
             & (metres >= fwd.min() - DEPTH_BAND_M) & (metres <= fwd.max() + DEPTH_BAND_M))
     if keep.sum() < MIN_MASK_PX:
         return col
-    keep, seeded = _seeded_pieces(frame, keep, vis_xz, top)
+    keep, seeded = _seeded_pieces(frame, keep, metres, vis_xz, top)
     if not seeded:
         return col
     ys, xs = np.nonzero(keep)
@@ -197,19 +197,24 @@ def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
     return outline_dict(convex_hull(pts), depth_fallback=False)
 
 
+FLOOR_TOL_M = 0.2    # floor at the object's depth would join neighbouring objects into one piece
 PIECE_MAX_PX = 128   # the connected-pieces labelling runs on a mask at most this many px on its long side
 
 
-def _seeded_pieces(frame, keep, vis_xz, top):
+def _seeded_pieces(frame, keep, metres, vis_xz, top):
     """(keep', True) with `keep` cut to its 8-connected pieces that hold a seed pixel (the cells'
-    projections at heights 0, top/2, top); (keep, False) when no piece holds one. Gate 1: a hull over
+    projections at heights top/2, top; height 0 lands on floor); floor pixels are removed first;
+    (keep, False) when no piece holds one. Gate 1: a hull over
     several things at one depth (two chairs and a doorway) made Cosmos name the wrong object."""
     H, W = keep.shape
+    v = (np.arange(H)[:, None] + 0.5) / H
+    floor = 0.5 * CAM_HEIGHT_M / np.maximum(v - 0.5, 1e-6)
+    keep = keep & ~((v > 0.5) & (np.abs(metres - floor) < FLOOR_TOL_M))
     st = max(1, -(-max(H, W) // PIECE_MAX_PX))
     small = keep[::st, ::st]
     lab, _ = components(small)
     ids = set()
-    for h in (0.0, top / 2, top):
+    for h in (top / 2, top):
         uv, fwd = frame.cam.uv(np.asarray(vis_xz), h)
         uv = np.nan_to_num(uv[fwd > 1e-6], nan=0.0, posinf=1.0, neginf=0.0)
         c = np.clip((uv[:, 0] * W).astype(int), 0, W - 1) // st

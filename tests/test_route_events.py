@@ -178,6 +178,50 @@ def test_outline_keeps_only_the_depth_piece_holding_the_object(tmp_path):
     assert trim["bbox"][2] < u_far - 0.1                                # ... the trimmed one stops short of the block
 
 
+def _two_things_frame(tmp_path, floor_between):
+    """The box plus a second thing at the same depth, 0.4 widths aside, inside the hull of a
+    blob that also owns a far cell whose own pixels hit nothing. floor_between=False paints a nearer
+    region over the floor strip joining them (the pre-floor-removal workaround)."""
+    s = _free()
+    s[28:34, 48:54] = OCC
+    route = [(2.5, 0.2), (3.2, 1.2), (3.2, 1.9), (2.5, 3.0)]
+    f0 = load_frame(write_sample(tmp_path / "noimg", s, [route]))[1]
+    b1 = int(f0.lab[30, 50])
+    vis1 = visible_cells(f0, np.argwhere(f0.lab == b1), b1)
+    far = np.array([[1.5, 1.45]])
+    u_far = f0.cam.uv(far)[0][0, 0]
+    box = column_outline(f0, vis1, top=0.5)["polygon"]
+    block = [[u_far - 0.1, 0.55], [u_far - 0.04, 0.55], [u_far - 0.04, 0.66], [u_far - 0.1, 0.66]]
+    depth = _depth_image(f0.cam, [[0.56, 0.66], [1, 0.66], [1, 1], [0.56, 1]] if not floor_between else box, 0.7 if not floor_between else 1.3)  # noqa: E501
+    for poly in (box, block):
+        m = Image.new("L", (128, 128), 0)
+        ImageDraw.Draw(m).polygon([(u * 128, v * 128) for u, v in poly], fill=1)
+        depth = np.where(np.asarray(m, bool), _depth_image(f0.cam, [[0, 0], [1, 0], [1, 1], [0, 1]], 1.3), depth)
+    frame = load_frame(write_sample(tmp_path / "d", s, [route], depth=depth))[1]
+    return frame, np.vstack([vis1, far]), u_far
+
+
+def test_outline_excludes_a_second_object_joined_only_by_floor(tmp_path):
+    frame, vis, u_far = _two_things_frame(tmp_path, floor_between=True)
+    assert column_outline(frame, vis)["bbox"][2] > u_far - 0.01
+    trim = object_outline(frame, vis)
+    assert trim["depth_fallback"] is False
+    assert trim["bbox"][2] < u_far - 0.1
+
+
+def test_outline_with_no_seeded_piece_falls_back(tmp_path):
+    frame, vis, _ = _two_things_frame(tmp_path, floor_between=True)
+    # a very low object: its pixels hold none of the seeds (heights top/2, top)
+    low = column_outline(frame, vis, top=0.1)["polygon"]
+    m = Image.new("L", (128, 128), 0)
+    ImageDraw.Draw(m).polygon([(u * 128, v * 128) for u, v in low], fill=1)
+    depth = _depth_image(frame.cam, [[0, 0], [1, 0], [1, 1], [0, 1]], 1.3)
+    far_floor = _depth_image(frame.cam, [[0, 0], [0, 0], [0, 0]], 1.3)
+    frame.depth = np.where(np.asarray(m, bool), depth, far_floor)
+    frame.depth_fit = calibrate_depth(frame.depth, frame.cam, frame.grid) or frame.depth_fit
+    assert object_outline(frame, vis)["depth_fallback"] is True
+
+
 def test_no_depth_png_falls_back_to_the_column_outline(tmp_path):
     frame, vis = _box_frame(tmp_path, with_depth=False)
     assert frame.depth is None and frame.depth_fit is None
