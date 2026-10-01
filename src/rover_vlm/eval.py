@@ -679,21 +679,38 @@ def _pass_side(route, cells):
     return ("left" if (cells[j] - pts[i]) @ right > 0 else "right"), float(d[i, j])
 
 
+def _event_followed(floor, e):
+    """1 if the route does what one event says; malformed or empty event data counts as 0."""
+    kind = e.get("type")
+    if kind == "pass":
+        obs = e.get("obstacles") or []
+        if not obs or not len(obs[0]):
+            return 0
+        side, dist = _pass_side(floor, obs[0])
+        return int(side == e.get("side") and dist <= FOLLOW_NEAR_M)
+    if kind == "between":
+        groups = e.get("obstacles") or []
+    elif kind == "through":
+        gap = e.get("gap_xz")
+        groups = [[p] for p in gap] if gap is not None else []
+    else:
+        return 0
+    if len(groups) < 2 or not len(groups[0]) or not len(groups[1]):
+        return 0
+    a, b = (_pass_side(floor, g) for g in groups[:2])
+    return int(a[0] != b[0] and max(a[1], b[1]) <= FOLLOW_NEAR_M)
+
+
 def description_follow(pred_path, check):
     """Did a predicted path do what its description says? Per event and the stop."""
     floor = image_to_floor(pred_path or [], check["pose_xz"], check["heading_xz"])
     n = len(check["events"])
+    if len(floor):  # consecutive duplicate waypoints give a zero tangent in _pass_side
+        keep = np.r_[True, np.linalg.norm(np.diff(floor, axis=0), axis=1) > 1e-9]
+        floor = floor[keep]
     if len(floor) < 2:
         return {"follows": 0, "events": [0] * n, "stop": 0}
-    res = []
-    for e in check["events"]:
-        if e["type"] == "pass":
-            side, dist = _pass_side(floor, e["obstacles"][0])
-            res.append(int(side == e["side"] and dist <= FOLLOW_NEAR_M))
-        else:
-            groups = e["obstacles"] if e["type"] == "between" else [[p] for p in e["gap_xz"]]
-            a, b = (_pass_side(floor, g) for g in groups[:2])
-            res.append(int(a[0] != b[0] and max(a[1], b[1]) <= FOLLOW_NEAR_M))
+    res = [_event_followed(floor, e) for e in check["events"]]
     stop = int(np.linalg.norm(floor[-1] - np.asarray(check["goal_xz"], float)) <= STOP_TOL_M)
     return {"follows": int(all(res) and stop), "events": res, "stop": stop}
 
@@ -716,7 +733,7 @@ def aggregate_description_metrics(records):
         if r["habitat_meta"].get("pair_id"):
             pairs.setdefault(r["habitat_meta"]["pair_id"], []).append(r["id"])
     full = [p for p in pairs.values() if len(p) == 2]
-    goals = np.array([r["gt"]["goal"][:2] for r in rows if r.get("gt")], float)
+    goals = np.array([r["gt"]["goal"][:2] for r in rows if r.get("gt") and r.get("metrics")], float)
     ep = [r["metrics"]["goal_point_error"] for r in rows if r.get("metrics")]
     return {
         "n_records": len(rows),

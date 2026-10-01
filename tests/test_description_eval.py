@@ -82,3 +82,41 @@ def test_habitat_aggregate_carries_description_block_only_with_desc_check():
     assert "description" in aggregate_habitat_metrics(with_check)
     without = [{"id": "b", "parsed": None, "habitat_meta": {}}]
     assert "description" not in aggregate_habitat_metrics(without)
+
+
+STRAIGHT = [(0.0, 0.8), (0.0, 2.0), (0.0, 4.0)]
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "pass", "side": "left", "obstacles": [[]], "gap_xz": None},
+    {"type": "pass", "side": "left", "obstacles": [], "gap_xz": None},
+    {"type": "through", "side": None, "obstacles": [], "gap_xz": None},
+    {"type": "between", "side": None, "obstacles": [[[1.0, 2.0]]], "gap_xz": None},
+])
+def test_malformed_events_count_as_not_followed(event):
+    res = description_follow(to_image(STRAIGHT), check([event]))
+    assert res["events"] == [0] and res["follows"] == 0
+
+
+def test_through_gap():
+    c = check([{"type": "through", "side": None, "obstacles": [],
+                "gap_xz": [[-0.4, 2.0], [0.4, 2.0]]}])
+    assert description_follow(to_image(STRAIGHT), c)["events"] == [1]
+    outside = [(1.2, 0.8), (1.2, 2.0), (1.2, 4.0)]
+    assert description_follow(to_image(outside), c)["events"] == [0]
+
+
+def test_duplicate_waypoints_do_not_default_to_right():
+    c = check([{"type": "pass", "side": "left", "obstacles": [[[0.0, 2.0]]], "gap_xz": None}])
+    route = [(0.5, 0.8), (0.5, 2.0), (0.5, 2.0), (0.5, 2.0), (0.5, 4.0)]
+    assert description_follow(to_image(route), c)["events"] == [1]
+
+
+def test_constant_goal_baseline_uses_the_endpoint_error_population():
+    c = check([])
+    rows = [{"id": "a", "parsed": {"path": to_image(STRAIGHT)}, "gt": {"goal": [0.5, 0.6, 1]},
+             "metrics": {"goal_point_error": 0.1}, "habitat_meta": {"desc_check": c}},
+            {"id": "b", "parsed": None, "gt": {"goal": [0.9, 0.9, 1]},
+             "metrics": None, "habitat_meta": {"desc_check": c}}]
+    agg = aggregate_description_metrics(rows)
+    assert agg["constant_goal_endpoint_error_median"] == pytest.approx(0.0)
