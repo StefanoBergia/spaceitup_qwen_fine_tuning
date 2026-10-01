@@ -349,9 +349,14 @@ def _end_arc(c):
 
 
 def _event(kind, side, members, cands, **extra):
-    """An event row; arc_m = where it starts, end_arc_m = where the route is done with its last member."""
-    return {"type": kind, "side": side, "members": list(members),
-            "arc_m": min(cands[m]["arc_m"] for m in members), "end_arc_m": max(_end_arc(cands[m]) for m in members),
+    """An event row; arc_m = where it starts, end_arc_m = where the route is done with its last member.
+
+    A through event is done at its crossing (arc_m): its members are usually wall-flagged, and with
+    gap-merged blobs the walls beyond the door are the same blob, so along_end_arc_m would put the
+    end far past the door (final review I1: "stop just after the doorway" 3.5 m past it)."""
+    arc = min(cands[m]["arc_m"] for m in members)
+    end = arc if kind == "through" else max(_end_arc(cands[m]) for m in members)
+    return {"type": kind, "side": side, "members": list(members), "arc_m": arc, "end_arc_m": end,
             "score": sum(cands[m]["score"] for m in members), **extra}
 
 
@@ -481,9 +486,11 @@ def _event_anchor(event, cands, route_len):
 
 def _just_after(event, cands, route_len):
     """At most AFTER_LAST_M of route after the event; when its last member is a wall, the goal must
-    also be past the wall's end (a goal still beside the wall is not "just after" it)."""
+    also be past the wall's end (a goal still beside the wall is not "just after" it). Never for a
+    through event: it ends at its crossing, whatever its members' wall flags (final review I1)."""
     remaining = route_len - event["end_arc_m"]
-    last = None if cands is None else max((cands[m] for m in event["members"]), key=_end_arc)
+    last = None if cands is None or event["type"] == "through" else \
+        max((cands[m] for m in event["members"]), key=_end_arc)
     return remaining <= AFTER_LAST_M and (remaining > 1e-6 or last is None or not last["wall"])
 
 

@@ -744,3 +744,21 @@ def test_object_across_from_the_far_end_of_a_long_wall_merges_into_between(tmp_p
     assert cs[1]["arc_m"] <= cs[0]["along_end_arc_m"]      # ... but still beside the wall
     ev = build_events(frame, cs)
     assert [e["type"] for e in ev] == ["between"] and sorted(ev[0]["members"]) == [0, 1]
+
+
+# --- final review I1: a through event ends at its crossing, never at a joined wall's far end ---
+def test_through_with_a_joined_wall_beyond_the_door_is_measured_from_the_crossing(tmp_path):
+    s = np.full((160, 100), FREE, np.uint8)
+    s[:100] = _doorway_state((44, 56))
+    s[42:88, 62:64] = OCC                                # corridor wall x 3.1..3.2, z 2.1..4.4, joined to the door wall
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 5.6)]        # crosses the door ~1.3 m in, goal 4.8 m in
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8)))
+    cs = candidates(frame, np.array(route))
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["through"]
+    assert cs[ev[0]["members"][0]]["along_end_arc_m"] > 3.0          # the joined wall runs on past the door
+    assert ev[0]["end_arc_m"] == pytest.approx(ev[0]["arc_m"]) and ev[0]["arc_m"] < 1.6
+    st = stop_phrase(frame, np.array(route), ev, cs)
+    assert st is not None and st["type"] == "distance" and st["relation"] == "past", st
+    assert st["anchor"]["kind"] == "opening"
+    assert st["distance_m"] == pytest.approx(4.8 - ev[0]["arc_m"], abs=0.11)
