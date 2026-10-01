@@ -224,7 +224,7 @@ def sample_events(rows, n_pair, n_single, seed):
     pairs = [r for r in ok if r["pair_id"]]
     single = [r for r in ok if not r["pair_id"]]
     rng = random.Random(seed)
-    picked = rng.sample(pairs, min(n_pair, len(pairs))) + rng.sample(single, min(n_single, len(single)))
+    picked = rng.sample(pairs, min(n_pair, len(pairs))) + rng.sample(single, min(max(0, n_single), len(single)))
     rng.shuffle(picked)
     return picked, {"described_pair": len(pairs), "described_single": len(single), "rows": len(rows)}
 
