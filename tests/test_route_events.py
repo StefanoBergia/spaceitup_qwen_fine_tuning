@@ -181,20 +181,71 @@ def test_opposite_sides_close_along_the_route_merge_into_between(tmp_path):
     assert len(ev[0]["members"]) == 2
 
 
-def test_doorway_in_one_wall_is_a_through_event(tmp_path):
+def _doorway_state(gap_cols):
+    """Wall z 2.0..2.1 with a doorway; side/back walls join the halves into one blob."""
     s = _free()
-    s[40:42, 10:47] = OCC        # wall z 2.0..2.1, x 0.5..2.35
-    s[40:42, 53:90] = OCC        # wall x 2.65..4.5 (gap 2.35..2.65 = doorway)
-    s[4:42, 8:10] = OCC         # side walls joining both halves into one blob
-    s[4:42, 90:92] = OCC
-    s[4:6, 8:92] = OCC        # back wall 0.8 m behind the first usable route point (> PASS_M)
+    g0, g1 = gap_cols
+    s[40:42, 10:g0] = OCC
+    s[40:42, g1:90] = OCC
+    s[10:42, 8:10] = OCC         # side walls joining both halves into one blob
+    s[10:42, 90:92] = OCC
+    s[8:10, 8:92] = OCC          # back wall z 0.4..0.5
+    return s
+
+
+def test_doorway_in_one_wall_is_a_through_event(tmp_path):
+    # doorway x 2.2..2.8 (cell centres 2.175 / 2.825: 0.65 m, wider than MIN_GAP_M)
     route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
-    d = write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8))
+    d = write_sample(tmp_path / "s", _doorway_state((44, 56)), [route], pose=(2.5, 0.8))
     _, frame = load_frame(d)
     ev = build_events(frame, candidates(frame, np.array(route)))
     assert [e["type"] for e in ev] == ["through"]
     p, q = ev[0]["opening"]["gap_xz"]
-    assert abs(p[0] - q[0]) == pytest.approx(0.3, abs=0.1)
+    assert abs(p[0] - q[0]) == pytest.approx(0.65, abs=0.1)
+
+
+def test_gap_narrower_than_the_rover_is_not_a_doorway(tmp_path):
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    d = write_sample(tmp_path / "s", _doorway_state((47, 53)), [route], pose=(2.5, 0.8))   # 0.35 m
+    _, frame = load_frame(d)
+    assert "through" not in [e["type"] for e in build_events(frame, candidates(frame, np.array(route)))]
+
+
+def test_wall_straight_ahead_that_the_route_stops_short_of_is_not_a_doorway(tmp_path):
+    s = _free()
+    s[60:62, 5:95] = OCC                                 # wall z 3.0..3.1 across the map
+    route = [(2.5, 0.2), (2.5, 2.5)]                     # ends 0.5 m before it
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert "through" not in [e["type"] for e in ev]
+
+
+def test_long_wall_the_route_grazes_alongside_is_not_a_doorway(tmp_path):
+    s = _free()
+    s[10:90, 54:56] = OCC                                # wall x 2.7..2.8 along z, 0.25 m off the route
+    route = [(2.5, 0.2), (2.5, 4.5)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert "through" not in [e["type"] for e in ev]
+
+
+def test_two_doorways_of_one_wall_get_different_object_ids(tmp_path):
+    s = _doorway_state((44, 56))                         # doorway A at x 2.2..2.8
+    s[40:42, 62:74] = FREE                               # doorway B at x 3.1..3.7
+    s[42:80, 58:60] = OCC                                # spine x 2.9..3.0 + arch z 3.9..4.0 join the middle piece to the rest
+    s[78:80, 58:92] = OCC
+    s[42:78, 90:92] = OCC
+    r1 = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    r2 = [(2.5, 0.8), (3.4, 1.5), (3.4, 2.05), (3.4, 3.6)]
+    d = write_sample(tmp_path / "s00002", s, [r1, r2], pose=(2.5, 0.8))
+    ids = []
+    for k in (0, 1):
+        out = describe_route(d, k)
+        assert out["reason"] is None, out
+        th = [e for e in out["events"] if e["type"] == "through"]
+        assert len(th) == 1, out["events"]
+        ids.append(th[0]["objects"][0])
+    assert ids[0] != ids[1] and all(i.startswith("s00002:gap") for i in ids)
 
 
 def test_top_three_by_score_then_route_order(tmp_path):
