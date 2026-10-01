@@ -58,7 +58,7 @@ from rover_vlm.instructions import (
     render_check_image, render_generation_image, rescore_row, with_instruction,
 )
 from rover_vlm.landmarks import select_target
-from rover_vlm.route_events import collect_objects, describe_route
+from rover_vlm.route_events import EVENTS_SCHEMA, collect_objects, describe_route
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "data" / "prepared_habitat_v4"
@@ -311,7 +311,7 @@ def event_row(rec):
 def stage_events(args):
     import time
     d = args.out_dir
-    meta = {}
+    meta = {"schema": EVENTS_SCHEMA}     # label_descriptions.py and the audit refuse files without it
     for name in SPLITS:
         recs = json.loads((d / f"labelset_{name}.json").read_text())
         if args.limit:

@@ -788,3 +788,21 @@ def test_through_with_a_joined_wall_beyond_the_door_is_measured_from_the_crossin
     assert st is not None and st["type"] == "distance" and st["relation"] == "past", st
     assert st["anchor"]["kind"] == "opening"
     assert st["distance_m"] == pytest.approx(4.8 - ev[0]["arc_m"], abs=0.11)
+
+
+# --- final review M-stamp: consumers refuse events files from before Addendum A --------------
+from rover_vlm.route_events import EVENTS_SCHEMA, check_events_schema  # noqa: E402
+
+
+def test_events_schema_check_accepts_stamped_meta(tmp_path):
+    (tmp_path / "events_meta.json").write_text(json.dumps({"schema": EVENTS_SCHEMA, "train": {}}))
+    assert EVENTS_SCHEMA == "d1-addendumA"
+    check_events_schema(tmp_path / "events_train.jsonl")          # no raise
+
+
+@pytest.mark.parametrize("meta", [None, {"train": {"records": 1}}, {"schema": "d1"}])
+def test_events_schema_check_refuses_old_or_missing_meta(tmp_path, meta):
+    if meta is not None:
+        (tmp_path / "events_meta.json").write_text(json.dumps(meta))
+    with pytest.raises(SystemExit, match="events files predate Addendum A — rerun prepare_habitat_instr.py events"):
+        check_events_schema(tmp_path / "events_eval.jsonl")

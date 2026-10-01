@@ -627,6 +627,22 @@ def describe_route(sample_dir, candidate_index):
             "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
 
 
+EVENTS_SCHEMA = "d1-addendumA"   # stamped into events_meta.json by prepare_habitat_instr.py events
+
+
+def check_events_schema(events_path):
+    """SystemExit unless the events_meta.json next to `events_path` carries EVENTS_SCHEMA: events
+    rows from before Addendum A have distance stops without amounts and no wall / between events."""
+    mp = Path(events_path).parent / "events_meta.json"
+    try:
+        schema = json.loads(mp.read_text()).get("schema")
+    except (OSError, ValueError):
+        schema = None
+    if schema != EVENTS_SCHEMA:
+        raise SystemExit(f"events files predate Addendum A — rerun prepare_habitat_instr.py events "
+                         f"({mp}: schema {schema!r}, want {EVENTS_SCHEMA!r})")
+
+
 def collect_objects(rows):
     """(rows without their "objects", one object row per id). Both routes of a pair share
     their frame's objects; the first route's outline wins (its name serves both)."""

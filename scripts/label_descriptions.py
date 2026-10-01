@@ -33,6 +33,7 @@ from rover_vlm.descriptions import (
     summarize_d1,
 )
 from rover_vlm.labelling_io import chat_text, chat_with_image, connect, prepare_output, resolve_endpoint
+from rover_vlm.route_events import check_events_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENDPOINT_FILE = REPO_ROOT / "outputs" / "cosmos3_endpoint.txt"
@@ -60,6 +61,7 @@ def main() -> None:
     p.add_argument("--gate", action="store_true", help="exit 2 unless accept >= 0.9 (and template share <= 0.1)")
     args = p.parse_args()
 
+    check_events_schema(args.events)
     routes = select_routes(jsonl(args.events), args.limit)
     if args.stage == "name":
         if not args.objects:

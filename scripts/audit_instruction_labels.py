@@ -61,6 +61,7 @@ from rover_vlm.descriptions import template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
+from rover_vlm.route_events import check_events_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 V2 = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
@@ -311,6 +312,7 @@ def main() -> None:
     if args.mode == "events":
         if not (args.events and args.objects):
             raise SystemExit("--mode events needs --events events_train.jsonl --objects objects_train.jsonl")
+        check_events_schema(args.events)
         by_id = {r["id"]: r for r in json.loads((V2 / "labelset_train.json").read_text())}
         objects = {o["object_id"]: o for o in jsonl(args.objects)}
         rows, pop = sample_events(jsonl(args.events), 30, args.n - 30, args.seed)
@@ -327,6 +329,7 @@ def main() -> None:
     if args.mode == "d1":
         if not (args.events and args.objects and args.desc):
             raise SystemExit("--mode d1 needs --events, --objects and --desc desc_*_d1.jsonl")
+        check_events_schema(args.events)
         split = V2 / ("labelset_eval.json" if "eval" in args.events.name else "labelset_train.json")
         by_id = {r["id"]: r for r in json.loads(split.read_text())}
         ev = {r["id"]: r for r in jsonl(args.events)}
