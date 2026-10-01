@@ -326,9 +326,6 @@ STOP_NEAR_M = 1.0
 AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
-# Legacy metre steps: only tests/test_descriptions.py still imports them, until Task 15 moves
-# descriptions.py to `amount`. Nothing in this module uses them.
-DISTANCE_STEPS = (1.0, 1.5, 2.0, 3.0, 4.0)
 REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "error")
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 

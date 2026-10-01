@@ -73,7 +73,9 @@ def main() -> None:
     else:
         if not (args.names and args.names.exists()):
             raise SystemExit("--stage compose needs --names from a finished stage name run")
-        names, rejected = name_rows_split(jsonl(args.names))
+        name_rows = jsonl(args.names)
+        names, rejected = name_rows_split(name_rows)
+        kinds = {r["id"]: r.get("need") for r in name_rows}   # kind_hint: walls get "past the end of"
         items, key = routes, "id"
     args.out.parent.mkdir(parents=True, exist_ok=True)
     done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
@@ -99,7 +101,7 @@ def main() -> None:
                     return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
                 row = (label_object(ask_image, it, args.seed) if args.stage == "name"
-                       else label_route(ask_text, it, names, args.seed))
+                       else label_route(ask_text, it, names, args.seed, kinds))
             except Exception as e:  # noqa: BLE001 — one bad item must not kill the run
                 return {"id": it[key], "error": f"{type(e).__name__}: {e}"}
             row["latency_s"] = round(time.time() - t0, 2)

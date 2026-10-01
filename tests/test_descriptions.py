@@ -6,14 +6,19 @@ from rover_vlm.descriptions import (
 )
 
 NAMES = {"f:b1": "coffee table", "f:b2": "stone column", "f:b3": "grey sofa",
-         "f:gap4": "open doorway", "f:b5": "fridge", "f:b6": "table"}
+         "f:gap4": "open doorway", "f:b5": "fridge", "f:b6": "table", "f:w8": "white wall",
+         "f:w9": "glass partition"}
 PASS_L = {"type": "pass", "side": "left", "objects": ["f:b1"]}
 PASS_R = {"type": "pass", "side": "right", "objects": ["f:b3"]}
 BETWEEN = {"type": "between", "side": None, "objects": ["f:b2", "f:b3"]}
 THROUGH = {"type": "through", "side": None, "objects": ["f:gap4"]}
 NEAR = {"type": "near", "relation": "in front of", "distance_m": None, "object": "f:b5"}
 AFTER = {"type": "after_last", "relation": "just after", "distance_m": None, "object": None}
-DIST = {"type": "distance", "relation": "before", "distance_m": 2.0, "object": "f:b5"}
+DIST = {"type": "distance", "relation": "before", "amount": "a little", "distance_m": 2.2, "object": "f:b5"}
+WALL_L = {"type": "wall", "side": "left", "objects": ["f:w8"]}
+WALL_R = {"type": "wall", "side": "right", "objects": ["f:w9"]}
+PASS2 = {"type": "pass", "side": "left", "objects": ["f:b1", "f:b3"]}
+BETWEEN_W = {"type": "between", "side": None, "objects": ["f:b3", "f:w8"]}
 
 
 @pytest.mark.parametrize("events,stop", [
@@ -27,7 +32,7 @@ def test_template_always_passes_its_own_rules(events, stop):
 def test_template_wording():
     assert template_description([PASS_L, THROUGH], NEAR, NAMES) == (
         "Go left of the coffee table, then go through the open doorway, and stop in front of the fridge.")
-    assert template_description([BETWEEN], DIST, NAMES).endswith("stop about two metres before the fridge.")
+    assert template_description([BETWEEN], DIST, NAMES).endswith("stop a little before the fridge.")
 
 
 def test_paraphrases_with_both_side_word_positions_pass():
@@ -66,10 +71,10 @@ def test_same_head_noun_twice_matches_in_order():
 
 
 def test_distance_and_after_rules():
-    assert "stop:distance" in description_rejects(
+    assert "stop:amount" in description_rejects(
         "Go between the stone column and the grey sofa and stop before the fridge.", [BETWEEN], DIST, NAMES)
     assert description_rejects(
-        "Go between the stone column and the grey sofa and stop about two meters before the fridge.",
+        "Go between the stone column and the grey sofa and stop a bit before the fridge.",
         [BETWEEN], DIST, NAMES) == []
     assert "stop:after" in description_rejects(
         "Go left of the coffee table, then right of the grey sofa, and stop.", [PASS_L, PASS_R], AFTER, NAMES)
@@ -77,7 +82,7 @@ def test_distance_and_after_rules():
 
 def test_between_and_through_words_required():
     assert "between:missing:0" in description_rejects(
-        "Go past the stone column and the grey sofa and stop about two metres before the fridge.",
+        "Go past the stone column and the grey sofa and stop a little before the fridge.",
         [BETWEEN], DIST, NAMES)
     assert "through:missing:0" in description_rejects(
         "Head to the open doorway and stop in front of the fridge.", [THROUGH], NEAR, NAMES)
@@ -342,27 +347,27 @@ def test_shuffled_texts_come_from_other_frames():
 
 
 # --- final-review fixes (F1-F4) -----------------------------------------------------------
-from rover_vlm.route_events import DISTANCE_STEPS  # noqa: E402
+from rover_vlm.route_events import AMOUNT_STEPS  # noqa: E402
 
-SOFA_PAST = {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b3"}
+SOFA_PAST = {"type": "distance", "relation": "past", "amount": "a little", "distance_m": 2.0, "object": "f:b3"}
 NAMES_F = dict(NAMES, **{"f:b7": "armchair"})
 
 
 def test_pronoun_stop_accepted_when_stop_object_is_the_last_events():
-    t = "Go right of the grey sofa, then stop about two metres past it."
+    t = "Go right of the grey sofa, then stop a little past it."
     assert description_rejects(t, [PASS_R], SOFA_PAST, NAMES) == []
-    near = {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b3"}
-    assert description_rejects("Go right of the grey sofa and stop beside them.", [PASS_R], near, NAMES) == []
+    near = {"type": "near", "relation": "just past", "amount": None, "distance_m": None, "object": "f:b3"}
+    assert description_rejects("Go right of the grey sofa and stop just past them.", [PASS_R], near, NAMES) == []
 
 
 def test_pronoun_stop_rejected_for_a_new_object():
-    t = "Go left of the coffee table, then stop about two metres before it."
+    t = "Go left of the coffee table, then stop a little before it."
     assert "stop:name" in description_rejects(t, [PASS_L], DIST, NAMES)
 
 
 def test_template_keeps_the_explicit_stop_name():
     t = template_description([PASS_R], SOFA_PAST, NAMES)
-    assert t.endswith("stop about two metres past the grey sofa.")
+    assert t.endswith("stop a little past the grey sofa.")
     assert description_rejects(t, [PASS_R], SOFA_PAST, NAMES) == []
 
 
@@ -373,11 +378,9 @@ def test_right_in_stop_phrases_is_not_a_side_word():
     near = {"type": "near", "relation": "in front of", "distance_m": None, "object": "f:b7"}
     assert description_rejects("Go left of the coffee table and stop right in front of the armchair.",
                                [PASS_L], near, NAMES_F) == []
-    nxt = {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b7"}
-    assert description_rejects("Go left of the coffee table and stop right next to the armchair.",
-                               [PASS_L], nxt, NAMES_F) == []
-    assert description_rejects("Go left of the coffee table and stop right by the armchair.",
-                               [PASS_L], nxt, NAMES_F) == []
+    jp = {"type": "near", "relation": "just past", "distance_m": None, "object": "f:b7"}
+    assert description_rejects("Go left of the coffee table and stop right past the armchair.",
+                               [PASS_L], jp, NAMES_F) == []
 
 
 def test_real_side_word_still_binds():
@@ -401,15 +404,13 @@ def test_name_rejects_more_generic_names(name):
 
 
 @pytest.mark.parametrize("text,stop", [
-    ("Go left of the coffee table and stop about two metres before the fridge.",
-     {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b5"}),
-    ("Go left of the coffee table and stop about two metres past the fridge.", DIST),
+    ("Go left of the coffee table and stop a little before the fridge.",
+     {"type": "distance", "relation": "past", "amount": "a little", "distance_m": 2.0, "object": "f:b5"}),
+    ("Go left of the coffee table and stop a little past the fridge.", DIST),
     ("Go left of the coffee table and stop just past the fridge.", NEAR),
     ("Go left of the coffee table and stop next to the fridge.", NEAR),
     ("Go left of the coffee table and stop in front of the fridge.",
      {"type": "near", "relation": "just past", "distance_m": None, "object": "f:b5"}),
-    ("Go left of the coffee table and stop at the fridge.",
-     {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b5"}),
 ])
 def test_swapped_stop_relation_rejected(text, stop):
     assert "stop:relation" in description_rejects(text, [PASS_L], stop, NAMES)
@@ -419,25 +420,208 @@ def test_swapped_stop_relation_rejected(text, stop):
     ("Go left of the coffee table and stop just in front of the fridge.", NEAR),
     ("Go left of the coffee table and stop just beyond the fridge.",
      {"type": "near", "relation": "just past", "distance_m": None, "object": "f:b5"}),
-    ("Go left of the coffee table and stop alongside the fridge.",
-     {"type": "near", "relation": "next to", "distance_m": None, "object": "f:b5"}),
-    ("Go left of the coffee table and stop about two metres short of the fridge.", DIST),
-    ("Go left of the coffee table and stop about two metres beyond the fridge.",
-     {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b5"}),
+    ("Go left of the coffee table and stop a little short of the fridge.", DIST),
+    ("Go left of the coffee table and stop slightly beyond the fridge.",
+     {"type": "distance", "relation": "past", "amount": "a little", "distance_m": 2.0, "object": "f:b5"}),
 ])
 def test_stop_relation_synonyms_pass(text, stop):
     assert description_rejects(text, [PASS_L], stop, NAMES) == [], text
 
 
-_ALL_STOPS = ([{"type": "near", "relation": r, "distance_m": None, "object": o}
-               for r in ("in front of", "just past", "next to") for o in ("f:b5", "f:b3")]
-              + [{"type": "distance", "relation": r, "distance_m": d, "object": o}
-                 for r in ("before", "past") for d in DISTANCE_STEPS for o in ("f:b5", "f:b3")]
+_AMOUNTS = [w for _, w in AMOUNT_STEPS]
+_ALL_STOPS = ([{"type": "near", "relation": r, "amount": None, "distance_m": None, "object": o}
+               for r in ("in front of", "just past") for o in ("f:b5", "f:b3")]
+              + [{"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:w8"}]
+              + [{"type": "distance", "relation": r, "amount": a, "distance_m": 2.0, "object": o}
+                 for r in ("before", "past") for a in _AMOUNTS for o in ("f:b5", "f:b3", "f:w8")]
               + [AFTER])
+_ALL_EVENTS = [[PASS_R], [PASS2], [WALL_L], [WALL_R], [BETWEEN], [BETWEEN_W], [THROUGH],
+               [PASS_L, PASS_R], [THROUGH, PASS_R], [WALL_R, PASS2], [PASS_R, WALL_L], [WALL_L, WALL_R], []]
 
 
-@pytest.mark.parametrize("stop", _ALL_STOPS, ids=lambda s: f"{s['type']}-{s['relation']}-{s['distance_m']}-{s['object']}")
-@pytest.mark.parametrize("events", [[PASS_R], [PASS_L, PASS_R], [THROUGH, PASS_R], [BETWEEN]])
+@pytest.mark.parametrize("stop", _ALL_STOPS, ids=lambda s: f"{s['type']}-{s['relation']}-{s.get('amount')}-{s['object']}")
+@pytest.mark.parametrize("events", _ALL_EVENTS, ids=lambda ev: "+".join(f"{e['type']}{len(e['objects'])}{e['side'] or ''}"
+                                                                          for e in ev) or "none")
 def test_template_passes_for_every_stop(events, stop):
-    text = template_description(events, stop, NAMES)
-    assert description_rejects(text, events, stop, NAMES) == [], text
+    for kinds in (None, {"f:w8": "wall", "f:w9": "wall"}):
+        text = template_description(events, stop, NAMES, kinds=kinds)
+        assert description_rejects(text, events, stop, NAMES) == [], text
+
+
+# --- Addendum A: walls, multi-object passes, coarse stop amounts (Task 15) -----------------
+from rover_vlm.descriptions import stop_text  # noqa: E402
+
+W_NEAR = {"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:b5"}
+
+
+def test_new_event_templates():
+    assert template_description([PASS2], W_NEAR, NAMES) == (
+        "Go left of the coffee table and the grey sofa, and stop in front of the fridge.")
+    assert template_description([WALL_L, PASS_R], W_NEAR, NAMES) == (
+        "Keep the white wall on your left, then go right of the grey sofa, and stop in front of the fridge.")
+    assert template_description([BETWEEN_W], W_NEAR, NAMES).startswith("Go between the grey sofa and the white wall,")
+
+
+def test_distance_stop_templates_use_amounts():
+    well = {"type": "distance", "relation": "past", "amount": "well", "distance_m": 4.2, "object": "f:b3"}
+    assert stop_text(well, "grey sofa") == "stop well past the grey sofa"
+    just = {"type": "distance", "relation": "before", "amount": "just", "distance_m": 0.9, "object": "f:b5"}
+    assert stop_text(just, "fridge") == "stop just before the fridge"
+
+
+def test_wall_past_stop_says_the_end_of_the_wall():
+    st = {"type": "distance", "relation": "past", "amount": "well", "distance_m": 4.0, "object": "f:w8"}
+    t = template_description([WALL_L], st, NAMES)                           # wall-ness from the wall event
+    assert t.endswith("stop well past the end of the white wall.")
+    t = template_description([BETWEEN_W], st, NAMES, kinds={"f:w8": "wall"})  # from kinds (inside between)
+    assert t.endswith("stop well past the end of the white wall.")
+    for text in ("Keep the white wall on your left and stop well past the end of the white wall.",
+                 "Keep the white wall on your left and stop well past the white wall.",
+                 "Keep the white wall on your left and stop far past it."):
+        assert description_rejects(text, [WALL_L], st, NAMES) == [], text
+    before = dict(st, relation="before")
+    assert template_description([], before, NAMES, kinds={"f:w8": "wall"}).endswith("stop well before the white wall.")
+
+
+def test_near_in_front_of_wall():
+    st = {"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:w8"}
+    t = template_description([PASS_R], st, NAMES, kinds={"f:w8": "wall"})
+    assert t.endswith("stop in front of the white wall.") and description_rejects(t, [PASS_R], st, NAMES) == []
+
+
+def test_distance_stop_without_amount_raises():
+    old = {"type": "distance", "relation": "past", "distance_m": 2.0, "object": "f:b3"}
+    with pytest.raises(ValueError, match="distance stop without amount"):
+        stop_text(old, "grey sofa")
+    with pytest.raises(ValueError, match="distance stop without amount"):
+        template_description([PASS_R], dict(old, amount=None), NAMES)
+
+
+@pytest.mark.parametrize("amount,ok,bad", [
+    ("just", ["just", "right"], ["well", "a little", ""]),
+    ("a little", ["a little", "a bit", "slightly", "shortly"], ["well", "just", ""]),
+    ("well", ["well", "far", "a good way"], ["a little", "just", ""]),
+])
+def test_amount_words(amount, ok, bad):
+    st = {"type": "distance", "relation": "past", "amount": amount, "distance_m": 2.0, "object": "f:b5"}
+    for w in ok:
+        t = f"Go left of the coffee table and stop {w} past the fridge."
+        assert description_rejects(t, [PASS_L], st, NAMES) == [], t
+    for w in bad:
+        t = " ".join(f"Go left of the coffee table and stop {w} past the fridge.".split())
+        assert "stop:amount" in description_rejects(t, [PASS_L], st, NAMES), t
+
+
+def test_amount_word_must_be_in_the_stop_clause():
+    st = {"type": "distance", "relation": "past", "amount": "well", "distance_m": 4.0, "object": "f:b5"}
+    t = "Go well left of the coffee table and stop past the fridge."
+    assert "stop:amount" in description_rejects(t, [PASS_L], st, NAMES)
+
+
+def test_next_to_is_no_longer_a_relation():
+    from rover_vlm.descriptions import STOP_RELATION_WORDS
+    assert ("near", "next to") not in STOP_RELATION_WORDS
+
+
+@pytest.mark.parametrize("text", [
+    "Pass the coffee table and the grey sofa on the left, and stop in front of the fridge.",
+    "Go left of the coffee table and the grey sofa, then stop in front of the fridge.",
+    "Keep left of the coffee table and the grey sofa and stop in front of the fridge.",
+])
+def test_multi_object_pass_accepts_one_side_word(text):
+    assert description_rejects(text, [PASS2], W_NEAR, NAMES) == [], text
+
+
+@pytest.mark.parametrize("text,reason", [
+    ("Go left of the coffee table and right of the grey sofa, then stop in front of the fridge.", "side:opposite:0"),
+    ("Go past the coffee table and the grey sofa, then stop in front of the fridge.", "side:missing:0"),
+    ("Go left of the coffee table, then stop in front of the fridge.", "name:missing:0"),
+])
+def test_multi_object_pass_rejections(text, reason):
+    assert reason in description_rejects(text, [PASS2], W_NEAR, NAMES)
+
+
+@pytest.mark.parametrize("text", [
+    "Keep the white wall on your left, then go right of the grey sofa, and stop in front of the fridge.",
+    "Follow the white wall on your left, go right of the grey sofa and stop in front of the fridge.",
+    "With the white wall to your left, go right of the grey sofa and stop in front of the fridge.",
+    "Keep the white wall to the left, then go right of the grey sofa, and stop in front of the fridge.",
+])
+def test_wall_event_side_word_accepted(text):
+    assert description_rejects(text, [WALL_L, PASS_R], W_NEAR, NAMES) == [], text
+
+
+@pytest.mark.parametrize("text,reason", [
+    ("Keep the white wall on your right, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:opposite:0"),
+    ("Keep the white wall on your right, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:egocentric"),
+    ("Follow the white wall, then go right of the grey sofa, and stop in front of the fridge.", "side:missing:0"),
+    # "left of the wall" is the route's side: the opposite of the wall's (the rover's) side
+    ("Keep left of the white wall, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:wall_of:0"),
+])
+def test_wall_event_rejections(text, reason):
+    assert reason in description_rejects(text, [WALL_L, PASS_R], W_NEAR, NAMES)
+
+
+@pytest.mark.parametrize("text", [
+    # egocentric next to an OBJECT name is still rejected (Review Focus 4)
+    "Keep the white wall on your left, then pass the grey sofa on your right, and stop in front of the fridge.",
+    "Keep the white wall on your left, then go right of the grey sofa, and stop in front of the fridge on your left.",
+])
+def test_egocentric_next_to_an_object_still_rejected(text):
+    assert "side:egocentric" in description_rejects(text, [WALL_L, PASS_R], W_NEAR, NAMES)
+
+
+def test_wall_inside_between_takes_no_side_word():
+    t = "Go between the grey sofa and the white wall and stop in front of the fridge."
+    assert description_rejects(t, [BETWEEN_W], W_NEAR, NAMES) == []
+    t = "Go between the grey sofa and the white wall on your left and stop in front of the fridge."
+    assert "side:egocentric" in description_rejects(t, [BETWEEN_W], W_NEAR, NAMES)
+
+
+def test_compose_prompt_wall_language():
+    p = compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence")
+    assert "1. keep the white wall on your left" in p
+    assert "2. go left of the coffee table and the grey sofa" in p
+    assert "For walls, keep the words 'on your left/right' exactly as given; for other objects never say " \
+           "'your left/right'." in p
+    assert 'Never say "your left" or "your right".' not in p
+
+
+def test_naming_prompt_and_name_rules_for_walls():
+    assert "part of a wall or a door in a wall that the rover drives alongside" in naming_prompt("wall")
+    assert name_rejects("white wall", "wall", "wall") == []
+    assert name_rejects("wooden door", "object", "wall") == []
+    assert "kind:mismatch" in name_rejects("open doorway", "opening", "wall")
+
+
+def test_label_object_asks_with_the_wall_prompt():
+    seen = []
+    obj = {"object_id": "f:w8", "kind_hint": "wall", "image": None, "polygon": [], "crop_box": None}
+
+    def ask(img, prompt, seed):
+        seen.append(prompt)
+        return _reply({"name": "white wall", "kind": "wall"}), "stop"
+    row = label_object(ask, obj, seed=0, image=b"x")
+    assert row["passed"] and row["need"] == "wall" and "drives alongside" in seen[0]
+
+
+def test_label_route_wall_template_fallback_uses_kinds():
+    st = {"type": "distance", "relation": "past", "amount": "well", "distance_m": 4.0, "object": "f:w8"}
+    row = {"id": "f_L", "pair_id": None, "kind": "instructed", "events": [BETWEEN_W], "stop": st}
+    out = label_route(lambda p, s: (_reply({"description": "junk"}), "stop"), row, NAMES, seed=0,
+                      kinds={"f:w8": "wall"})
+    assert out["passed"] and out["instruction_source"] == "template"
+    assert out["description"].endswith("stop well past the end of the white wall.")
+
+
+def test_desc_check_carries_wall_and_multi_object_pass():
+    objs = dict(OBJS, **{"f:b3": {"cells_xz": [[-1.0, 2.0]]}, "f:w8": {"cells_xz": [[2.0, 1.0], [2.0, 3.0]]}})
+    ev = dict(_ev("a"), events=[WALL_L, PASS2])
+    chk = desc_check(ev, objs)
+    assert chk["events"][0] == {"type": "wall", "side": "left", "obstacles": [[[2.0, 1.0], [2.0, 3.0]]],
+                                "gap_xz": None}
+    assert chk["events"][1]["type"] == "pass" and chk["events"][1]["obstacles"] == [
+        [[0.1, 1.0], [0.2, 1.0]], [[-1.0, 2.0]]]

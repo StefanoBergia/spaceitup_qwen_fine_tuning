@@ -24,10 +24,7 @@ from .instructions import (
 )
 from .traces import SCENE_INTRO, answer_payload, parse_trace
 
-DISTANCE_WORDS = {1.0: "one metre", 1.5: "one and a half metres", 2.0: "two metres",
-                  3.0: "three metres", 4.0: "four metres"}
 DESC_WORDS = (5, 45)
-_METRE = r"met(?:re|er)s?"
 _STOP = re.compile(r"\b(?:stop|stops|stopping|halt|park|come to rest|end up)\b", re.I)
 _AFTER = re.compile(r"\b(?:just|right) (?:after|past|beyond)\b", re.I)
 _SIDE = re.compile(r"\b(left|right)\b", re.I)
@@ -44,33 +41,64 @@ _PRONOUN = re.compile(r"\b(?:it|them)\b", re.I)
 STOP_RELATION_WORDS = {
     ("near", "in front of"): ("in front of", "right in front of", "just in front of"),
     ("near", "just past"): ("just past", "right past", "just beyond", "just after"),
-    ("near", "next to"): ("next to", "beside", "by", "alongside"),
     ("distance", "before"): ("before", "short of"),
     ("distance", "past"): ("past", "after", "beyond"),
 }
+# The words that say each coarse distance-stop amount (route_events.AMOUNT_STEPS); the stop
+# clause must hold one of its own amount's words (Addendum A 1).
+STOP_AMOUNT_WORDS = {
+    "just": ("just", "right"),
+    "a little": ("a little", "a bit", "slightly", "shortly"),
+    "well": ("well", "far", "a good way"),
+}
+
+
+def _words_re(words):
+    return re.compile(r"\b(?:" + "|".join(map(re.escape, words)) + r")\b", re.I)
 
 
 def event_phrase(ev, names):
+    """One step. Object passes name the ROUTE's side ("go right of the table"); walls name the
+    ROVER's side the wall is on ("keep the white wall on your left")."""
     if ev["type"] == "pass":
-        return f"go {ev['side']} of the {names[0]}"
+        return f"go {ev['side']} of the " + " and the ".join(names)
+    if ev["type"] == "wall":
+        return f"keep the {names[0]} on your {ev['side']}"
     if ev["type"] == "between":
         return f"go between the {names[0]} and the {names[1]}"
     return f"go through the {names[0]}"
 
 
-def stop_text(stop, name):
+def stop_text(stop, name, wall=False):
+    """The stop clause. A distance stop needs its coarse `amount` (rows from before Addendum A
+    carry only distance_m: they raise instead of being mis-rendered). A "past" stop measured
+    from a wall (`wall`) is past the END of the wall."""
     if stop["type"] == "near":
         return f"stop {stop['relation']} the {name}"
     if stop["type"] == "after_last":
         return "stop just after it"
-    return f"stop about {DISTANCE_WORDS[stop['distance_m']]} {stop['relation']} the {name}"
+    if not stop.get("amount"):
+        raise ValueError("distance stop without amount")
+    end = "the end of " if wall and stop["relation"] == "past" else ""
+    return f"stop {stop['amount']} {stop['relation']} {end}the {name}"
 
 
-def template_description(events, stop, names):
-    """The canonical sentence for a route; always passes description_rejects."""
+def _is_wall(oid, events, kinds=None):
+    """A wall: kind "wall" in `kinds` (object id -> kind_hint), or the object of a wall event."""
+    return bool(oid) and ((kinds or {}).get(oid) == "wall"
+                          or any(e["type"] == "wall" and oid in e["objects"] for e in events))
+
+
+def _stop_line(events, stop, names, kinds=None):
+    return stop_text(stop, names.get(stop["object"]), _is_wall(stop["object"], events, kinds))
+
+
+def template_description(events, stop, names, kinds=None):
+    """The canonical sentence for a route; always passes description_rejects. `kinds` (object
+    id -> kind_hint) marks walls inside a `between` for the "past the end of the wall" stop."""
     parts = [event_phrase(e, [names[o] for o in e["objects"]]) for e in events]
     body = ", then ".join(parts) if parts else "go straight ahead"
-    text = f"{body}, and {stop_text(stop, names.get(stop['object']))}."
+    text = f"{body}, and {_stop_line(events, stop, names, kinds)}."
     return text[0].upper() + text[1:]
 
 
@@ -94,23 +122,37 @@ def _find_name(text, name, start):
     return re.compile(rf"\b(?:{forms})\b", re.I).search(text, start)
 
 
+def _owner(text, start, end, spans):
+    """Whose a side word (at start:end) is: the next name in its clause, else the previous name."""
+    after = [s for s in spans if s[0] >= end]
+    nxt = min(after, key=lambda s: s[0]) if after else None
+    if nxt is not None and not _BREAK.search(text[end:nxt[0]]):
+        return nxt[2]
+    before = [s for s in spans if s[1] <= start]
+    return max(before, key=lambda s: s[1])[2] if before else None
+
+
 def _side_rejects(text, events, spans):
-    """Each side word belongs to the next name in its clause, else to the previous name."""
+    """Each side word belongs to the next name in its clause, else to the previous name. A pass
+    (one or two objects) and a wall need their own side word and no other; a wall's side word
+    must not read "left/right of" (that is the route's side, the opposite of the wall's).
+    "on/to your left/right" is allowed only when a wall owns it and it says the wall's side."""
+    out = []
+    for m in _EGOCENTRIC.finditer(text):
+        word = m.group(0).split()[-1].lower()
+        owner = _owner(text, m.start(), m.end(), spans)
+        if not (isinstance(owner, int) and events[owner]["type"] == "wall" and events[owner]["side"] == word):
+            out.append("side:egocentric")
     got = {}
     text = _RIGHT_ADVERB.sub(lambda m: " " * len(m.group(0)), text)   # same length: spans stay valid
     for m in _SIDE.finditer(text):
-        after = [s for s in spans if s[0] >= m.end()]
-        nxt = min(after, key=lambda s: s[0]) if after else None
-        if nxt is not None and not _BREAK.search(text[m.end():nxt[0]]):
-            owner = nxt[2]
-        else:
-            before = [s for s in spans if s[1] <= m.start()]
-            owner = max(before, key=lambda s: s[1])[2] if before else None
+        owner = _owner(text, m.start(), m.end(), spans)
         got.setdefault(owner, set()).add(m.group(1).lower())
-    out = []
+        if isinstance(owner, int) and events[owner]["type"] == "wall" and re.match(r"\s+of\b", text[m.end():]):
+            out.append(f"side:wall_of:{owner}")
     for i, e in enumerate(events):
         words = got.get(i, set())
-        if e["type"] == "pass":
+        if e["type"] in ("pass", "wall"):
             if e["side"] not in words:
                 out.append(f"side:missing:{i}")
             if words - {e["side"]}:
@@ -119,7 +161,7 @@ def _side_rejects(text, events, spans):
             out.append(f"side:stray:{i}")
     if got.get("stop") or got.get(None):
         out.append("side:stray")
-    return out
+    return list(dict.fromkeys(out))
 
 
 def description_rejects(text, events, stop, names):
@@ -132,8 +174,6 @@ def description_rejects(text, events, stop, names):
     n = len(text.split())
     if not (DESC_WORDS[0] <= n <= DESC_WORDS[1]):
         out.append(f"length:{n}")
-    if _EGOCENTRIC.search(text):
-        out.append("side:egocentric")
     spans, pos = [], 0
     for i, e in enumerate(events):
         for oid in e["objects"]:
@@ -161,14 +201,14 @@ def description_rejects(text, events, stop, names):
         out.append("stop:missing")
     else:
         words = STOP_RELATION_WORDS.get((stop["type"], stop["relation"]))
-        if words and not re.search(r"\b(?:" + "|".join(map(re.escape, words)) + r")\b", text[clause:], re.I):
+        if words and not _words_re(words).search(text, clause):
             out.append("stop:relation")
     if stop["type"] == "after_last" and not _AFTER.search(text):
         out.append("stop:after")
     if stop["type"] == "distance":
-        number = DISTANCE_WORDS[stop["distance_m"]].rsplit(" ", 1)[0]
-        if not re.search(rf"\b{number}\s+{_METRE}\b", text, re.I):
-            out.append("stop:distance")
+        words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
+        if not words or not stops or not _words_re(words).search(text, clause):
+            out.append("stop:amount")
     return out + _side_rejects(text, events, spans)
 
 
@@ -191,7 +231,7 @@ def name_rejects(name, kind, need):
         out.append("name:digits")
     if re.search(r"[,/;()\"'`\u2018\u2019\u201c\u201d]", name):
         out.append("name:punct")
-    if (need == "opening") != (kind == "opening"):
+    if (need == "opening") != (kind == "opening"):   # need "wall": a wall, or a door in it ("object")
         out.append("kind:mismatch")
     return out
 
@@ -231,8 +271,10 @@ def naming_image(image_path, polygon, crop_box, px=512):
 
 
 def naming_prompt(need):
-    what = ("The outlined region is an opening the rover drives through (a doorway, an arch, a gap "
-            "between walls)." if need == "opening" else "The outlined region is something the rover drives past.")
+    what = {"opening": "The outlined region is an opening the rover drives through (a doorway, an arch, a gap "
+                       "between walls).",
+            "wall": "The outlined region is part of a wall or a door in a wall that the rover drives alongside.",
+            }.get(need, "The outlined region is something the rover drives past.")
     return f"""{SCENE_INTRO}
 
 The picture has two panels. Left: the camera view with one region outlined and everything
@@ -268,18 +310,19 @@ def choose_shape(route_id):
     return SHAPES[_stable_index("shape:" + route_id, len(SHAPES))]
 
 
-def compose_prompt(events, stop, names, style, shape):
+def compose_prompt(events, stop, names, style, shape, kinds=None):
     steps = "\n".join(f"{i + 1}. {event_phrase(e, [names[o] for o in e['objects']])}" for i, e in enumerate(events))
     steps = steps or "1. go straight ahead"
     return f"""You are writing a route description for a small rover, the way a person standing behind
 it would say it. The route, in order:
 {steps}
-Then: {stop_text(stop, names.get(stop['object']))}.
+Then: {_stop_line(events, stop, names, kinds)}.
 
 Write it as {style}, in {shape}. Keep every step in this order, keep each object's name and
 the word left or right that goes with it, and keep where to stop. You may add small words
-("then", "carefully", "keep going"), but add no other objects, sides or directions. Never say
-"your left" or "your right". Write numbers as words. At most 45 words.
+("then", "carefully", "keep going"), but add no other objects, sides or directions.
+For walls, keep the words 'on your left/right' exactly as given; for other objects never say 'your left/right'.
+Write numbers as words. At most 45 words.
 
 {_answer_block('{"description": "<the description>"}')}"""
 
@@ -319,15 +362,16 @@ def route_objects(row):
     return ids + ([row["stop"]["object"]] if row["stop"]["object"] else [])
 
 
-def label_route(ask_text, row, names, seed):
-    """Compose one route's description: two Cosmos attempts, then the template."""
+def label_route(ask_text, row, names, seed, kinds=None):
+    """Compose one route's description: two Cosmos attempts, then the template. `kinds` (object
+    id -> kind_hint, e.g. the name rows' "need") lets the template say "past the end of" a wall."""
     out = {"id": row["id"], "pair_id": row.get("pair_id"), "kind": row.get("kind"), "prompt_version": PROMPT_VERSION}
     missing = [o for o in route_objects(row) if not names.get(o)]
     if missing:
         return {**out, "passed": False, "description": None, "instruction_source": None,
                 "rejects": ["unnamed_object"], "missing": missing}
     style, shape = choose_style(row["id"]), choose_shape(row["id"])
-    prompt = compose_prompt(row["events"], row["stop"], names, style, shape)
+    prompt = compose_prompt(row["events"], row["stop"], names, style, shape, kinds)
     rejects, raws = [], []
     for attempt, s in enumerate((seed, seed + 1), 1):
         raw, _ = ask_text(prompt, s)
@@ -337,7 +381,7 @@ def label_route(ask_text, row, names, seed):
         if not rejects:
             return {**out, "description": text, "instruction_source": "cosmos", "passed": True, "rejects": [],
                     "cosmos_rejects": [], "style": style, "shape": shape, "attempts": attempt}
-    tpl = template_description(row["events"], row["stop"], names)
+    tpl = template_description(row["events"], row["stop"], names, kinds)
     trej = description_rejects(tpl, row["events"], row["stop"], names)
     return {**out, "description": tpl if not trej else None, "instruction_source": "template",
             "passed": not trej, "rejects": trej, "cosmos_rejects": rejects, "style": style, "shape": shape,
