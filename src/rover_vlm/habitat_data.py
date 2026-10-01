@@ -119,6 +119,28 @@ def instruction_endpoints_prompt(start_wp, goal_wp, instruction):
     )
 
 
+# Route descriptions (prompt d1, 2026-09-30): the entry point and a description that says
+# where to stop; the goal point is NOT given. Wording kept parallel to the endpoints prompt.
+HABITAT_PROMPT_DESCRIPTION = (
+    "<image>\n"
+    "You are a rover navigating an indoor environment. Its route enters the frame at "
+    "[{sx}, {sy}], where it is {svis}. Drive it as this description says, and stop where it "
+    'says to stop: "{desc}". Coordinates are normalized image coordinates in [0,1], x '
+    "running right and y running down. Predict the route as a list of waypoints. Each "
+    "waypoint is [x, y, v] where v is 1 if the point is on visible, unobstructed ground or "
+    "0 if it is obstructed (hidden behind an obstacle). The first waypoint must be the entry "
+    'point and the last must be where the rover stops. Answer as JSON: {{"path": [[x, y, v], ...]}}.'
+)
+
+
+def description_entry_prompt(start_wp, description):
+    """HABITAT_PROMPT_DESCRIPTION for the entry waypoint and a route description (flattened,
+    double quotes made single, exactly one trailing full stop -- as instruction_endpoints_prompt)."""
+    text = " ".join(str(description).split()).replace('"', "'").rstrip(".")
+    return HABITAT_PROMPT_DESCRIPTION.format(sx=start_wp[0], sy=start_wp[1], svis=_vis_phrase(start_wp),
+                                             desc=text + ".")
+
+
 def sample_dirs_by_id(roots=DATASET_ROOTS):
     """{sample_id: sample_dir} across every render tree.
 

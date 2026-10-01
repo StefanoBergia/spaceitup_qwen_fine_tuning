@@ -257,3 +257,16 @@ def test_name_rows_split_and_missing():
 def test_gate_fails_on_request_errors():
     s = {"n": 10, "errors": 2, "accept_rate": 1.0, "rejects": {}}
     assert d1_gate_failures(s, "name") == ["request errors 2 > 0"]
+
+
+from rover_vlm.habitat_data import description_entry_prompt, instruction_endpoints_prompt  # noqa: E402
+
+
+def test_entry_prompt_has_the_entry_and_text_but_no_goal():
+    p = description_entry_prompt([0.167, 1.0, 1], 'Go left of the "sofa" and stop by the fridge.')
+    assert p.startswith("<image>\n") and "[0.167, 1.0]" in p and "where it is visible" in p
+    assert "Go left of the 'sofa' and stop by the fridge." in p
+    assert "goal" not in p.lower()
+    q = instruction_endpoints_prompt([0.167, 1.0, 1], [0.5, 0.6, 1], "x")
+    assert p.split("Coordinates are")[1].split("The first waypoint")[0] == q.split("Coordinates are")[1].split("The first waypoint")[0].replace(
+        "Predict the traversable route between those two points", "Predict the route")
