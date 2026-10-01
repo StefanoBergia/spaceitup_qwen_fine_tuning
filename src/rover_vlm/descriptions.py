@@ -284,7 +284,11 @@ def naming_image(image_path, polygon, crop_box, px=512):
 def naming_prompt(need):
     what = {"opening": "The outlined region is an opening the rover drives through (a doorway, an arch, a gap "
                        "between walls).",
-            "wall": "The outlined region is part of a wall or a door in a wall that the rover drives alongside.",
+            # final review I3: kind "wall" is any long blob the route runs alongside (median 2.7 m:
+            # also sofas, counters, beds), and a near "in front of" anchor that is wall-like
+            "wall": "The outlined region is something long that the rover drives alongside or stops in front "
+                    "of: a wall, a partition, a door in a wall, or a long piece of furniture such as a sofa "
+                    "or a counter.",
             }.get(need, "The outlined region is something the rover drives past.")
     return f"""{SCENE_INTRO}
 

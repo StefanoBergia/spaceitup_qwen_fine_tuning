@@ -601,8 +601,13 @@ def test_compose_prompt_wall_language():
 
 
 def test_naming_prompt_and_name_rules_for_walls():
-    assert "part of a wall or a door in a wall that the rover drives alongside" in naming_prompt("wall")
+    # final review I3: "wall" is any long blob the route runs alongside or stops in front of
+    p = " ".join(naming_prompt("wall").split())
+    assert ("something long that the rover drives alongside or stops in front of: a wall, a partition, a door in "
+            "a wall, or a long piece of furniture such as a sofa or a counter.") in p
+    assert "part of a wall or a door in a wall that the rover drives alongside" not in p
     assert name_rejects("white wall", "wall", "wall") == []
+    assert name_rejects("grey sofa", "object", "wall") == []
     assert name_rejects("wooden door", "object", "wall") == []
     assert "kind:mismatch" in name_rejects("open doorway", "opening", "wall")
 
