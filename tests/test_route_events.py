@@ -346,3 +346,23 @@ def test_real_frame_names_the_obstacle_a_person_would(sd, cand, xz, why):
     near = [o for o in event_objects
             if np.linalg.norm(np.array(out["objects"][o]["cells_xz"]) - xz, axis=1).min() <= 0.4]
     assert near, f"{why}: events {out['events']}"
+
+
+import importlib.util  # noqa: E402
+
+_SPEC = importlib.util.spec_from_file_location(
+    "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
+prepare_instr = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(prepare_instr)
+
+
+def test_event_row_carries_record_fields(tmp_path):
+    route = STOP_ROUTE
+    d = write_sample(tmp_path / "s1", _stop_state(), [route])
+    rec = {"id": "s1_L", "image": [str(d / "fpv_enhanced.png")],
+           "habitat_meta": {"candidate_index": 0, "kind": "instructed", "pair_id": None, "sample_id": "s1"}}
+    row = prepare_instr.event_row(rec)
+    assert row["id"] == "s1_L" and row["reason"] is None and row["objects"]
+    assert row["image"].endswith("fpv_enhanced.png") and row["sample_id"] == "s1"
+    rec["habitat_meta"]["candidate_index"] = 9
+    assert prepare_instr.event_row(rec)["reason"] == "bad_candidate"

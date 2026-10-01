@@ -30,6 +30,14 @@ of single-threaded numpy:
     uv run scripts/prepare_habitat_instr.py landmarks
     uv run scripts/prepare_habitat_instr.py landmarks --limit 200      # smoke run
 
+Route descriptions (2026-09-30, docs/superpowers/specs/2026-09-30-route-descriptions-design.md):
+events + stop phrase per labelset record (both routes of a pair), plus one object row per
+frame object for Cosmos to name. CPU, 4 single-threaded workers:
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py events --limit 200     # smoke run (prints timing)
+    uv run scripts/prepare_habitat_instr.py events
+
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
 belong to the unrotated camera.
@@ -47,6 +55,7 @@ from rover_vlm.instructions import (
     render_check_image, render_generation_image, rescore_row, with_instruction,
 )
 from rover_vlm.landmarks import select_target
+from rover_vlm.route_events import collect_objects, describe_route
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "data" / "prepared_habitat_v4"
@@ -277,6 +286,54 @@ def stage_landmarks(args):
     (d / "landmarks_meta.json").write_text(json.dumps(meta, indent=2))
 
 
+EVENT_WORKERS = 4
+
+
+def event_row(rec):
+    """One events row for a labelset record (rover_vlm.route_events.describe_route)."""
+    hm = rec["habitat_meta"]
+    sample_dir = Path(rec["image"][0]).parent
+    try:
+        d = describe_route(sample_dir, hm["candidate_index"])
+    except Exception as e:  # noqa: BLE001 — one bad sample is a counted reason, not a dead stage
+        d = {"reason": "error", "events": [], "stop": None, "objects": {},
+             "diag": {"error": f"{type(e).__name__}: {e}"}}
+    return {"id": rec["id"], "sample_dir": str(sample_dir), "image": rec["image"][0],
+            "candidate_index": hm["candidate_index"], "kind": hm.get("kind"),
+            "pair_id": hm.get("pair_id"), "sample_id": hm.get("sample_id"), **d}
+
+
+def stage_events(args):
+    import time
+    d = args.out_dir
+    meta = {}
+    for name in SPLITS:
+        recs = json.loads((d / f"labelset_{name}.json").read_text())
+        if args.limit:
+            recs = recs[: args.limit]
+        t0 = time.time()
+        with Pool(EVENT_WORKERS) as pool:
+            rows = pool.map(event_row, recs, chunksize=16)
+        rows, objects = collect_objects(rows)
+        (d / f"events_{name}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        (d / f"objects_{name}.jsonl").write_text("".join(json.dumps(o) + "\n" for o in objects))
+        ok = [r for r in rows if r["reason"] is None]
+        pairs = Counter(r["pair_id"] for r in ok if r["pair_id"])
+        meta[name] = {
+            "records": len(rows), "described": len(ok),
+            "reasons": dict(Counter(r["reason"] for r in rows if r["reason"])),
+            "events_per_route": dict(sorted(Counter(len(r["events"]) for r in ok).items())),
+            "event_types": dict(Counter(e["type"] for r in ok for e in r["events"])),
+            "stop_types": dict(Counter(r["stop"]["type"] for r in ok)),
+            "pairs_both_described": sum(1 for n in pairs.values() if n == 2),
+            "objects": len(objects),
+            "depth_fallback": round(sum(o["depth_fallback"] for o in objects) / max(1, len(objects)), 3),
+            "seconds": round(time.time() - t0, 1),
+        }
+        print(f"{name}: {json.dumps(meta[name])}", flush=True)
+    (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
@@ -299,9 +356,12 @@ def main() -> None:
     g = sub.add_parser("landmarks", help="v2: grounded landmark target per labelset record (CPU)")
     g.add_argument("--out-dir", type=Path, default=V2_OUT)
     g.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
+    h = sub.add_parser("events", help="d1: route events + stop phrase per labelset record (CPU)")
+    h.add_argument("--out-dir", type=Path, default=V2_OUT)
+    h.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks}[args.stage](args)
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events}[args.stage](args)
 
 
 if __name__ == "__main__":

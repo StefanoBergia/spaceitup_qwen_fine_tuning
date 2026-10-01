@@ -19,6 +19,15 @@ the passed rows' instructions on their labelset_eval records, target outline dra
 the HM3D category under the target; writes outputs/landmark_name_check.json and
 outputs/landmark_name_mismatches.jsonl.
 
+--mode events (d1 geometry gate, 2026-09-30): 100 routes from events_train.jsonl (30 from
+pairs), each drawn with its route, the straight line, numbered event outlines (orange) and the
+stop object (green), plus the template sentence with "object N" for names. Question: is the
+description TRUE of this route, and does it name what a person would? Gate >= 90% true.
+
+    uv run scripts/audit_instruction_labels.py --mode events \
+        --events data/prepared_habitat_instr_v2/events_train.jsonl \
+        --objects data/prepared_habitat_instr_v2/objects_train.jsonl     # -> outputs/instr_events_audit.html
+
 Run (CPU, login node is fine):
     uv run scripts/audit_instruction_labels.py            # -> outputs/instr_label_audit.html
     uv run scripts/audit_instruction_labels.py --n 150 --seed 1
@@ -41,6 +50,8 @@ from PIL import Image, ImageDraw
 
 import numpy as np
 
+from rover_vlm.descriptions import template_description
+from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
 
@@ -64,6 +75,13 @@ VERDICTS = {
         {"v": "ok", "label": "True instruction", "help": "\"Go <side> around the outlined object\" is correct for this route"},
         {"v": "wrong", "label": "False instruction", "help": "Wrong object (not something the route goes around) or wrong side"},
         {"v": "none_ok", "label": "No target, correctly", "help": "Nothing nameable; dropping this record is right"},
+        {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+    ],
+    "events": [
+        {"v": "ok", "label": "True", "help": "Every step and the stop are true, and it names what you would"},
+        {"v": "object", "label": "Wrong object", "help": "A step names something the route does not pass that way"},
+        {"v": "missing", "label": "Misses an obstacle", "help": "An obvious obstacle the route goes around is left out"},
+        {"v": "stop", "label": "Wrong stop", "help": "The stop phrase does not match where the route ends"},
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
     ],
 }
@@ -194,13 +212,63 @@ def load_landmarks_rows(paths):
     return rows
 
 
+EVENT_COLOR, STOP_COLOR = (255, 170, 0), (60, 220, 60)
+
+
+def jsonl(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def sample_events(rows, n_pair, n_single, seed):
+    ok = [r for r in rows if r["reason"] is None]
+    pairs = [r for r in ok if r["pair_id"]]
+    single = [r for r in ok if not r["pair_id"]]
+    rng = random.Random(seed)
+    picked = rng.sample(pairs, min(n_pair, len(pairs))) + rng.sample(single, min(n_single, len(single)))
+    rng.shuffle(picked)
+    return picked, {"described_pair": len(pairs), "described_single": len(single), "rows": len(rows)}
+
+
+def placeholder_names(row):
+    """{object_id: "object N"} in drawing order (events, then the stop object)."""
+    ids = [o for e in row["events"] for o in e["objects"]] + ([row["stop"]["object"]] if row["stop"]["object"] else [])
+    return {oid: f"object {i + 1}" for i, oid in enumerate(dict.fromkeys(ids))}
+
+
+def draw_numbered(img, objects, names, stop_id=None):
+    """Outline each named object with its number; the stop object in green, events orange."""
+    draw = ImageDraw.Draw(img)
+    font = _font(max(16, IMG_PX // 30))
+    for oid, label in names.items():
+        colour = STOP_COLOR if oid == stop_id else EVENT_COLOR
+        pts = [(u * IMG_PX, v * IMG_PX) for u, v in objects[oid]["polygon"]]
+        if len(pts) >= 3:
+            draw.polygon(pts, outline=colour, width=4)
+            cx, cy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+            _draw_badge(draw, (cx, cy), label.split()[-1], colour, font, 14)
+
+
+def events_item(rec, row, objects, text=None):
+    names = placeholder_names(row)
+    img = Image.open(io.BytesIO(render_generation_jpeg(rec))).resize((IMG_PX, IMG_PX), Image.LANCZOS)
+    draw_reference_line(img, _answer_path(rec))
+    draw_numbered(img, objects, names, stop_id=row["stop"]["object"])
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    m = rec["habitat_meta"]
+    return {"id": rec["id"], "instruction": text or template_description(row["events"], row["stop"], names),
+            "side": m["side"], "kind": m["kind"], "has_alt": bool(m.get("alt_path")), "scene": m["scene_id"],
+            "target": "object", "reason": None,
+            "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events"], default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -208,10 +276,28 @@ def main() -> None:
     ap.add_argument("--semantics", type=Path, default=REPO_ROOT / "outputs" / "landmark_semantics")
     ap.add_argument("--landmarks", type=Path, nargs="+", default=None,
                     help="landmarks_*.jsonl: draw each record's target (required for --mode geometry)")
+    ap.add_argument("--events", type=Path, default=None, help="events_*.jsonl (--mode events)")
+    ap.add_argument("--objects", type=Path, default=None, help="objects_*.jsonl (--mode events)")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
     landmarks = load_landmarks_rows(args.landmarks)
+    if args.mode == "events":
+        if not (args.events and args.objects):
+            raise SystemExit("--mode events needs --events events_train.jsonl --objects objects_train.jsonl")
+        by_id = {r["id"]: r for r in json.loads((V2 / "labelset_train.json").read_text())}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        rows, pop = sample_events(jsonl(args.events), 30, args.n - 30, args.seed)
+        items = [events_item(by_id[r["id"]], r, objects) for r in rows]
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "events",
+                   "verdicts": VERDICTS["events"], "source": str(args.events)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Route Events Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "instr_events_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     if args.mode == "semantic":
         if not (args.labels and landmarks):
             raise SystemExit("--mode semantic needs --labels <i4 rows> and --landmarks <landmarks jsonl>")
