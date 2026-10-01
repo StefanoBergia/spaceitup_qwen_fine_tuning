@@ -9,9 +9,16 @@ text only) and the finalize helpers that turn labels into training/eval records.
 Pure and CPU-only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
+import io
 import re
 
-from .instructions import _DRAWING, _EGOCENTRIC, head_noun
+from PIL import Image, ImageDraw
+
+from .instructions import (
+    _DRAWING, _EGOCENTRIC, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _stable_index, choose_style,
+    head_noun, normalize_name,
+)
+from .traces import SCENE_INTRO, answer_payload, parse_trace
 
 DISTANCE_WORDS = {1.0: "one metre", 1.5: "one and a half metres", 2.0: "two metres",
                   3.0: "three metres", 4.0: "four metres"}
@@ -155,3 +162,138 @@ def name_rejects(name, kind, need):
     if (need == "opening") != (kind == "opening"):
         out.append("kind:mismatch")
     return out
+
+
+PROMPT_VERSION = "d1"
+KINDS = {"object": "object", "wall": "wall", "opening": "opening", "doorway": "opening", "door": "opening",
+         "arch": "opening", "archway": "opening", "passage": "opening", "gap": "opening"}
+SHAPES = ["one sentence", "two short sentences", "one sentence joined with 'then'",
+          "a sentence that starts with the first thing to pass"]
+
+
+def naming_image(image_path, polygon, crop_box, px=512):
+    """One JPEG, two panels: the frame with the object outlined and the rest dimmed, and a
+    close-up of the object's box (multi-image requests are untested on the server)."""
+    img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
+    pts = [(u * px, v * px) for u, v in polygon]
+    ctx = img.copy()
+    if len(pts) >= 3:
+        mask = Image.new("L", img.size, 0)
+        ImageDraw.Draw(mask).polygon(pts, fill=255)
+        ctx = Image.composite(img, Image.eval(img, lambda p: int(p * 0.45)), mask)
+        ImageDraw.Draw(ctx).polygon(pts, outline=TARGET_OUTLINE_COLOR, width=4)
+    x0, y0, x1, y1 = (c * px for c in (crop_box or [0, 0, 1, 1]))
+    crop = img.crop((int(x0), int(y0), max(int(x1), int(x0) + 8), max(int(y1), int(y0) + 8)))
+    crop.thumbnail((px, px))
+    canvas = Image.new("RGB", (2 * px, px), (0, 0, 0))
+    canvas.paste(ctx, (0, 0))
+    canvas.paste(crop, (px + (px - crop.width) // 2, (px - crop.height) // 2))
+    buf = io.BytesIO()
+    canvas.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def naming_prompt(need):
+    what = ("The outlined region is an opening the rover drives through (a doorway, an arch, a gap "
+            "between walls)." if need == "opening" else "The outlined region is something the rover drives past.")
+    return f"""{SCENE_INTRO}
+
+The picture has two panels. Left: the camera view with one region outlined and everything
+else dimmed. Right: a close-up of that region. {what}
+
+1. Name what is inside the outline in 1 to 4 words, the way a person would say it ("grey
+   sofa", "stone column", "kitchen island", "open doorway"). Never use the words left or
+   right, and never describe the picture itself (outline, panel, close-up, dimming).
+2. Say what kind of thing it is: "object" (furniture, an appliance, a column), "wall" (part of
+   a wall) or "opening" (a doorway, an arch, a gap between walls).
+
+{_answer_block('{"name": "<name>", "kind": "object|wall|opening"}')}"""
+
+
+def parse_name_reply(raw):
+    """{"name", "kind"} from a naming reply, or None when there is no usable name."""
+    _, answer = parse_trace(raw)
+    payload = answer_payload(answer)
+    if payload is None or not isinstance(payload.get("name"), str) or not payload["name"].strip():
+        return None
+    kind = payload.get("kind")
+    kind = KINDS.get(kind.strip().lower(), "object") if isinstance(kind, str) else "object"
+    return {"name": normalize_name(" ".join(payload["name"].lower().split())), "kind": kind}
+
+
+def choose_shape(route_id):
+    return SHAPES[_stable_index("shape:" + route_id, len(SHAPES))]
+
+
+def compose_prompt(events, stop, names, style, shape):
+    steps = "\n".join(f"{i + 1}. {event_phrase(e, [names[o] for o in e['objects']])}" for i, e in enumerate(events))
+    steps = steps or "1. go straight ahead"
+    return f"""You are writing a route description for a small rover, the way a person standing behind
+it would say it. The route, in order:
+{steps}
+Then: {stop_text(stop, names.get(stop['object']))}.
+
+Write it as {style}, in {shape}. Keep every step in this order, keep each object's name and
+the word left or right that goes with it, and keep where to stop. You may add small words
+("then", "carefully", "keep going"), but add no other objects, sides or directions. Never say
+"your left" or "your right". Write numbers as words. At most 45 words.
+
+{_answer_block('{"description": "<the description>"}')}"""
+
+
+def parse_compose_reply(raw):
+    """The description string from a compose reply, or None (a bare sentence in <answer> is kept)."""
+    _, answer = parse_trace(raw)
+    payload = answer_payload(answer)
+    if payload is not None:
+        text = payload.get("description")
+        return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
+    if answer and "{" not in answer and len(answer.split()) <= 60:
+        return " ".join(answer.strip().strip('"').split()) or None
+    return None
+
+
+def label_object(ask, obj, seed, image=None):
+    """Name one object: up to two Cosmos calls (seed, seed + 1). Never raises on a bad reply."""
+    need = obj["kind_hint"]
+    image = image if image is not None else naming_image(obj["image"], obj["polygon"], obj["crop_box"] or obj["bbox"])
+    row = {"id": obj["object_id"], "need": need, "prompt_version": PROMPT_VERSION}
+    rejects, raw, fin, reply = ["parse"], None, None, None
+    for attempt, s in enumerate((seed, seed + 1), 1):
+        raw, fin = ask(image, naming_prompt(need), s)
+        reply = parse_name_reply(raw)
+        rejects = ["parse"] if reply is None else name_rejects(reply["name"], reply["kind"], need)
+        if not rejects:
+            return {**row, "name": reply["name"], "kind": reply["kind"], "passed": True, "rejects": [],
+                    "attempts": attempt, "finish": fin}
+    return {**row, "name": None, "kind": reply and reply["kind"], "passed": False, "rejects": rejects,
+            "attempts": 2, "finish": fin, "raw": raw}
+
+
+def route_objects(row):
+    ids = [o for e in row["events"] for o in e["objects"]]
+    return ids + ([row["stop"]["object"]] if row["stop"]["object"] else [])
+
+
+def label_route(ask_text, row, names, seed):
+    """Compose one route's description: two Cosmos attempts, then the template."""
+    out = {"id": row["id"], "pair_id": row.get("pair_id"), "kind": row.get("kind"), "prompt_version": PROMPT_VERSION}
+    missing = [o for o in route_objects(row) if not names.get(o)]
+    if missing:
+        return {**out, "passed": False, "description": None, "instruction_source": None,
+                "rejects": ["unnamed_object"], "missing": missing}
+    style, shape = choose_style(row["id"]), choose_shape(row["id"])
+    prompt = compose_prompt(row["events"], row["stop"], names, style, shape)
+    rejects, raw = [], None
+    for attempt, s in enumerate((seed, seed + 1), 1):
+        raw, _ = ask_text(prompt, s)
+        text = parse_compose_reply(raw)
+        rejects = description_rejects(text, row["events"], row["stop"], names)
+        if not rejects:
+            return {**out, "description": text, "instruction_source": "cosmos", "passed": True, "rejects": [],
+                    "cosmos_rejects": [], "style": style, "shape": shape, "attempts": attempt}
+    tpl = template_description(row["events"], row["stop"], names)
+    trej = description_rejects(tpl, row["events"], row["stop"], names)
+    return {**out, "description": tpl if not trej else None, "instruction_source": "template",
+            "passed": not trej, "rejects": trej, "cosmos_rejects": rejects, "style": style, "shape": shape,
+            "attempts": 2, "raw": raw}

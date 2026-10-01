@@ -34,3 +34,17 @@ def test_image_url_path_and_bytes(tmp_path):
     p.write_bytes(b"\xff\xd8xx")
     assert image_url(p).startswith("file://")
     assert image_url(b"\xff\xd8xx") == "data:image/jpeg;base64,/9h4eA=="
+
+
+def test_chat_text_sends_a_plain_text_message():
+    from types import SimpleNamespace
+    from rover_vlm.labelling_io import chat_text
+    seen = {}
+
+    class Completions:
+        def create(self, **kw):
+            seen.update(kw)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hi"), finish_reason="stop")])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    assert chat_text(client, "m", "hello", max_tokens=5, seed=1) == ("hi", "stop")
+    assert seen["messages"] == [{"role": "user", "content": "hello"}] and seen["seed"] == 1

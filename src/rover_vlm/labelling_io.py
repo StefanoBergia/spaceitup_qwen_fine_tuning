@@ -88,3 +88,11 @@ def chat_with_image(client, model, image, prompt, *, max_tokens, seed):
         seed=seed,
     )
     return resp.choices[0].message.content or "", resp.choices[0].finish_reason
+
+
+def chat_text(client, model, prompt, *, max_tokens, seed):
+    """One text-only request -> (raw reply, finish_reason). Raises on transport errors."""
+    resp = client.chat.completions.create(
+        model=model, messages=[{"role": "user", "content": prompt}], max_tokens=max_tokens, seed=seed,
+    )
+    return resp.choices[0].message.content or "", resp.choices[0].finish_reason
