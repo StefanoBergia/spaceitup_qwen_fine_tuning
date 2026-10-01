@@ -159,6 +159,8 @@ def name_rejects(name, kind, need):
         out.append("name:side")
     if re.search(r"\d", name):
         out.append("name:digits")
+    if re.search(r"[,/;()\"'`\u2018\u2019\u201c\u201d]", name):
+        out.append("name:punct")
     if (need == "opening") != (kind == "opening"):
         out.append("kind:mismatch")
     return out
@@ -174,7 +176,8 @@ SHAPES = ["one sentence", "two short sentences", "one sentence joined with 'then
 def naming_image(image_path, polygon, crop_box, px=512):
     """One JPEG, two panels: the frame with the object outlined and the rest dimmed, and a
     close-up of the object's box (multi-image requests are untested on the server)."""
-    img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
+    orig = Image.open(image_path).convert("RGB")
+    img = orig.resize((px, px), Image.LANCZOS)
     pts = [(u * px, v * px) for u, v in polygon]
     ctx = img.copy()
     if len(pts) >= 3:
@@ -182,9 +185,13 @@ def naming_image(image_path, polygon, crop_box, px=512):
         ImageDraw.Draw(mask).polygon(pts, fill=255)
         ctx = Image.composite(img, Image.eval(img, lambda p: int(p * 0.45)), mask)
         ImageDraw.Draw(ctx).polygon(pts, outline=TARGET_OUTLINE_COLOR, width=4)
-    x0, y0, x1, y1 = (c * px for c in (crop_box or [0, 0, 1, 1]))
-    crop = img.crop((int(x0), int(y0), max(int(x1), int(x0) + 8), max(int(y1), int(y0) + 8)))
-    crop.thumbnail((px, px))
+    W, H = orig.size
+    fx0, fy0, fx1, fy1 = (min(max(c, 0.0), 1.0) for c in (crop_box or [0, 0, 1, 1]))
+    x0, y0 = min(int(fx0 * W), W - 8), min(int(fy0 * H), H - 8)
+    x1, y1 = max(int(fx1 * W), x0 + 8), max(int(fy1 * H), y0 + 8)
+    crop = orig.crop((x0, y0, min(x1, W), min(y1, H)))
+    scale = px / max(crop.size)
+    crop = crop.resize((max(1, round(crop.width * scale)), max(1, round(crop.height * scale))), Image.LANCZOS)
     canvas = Image.new("RGB", (2 * px, px), (0, 0, 0))
     canvas.paste(ctx, (0, 0))
     canvas.paste(crop, (px + (px - crop.width) // 2, (px - crop.height) // 2))
@@ -210,6 +217,10 @@ else dimmed. Right: a close-up of that region. {what}
 {_answer_block('{"name": "<name>", "kind": "object|wall|opening"}')}"""
 
 
+_QUOTES = "\"'`\u2018\u2019\u201c\u201d "
+_TRAIL = ".,;:!? "
+
+
 def parse_name_reply(raw):
     """{"name", "kind"} from a naming reply, or None when there is no usable name."""
     _, answer = parse_trace(raw)
@@ -218,7 +229,9 @@ def parse_name_reply(raw):
         return None
     kind = payload.get("kind")
     kind = KINDS.get(kind.strip().lower(), "object") if isinstance(kind, str) else "object"
-    return {"name": normalize_name(" ".join(payload["name"].lower().split())), "kind": kind}
+    name = " ".join(payload["name"].lower().split()).strip(_QUOTES).rstrip(_TRAIL).strip(_QUOTES).strip()
+    name = re.sub(r"^(?:a|an|the)\s+", "", name)
+    return {"name": normalize_name(name), "kind": kind}
 
 
 def choose_shape(route_id):
@@ -258,16 +271,17 @@ def label_object(ask, obj, seed, image=None):
     need = obj["kind_hint"]
     image = image if image is not None else naming_image(obj["image"], obj["polygon"], obj["crop_box"] or obj["bbox"])
     row = {"id": obj["object_id"], "need": need, "prompt_version": PROMPT_VERSION}
-    rejects, raw, fin, reply = ["parse"], None, None, None
+    rejects, raws, fin, reply = ["parse"], [], None, None
     for attempt, s in enumerate((seed, seed + 1), 1):
         raw, fin = ask(image, naming_prompt(need), s)
+        raws.append(raw)
         reply = parse_name_reply(raw)
         rejects = ["parse"] if reply is None else name_rejects(reply["name"], reply["kind"], need)
         if not rejects:
             return {**row, "name": reply["name"], "kind": reply["kind"], "passed": True, "rejects": [],
                     "attempts": attempt, "finish": fin}
     return {**row, "name": None, "kind": reply and reply["kind"], "passed": False, "rejects": rejects,
-            "attempts": 2, "finish": fin, "raw": raw}
+            "attempts": 2, "finish": fin, "raw": raws}
 
 
 def route_objects(row):
@@ -284,9 +298,10 @@ def label_route(ask_text, row, names, seed):
                 "rejects": ["unnamed_object"], "missing": missing}
     style, shape = choose_style(row["id"]), choose_shape(row["id"])
     prompt = compose_prompt(row["events"], row["stop"], names, style, shape)
-    rejects, raw = [], None
+    rejects, raws = [], []
     for attempt, s in enumerate((seed, seed + 1), 1):
         raw, _ = ask_text(prompt, s)
+        raws.append(raw)
         text = parse_compose_reply(raw)
         rejects = description_rejects(text, row["events"], row["stop"], names)
         if not rejects:
@@ -296,4 +311,4 @@ def label_route(ask_text, row, names, seed):
     trej = description_rejects(tpl, row["events"], row["stop"], names)
     return {**out, "description": tpl if not trej else None, "instruction_source": "template",
             "passed": not trej, "rejects": trej, "cosmos_rejects": rejects, "style": style, "shape": shape,
-            "attempts": 2, "raw": raw}
+            "attempts": 2, "raw": raws}

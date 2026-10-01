@@ -192,3 +192,34 @@ def test_label_route_without_names_makes_no_call():
         raise AssertionError("no call expected")
     out = label_route(boom, row, {"f:b5": "fridge"}, seed=0)
     assert out["passed"] is False and out["rejects"] == ["unnamed_object"] and out["missing"] == ["f:b1"]
+
+
+def test_parse_name_reply_cleans_punctuation_quotes_articles():
+    assert parse_name_reply(_reply({"name": "Sofa."}))["name"] == "sofa"
+    assert parse_name_reply(_reply({"name": '"Grey Sofa"'}))["name"] == "grey sofa"
+    assert parse_name_reply(_reply({"name": "The kitchen island"}))["name"] == "kitchen island"
+    assert parse_name_reply(_reply({"name": "`a lamp`!"}))["name"] == "lamp"
+
+
+def test_name_rejects_flags_punctuation():
+    assert "name:punct" in name_rejects("grey sofa, large", "object", "object")
+    assert "name:punct" in name_rejects("sofa/table", "object", "object")
+    assert "name:punct" not in name_rejects("grey sofa", "object", "object")
+
+
+def test_naming_image_enlarges_small_crop(tmp_path):
+    p = tmp_path / "f.png"
+    Image.new("RGB", (512, 512), (200, 200, 200)).save(p)
+    img = Image.open(io.BytesIO(naming_image(p, [], [0.4, 0.4, 0.5, 0.5]))).convert("L")
+    right = img.crop((512, 0, 1024, 512)).point(lambda v: 255 if v > 30 else 0)
+    x0, y0, x1, y1 = right.getbbox()
+    assert max(x1 - x0, y1 - y0) >= 500
+
+
+def test_failure_rows_keep_both_raw_replies():
+    obj = {"object_id": "f:b1", "kind_hint": "object", "image": None, "polygon": [], "crop_box": None}
+    row = label_object(lambda i, p, s: (f"junk{s}", "stop"), obj, seed=0, image=b"x")
+    assert row["raw"] == ["junk0", "junk1"]
+    r = {"id": "f_L", "pair_id": None, "kind": "instructed", "events": [PASS_L], "stop": NEAR}
+    out = label_route(lambda p, s: (f"junk{s}", "stop"), r, NAMES, seed=0)
+    assert out["raw"] == ["junk0", "junk1"]
