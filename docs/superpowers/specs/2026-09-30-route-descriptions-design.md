@@ -250,5 +250,25 @@ Implemented as (README "Route descriptions"): outlines use the depth band minus 
 only the connected pieces that hold the object, `MIN_AREA = 0.005`; names are report-only in the
 labelling job (two passes), compose runs twice and only compose pass 2 carries `--gate`;
 `OVERWRITE=1` restarts the gate. Eval: stop judged within `STOP_TOL_UV = 0.03` of the GT end in
-image space, a graze under `PASS_TIE_M = 0.15` m ties, `gt_follow_rate` is the ceiling, and the
-constant-goal baseline stays. Smoke run: 98% of routes described.
+image space, a graze under `PASS_TIE_M = 0.15` m ties (per member for `between` too),
+`gt_follow_rate` is the ceiling, and the constant-goal baseline stays. 94–98% of routes described
+(smoke probes).
+
+Clarifications (final review, 2026-10-01):
+- (a) "A wall-like blob is never a `pass` object" applies to blobs the route runs alongside (a
+  `wall` event). A long blob the route only comes near, not alongside for `ALONG_MIN_M` (1 m),
+  stays a `pass` object.
+- (b) A wall-like blob ahead on the line of approach can anchor a `before` distance stop: "stop
+  just / a little before the wall" (rule 4 refuses only "past" for wall-like blobs).
+- (c) "Wall" is any long blob the route runs alongside (median outline diagonal 2.7 m): it
+  includes long furniture (sofas, counters, beds), and a wall-like near "in front of" anchor is
+  also kind wall. The wall naming prompt says "something long that the rover drives alongside or
+  stops in front of: a wall, a partition, a door in a wall, or a long piece of furniture such as
+  a sofa or a counter"; a name of kind wall or object is accepted, opening is rejected.
+- A `through` event ends at its crossing (`end_arc_m = arc_m`), never at a joined wall's far
+  end, so "just after the doorway" means just after the door.
+- An outline with no seeded piece hulls the floor-free depth band (`depth_fallback` false); the
+  column outline is used only when nothing but floor is at the object's depth. A third seed at
+  height min(top, 0.25 m) catches objects lower than top/2.
+- `events_meta.json` carries `"schema": "d1-addendumA"`; the labeller and the events/d1 audit
+  refuse events files without it.

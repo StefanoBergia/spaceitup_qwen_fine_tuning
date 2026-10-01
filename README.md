@@ -1434,25 +1434,35 @@ found 72% true):
   - `pass`: 1 or 2 same-side objects within 0.7 m of the route, side = the side the route passes
     on ("go right of the table", "go left of the A and the B").
   - `wall`: a long blob the route runs alongside; the side is the **rover's own** ("keep the white
-    wall on your left"), the opposite of a pass. A wall is never a `pass` object. Only the
-    "on/to your left|right" form may say a side for a wall; for objects "your left/right" is rejected.
+    wall on your left"), the opposite of a pass. A wall event's blob is never also a `pass` object;
+    a long blob the route only comes near (not alongside for 1 m) stays a `pass` object. "Wall"
+    means anything long the rover runs alongside, so it includes long furniture (sofas, counters,
+    beds), and the naming prompt says so. Only the "on/to your left|right" form may say a side for
+    a wall; for objects "your left/right" is rejected.
   - `between`: consecutive opposite-side passes or walls with nothing in between and at most 3 m
     of route apart merge ("go between the A and the B").
   - `through`: two wall-like blobs with a gap of at least 0.5 m that the route crosses (doorways).
+    A through event ends at the crossing, even when the wall beyond the door is the same blob.
 - Stop phrase, first rule that fits: `near` (salient visible object within 1 m of the goal:
   "in front of" | "just past"; there is no "next to" any more, and a wall only takes "in front of"),
   `after_last` ("just after it", goal within 1.5 m of route after the last event; for a wall
   measured from where the route leaves the wall), `distance` (coarse amounts instead of metres:
   "stop just / a little / well past (or before) X"; just < 1.5 m, a little 1.5-3 m, well > 3 m;
-  "past the end of the wall" when the anchor is a wall). The distance past the last obstacle has
-  no upper limit, so long routes are described and no longer dropped (smoke run: 98% described);
+  "past the end of the wall" when the anchor is a wall; a wall ahead on the line of approach can
+  be "stop just / a little before the wall"). The distance past the last obstacle has no upper
+  limit, so long routes are described and no longer dropped (94–98% described in smoke probes);
   only a route with no anchor at all is dropped (`no_stop_anchor`).
+- An outline with no seeded piece (a low object whose top is not visible) is the hull of its
+  floor-free depth band; only when nothing but floor is at its depth does it fall back to the
+  column outline (`depth_fallback`).
 
 1. Events (CPU, 4 workers; smoke run first):
    `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`
    `uv run scripts/prepare_habitat_instr.py events --limit 200`, then without `--limit` →
    `data/prepared_habitat_instr_v2/{events,objects}_{train,eval}.jsonl`, `events_meta.json`
-   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`)
+   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`). `events_meta.json` carries
+   `"schema": "d1-addendumA"`; `label_descriptions.py` and the events/d1 audit refuse events files
+   without it (rerun this step).
 2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
    `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`
    → `outputs/instr_events_audit.html` (publish with the `db` capability)
