@@ -32,11 +32,13 @@ _BREAK = re.compile(r"[,;.]|\bthen\b|\band\b", re.I)
 GENERIC_NAMES = {"object", "thing", "item", "area", "region", "stuff", "something", "space", "structure",
                  "furniture", "obstacle", "piece", "unit"}   # head_noun("piece of furniture") == "piece"
 _CONJUNCTION = re.compile(r"\b(?:and|then|or)\b", re.I)     # would split the name at _BREAK
-# "right" meaning "exactly", not a side: blanked out before any side-word check
+# "right" meaning "exactly", not a side: blanked out before any side-word check. "next to",
+# "by" and "beside" are no longer stop relations (Addendum A) but stay here: a description may
+# still say "right next to" in passing, and that "right" is never a side word.
 _RIGHT_ADVERB = re.compile(r"\bright(?= (?:after|past|beyond|before|in front of|next to|by|beside)\b)", re.I)
 _PRONOUN = re.compile(r"\b(?:it|them)\b", re.I)
 # The words that say each stop relation. The stop clause (the text after the last stop word)
-# must hold one of its own relation's words, so a swapped relation ("two metres before the
+# must hold one of its own relation's words, so a swapped relation ("a little before the
 # armchair" for a past stop) is rejected as stop:relation. after_last is checked by _AFTER.
 STOP_RELATION_WORDS = {
     ("near", "in front of"): ("in front of", "right in front of", "just in front of"),
@@ -134,22 +136,31 @@ def _owner(text, start, end, spans):
 
 def _side_rejects(text, events, spans):
     """Each side word belongs to the next name in its clause, else to the previous name. A pass
-    (one or two objects) and a wall need their own side word and no other; a wall's side word
-    must not read "left/right of" (that is the route's side, the opposite of the wall's).
-    "on/to your left/right" is allowed only when a wall owns it and it says the wall's side."""
-    out = []
+    (one or two objects) and a wall need their own side word and no other.
+    "on/to your left/right" is allowed only when a wall owns it and it says the wall's side; a
+    wall's side word counts ONLY in that egocentric form. A bare one ("pass the wall on the
+    left", "keep left of the wall") reads as the route's side for objects -- the opposite
+    geometry -- so it is side:wall_form and does not count (the wall then lacks its side)."""
+    out, got, ego = [], {}, []
     for m in _EGOCENTRIC.finditer(text):
         word = m.group(0).split()[-1].lower()
         owner = _owner(text, m.start(), m.end(), spans)
-        if not (isinstance(owner, int) and events[owner]["type"] == "wall" and events[owner]["side"] == word):
+        wall = isinstance(owner, int) and events[owner]["type"] == "wall"
+        if not (wall and events[owner]["side"] == word):
             out.append("side:egocentric")
-    got = {}
+        if wall:   # counted here: the _RIGHT_ADVERB blanking below must not hide it
+            got.setdefault(owner, set()).add(word)
+        ego.append((m.start(), m.end(), wall))
     text = _RIGHT_ADVERB.sub(lambda m: " " * len(m.group(0)), text)   # same length: spans stay valid
     for m in _SIDE.finditer(text):
+        in_ego = next((w for a, b, w in ego if a <= m.start() and m.end() <= b), None)
+        if in_ego:                                       # a wall's egocentric word, already counted
+            continue
         owner = _owner(text, m.start(), m.end(), spans)
+        if in_ego is None and isinstance(owner, int) and events[owner]["type"] == "wall":
+            out.append(f"side:wall_form:{owner}")
+            continue
         got.setdefault(owner, set()).add(m.group(1).lower())
-        if isinstance(owner, int) and events[owner]["type"] == "wall" and re.match(r"\s+of\b", text[m.end():]):
-            out.append(f"side:wall_of:{owner}")
     for i, e in enumerate(events):
         words = got.get(i, set())
         if e["type"] in ("pass", "wall"):

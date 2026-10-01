@@ -545,7 +545,6 @@ def test_multi_object_pass_rejections(text, reason):
     "Keep the white wall on your left, then go right of the grey sofa, and stop in front of the fridge.",
     "Follow the white wall on your left, go right of the grey sofa and stop in front of the fridge.",
     "With the white wall to your left, go right of the grey sofa and stop in front of the fridge.",
-    "Keep the white wall to the left, then go right of the grey sofa, and stop in front of the fridge.",
 ])
 def test_wall_event_side_word_accepted(text):
     assert description_rejects(text, [WALL_L, PASS_R], W_NEAR, NAMES) == [], text
@@ -557,9 +556,20 @@ def test_wall_event_side_word_accepted(text):
     ("Keep the white wall on your right, then go right of the grey sofa, and stop in front of the fridge.",
      "side:egocentric"),
     ("Follow the white wall, then go right of the grey sofa, and stop in front of the fridge.", "side:missing:0"),
-    # "left of the wall" is the route's side: the opposite of the wall's (the rover's) side
+    # a wall's side word counts only in egocentric form: "on the left" / "left of" / "keep left"
+    # read as the ROUTE's side for objects, the opposite geometry (fix round 1, M1)
     ("Keep left of the white wall, then go right of the grey sofa, and stop in front of the fridge.",
-     "side:wall_of:0"),
+     "side:wall_form:0"),
+    ("Keep left of the white wall, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:missing:0"),
+    ("Pass the white wall on the left, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:wall_form:0"),
+    ("Pass the white wall on the left, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:missing:0"),
+    ("Keep the white wall to the left, then go right of the grey sofa, and stop in front of the fridge.",
+     "side:wall_form:0"),
+    ("Keep the white wall on your left, on the left, then go right of the grey sofa, and stop in front of "
+     "the fridge.", "side:wall_form:0"),
 ])
 def test_wall_event_rejections(text, reason):
     assert reason in description_rejects(text, [WALL_L, PASS_R], W_NEAR, NAMES)
@@ -625,3 +635,9 @@ def test_desc_check_carries_wall_and_multi_object_pass():
                                 "gap_xz": None}
     assert chk["events"][1]["type"] == "pass" and chk["events"][1]["obstacles"] == [
         [[0.1, 1.0], [0.2, 1.0]], [[-1.0, 2.0]]]
+
+
+def test_wall_egocentric_form_survives_the_right_adverb_blanking():
+    # "on your right past ..." : the right-adverb blanking must not hide the wall's egocentric word
+    t = "Follow the glass partition on your right past its end, and stop just after it."
+    assert description_rejects(t, [WALL_R], AFTER, NAMES) == []
