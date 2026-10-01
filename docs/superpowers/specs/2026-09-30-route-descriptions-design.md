@@ -85,9 +85,9 @@ for reproducibility.
 On the frame's own `state.npz` and camera; route resampled every 5 cm; obstacles are
 gap-merged occupied blobs (1-cell dilation, as `crossing_target`).
 
-**Occlusion fix (group C).** Occupied cells within `NEAR_CAMERA_M = 0.35` m of the camera are
+**Occlusion fix (group C).** Occupied cells within `NEAR_CAMERA_M = 0.5` m (the rover radius) of the camera are
 neither occluders nor candidates: the rover's start pose is collision-free, and in 00372 such a
-strip (0.31 m ahead, bare floor in the image) hid the armchair from every ray.
+strip (0.22–0.45 m ahead, 2 m wide, bare floor in the image) hid the armchair from every ray; 0.35 m was not enough.
 
 **Candidates.** A blob with (a) closest approach ≤ `PASS_M = 0.7` m, ignoring the first
 0.3 m of route, (b) ≥ 4 visible cells, (c) depth-trimmed outline ≥ `MIN_AREA = 0.01` of
