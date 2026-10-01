@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .landmarks import (
-    OBJECT_TOP_M, OCC, Camera, Grid, _dilate, _poly_area, column_in_frame, components,
+    CAM_HEIGHT_M, FREE, OBJECT_TOP_M, OCC, Camera, Grid, _dilate, _poly_area, column_in_frame, components,
     convex_hull, densify,
 )
 
@@ -59,6 +59,8 @@ def load_frame(sample_dir):
     depth = np.asarray(Image.open(dp), dtype=float) if dp.exists() else None
     frame = Frame(sd.name, grid, Camera(meta["pose_xz"], meta["heading_xz"]),
                   np.where(occ, merged, 0), depth)
+    if depth is not None:
+        frame.depth_fit = calibrate_depth(depth, frame.cam, grid)
     return meta, frame
 
 
@@ -121,9 +123,76 @@ def column_outline(frame, vis_xz, top=OBJECT_TOP_M):
     return outline_dict(convex_hull(pts), depth_fallback=True)
 
 
+DEPTH_BAND_M = 0.3            # object pixels lie within its own depth range +- this
+DEPTH_FIT_MAX_RESID_M = 0.3   # worse fit -> column outline, flagged depth_fallback
+FIT_MAX_M = 8.0               # floor pixels farther than this are too coarse to fit on
+MIN_MASK_PX = 20
+
+
+def calibrate_depth(depth, cam, grid, step=8):
+    """(scale, offset, resid_m) with metres = scale * pixel + offset, or None.
+
+    depth.png is min-max normalised per frame and the range is not stored
+    (spaceitup-habitat/src/roverbench/dataset/writer.py:_depth_png). A floor pixel's planar
+    depth is known from the camera height alone, so the range is re-fitted on pixels whose
+    floor point is a FREE map cell. Pixels showing an object in front of free floor are
+    outliers; two trimmed refits drop them. resid_m is measured over ALL candidate pixels, not
+    the kept inliers: a residual on the fit's own inliers cannot detect a bad fit (noise passed).
+    None when the fitted scale is not positive."""
+    H, W = depth.shape
+    vals, metres = [], []
+    for r in range(int(H * 0.55), H, max(1, H // 64)):
+        v = (r + 0.5) / H
+        fwd = 0.5 * CAM_HEIGHT_M / (v - 0.5)
+        if fwd > FIT_MAX_M:
+            continue
+        for c in range(0, W, max(1, W // 64)):
+            u = (c + 0.5) / W
+            xz = cam.pos + fwd * cam.h + (u - 0.5) * 2 * fwd * cam.right
+            if depth[r, c] > 0 and grid.cell(grid.rc(xz)[0]) == FREE:
+                vals.append(depth[r, c])
+                metres.append(fwd)
+    if len(vals) < 50:
+        return None
+    x0, y0 = np.array(vals), np.array(metres)
+    x, y = x0, y0
+    for _ in range(2):
+        a, b = np.polyfit(x, y, 1)
+        res = np.abs(a * x + b - y)
+        keep = res <= max(DEPTH_BAND_M, np.percentile(res, 80))
+        if keep.sum() < 20:
+            break
+        x, y = x[keep], y[keep]
+    a, b = np.polyfit(x, y, 1)
+    if a <= 0:
+        return None
+    return float(a), float(b), float(np.median(np.abs(a * x0 + b - y0)))
+
+
+def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
+    """The column outline trimmed to pixels at the object's own depth (group B: the column
+    of a coffee table also covered the sofa behind it, and Cosmos named the sofa)."""
+    col = column_outline(frame, vis_xz, top)
+    fit = frame.depth_fit
+    if frame.depth is None or fit is None or fit[2] > DEPTH_FIT_MAX_RESID_M or len(col["polygon"]) < 3:
+        return col
+    H, W = frame.depth.shape
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).polygon([(u * W, v * H) for u, v in col["polygon"]], fill=1)
+    metres = fit[0] * frame.depth + fit[1]
+    fwd = (np.asarray(vis_xz) - frame.cam.pos) @ frame.cam.h
+    keep = (np.asarray(mask, bool) & (frame.depth > 0)
+            & (metres >= fwd.min() - DEPTH_BAND_M) & (metres <= fwd.max() + DEPTH_BAND_M))
+    if keep.sum() < MIN_MASK_PX:
+        return col
+    ys, xs = np.nonzero(keep)
+    pts = np.stack([(xs + 0.5) / W, (ys + 0.5) / H], 1)[:: max(1, len(xs) // 4000)]
+    return outline_dict(convex_hull(pts), depth_fallback=False)
+
+
 def candidates(frame, route_xz, outline=None):
     """Every salient obstacle the route passes, in route order (see module docstring)."""
-    outline = outline or column_outline
+    outline = outline or object_outline
     rg = route_geometry(route_xz)
     usable = np.nonzero(rg["arc"] > START_SKIP_M)[0]
     if not len(usable):
