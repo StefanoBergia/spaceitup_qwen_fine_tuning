@@ -208,3 +208,33 @@ and `tests/test_descriptions.py`:
 Training runs (later, `slurm/train_habitat.sbatch data/prepared_habitat_instr_v3/train_desc.json …` as for v2), new Habitat rendering (metric depth, extra
 routes), HM3D `objects.json` checks (informative only), dropping group D frames, the
 "panel"→"wall" rename question (superseded: names come from crops now).
+
+## Addendum A — after the Gate 1 audit (2026-10-01)
+
+Gate 1 (https://claude.ai/artifact/KQNZv2axTcX7WBZUHV6MEm, 100 train routes): **72 true**, 15
+wrong stop, 7 wrong object, 4 misses an obstacle, 2 can't tell — below the 90% bar. Causes:
+"next to" stops wrong 12/29 (24% of the dataset); rough-metre stops wrong 11/54 and not judgeable
+by a person; wrong objects mostly from imprecise outlines (convex hulls over large wall blobs and
+over several things at one depth); 30% of routes read "left of A, then right of B" (opposite
+passes 1.2–2.9 m apart) where a person says "between A and B".
+
+User decisions:
+1. **Coarse stop amounts** replace metres: distance stops say "stop just / a little / well
+   past (or before) X" — just < 1.5 m, a little 1.5–3 m, well > 3 m. The "past the last
+   obstacle" fallback has no upper limit, so long routes are described instead of dropped.
+   The `next to` near relation is removed.
+2. **Walls and doors are named, in wall language**: a long blob the route runs alongside is a
+   `wall` event, "keep the white wall on your left" / "follow the glass partition on your
+   right". For walls the side word is the rover's own side (wall on your left), for objects it
+   stays the side the route passes on ("go right of the table"). Doorways stay `through`.
+   A wall-like blob is never a `pass` object, and is a stop anchor only "in front of".
+3. **Between**: two consecutive passes (objects or walls) on opposite sides with nothing in
+   between merge into "go between A and B" (any arc gap up to 3 m); two consecutive object
+   passes on the same side merge into one pass of two objects ("go left of the A and the B").
+4. **Tighter outlines**: an object's outline is the hull of the depth-band mask's connected
+   pieces that contain its projected cells, not of the whole band; a wall's outline covers only
+   the stretch within 0.8 m of the route.
+
+Eval: a `wall` event with side s is followed when the wall stays on the rover's side s
+(the obstacle is on the route's side s); a multi-object pass needs every object on the stated
+side. Stop checking is unchanged (image space).
