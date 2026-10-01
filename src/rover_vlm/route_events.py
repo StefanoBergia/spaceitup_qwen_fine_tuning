@@ -244,3 +244,174 @@ def _threaded_gap(xz, dist, usable, rg):
     if abs(arc[left[a]] - arc[right[b]]) > PAIR_ARC_M:
         return None
     return (xz[left[a]], xz[right[b]])
+
+
+MAX_EVENTS = 3
+WALL_EXTENT_M = 1.5        # two blobs this long on both sides of the route = an opening
+OPENING_TOP_M = 2.0        # an opening's outline reaches this high (a door)
+STOP_NEAR_M = 1.0
+AFTER_LAST_M = 1.5
+STOP_FAR_M = 4.0
+APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
+DISTANCE_STEPS = (1.0, 1.5, 2.0, 3.0, 4.0)
+REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "error")
+CHECK_CELLS = 40           # cells per object kept for the eval's follow check
+
+
+def opening_outline(frame, p, q):
+    """Floor-to-OPENING_TOP_M quad between the two cells flanking a gap."""
+    ends = np.array([p, q], float)
+    lo, _ = frame.cam.uv(ends)
+    hi, _ = frame.cam.uv(ends, OPENING_TOP_M)
+    o = outline_dict(convex_hull(np.vstack([lo, hi])), depth_fallback=True)
+    o["gap_xz"] = [[round(float(v), 3) for v in p], [round(float(v), 3) for v in q]]
+    return o
+
+
+def build_events(frame, cands):
+    """Top-MAX_EVENTS events by score, returned in route order."""
+    events, used = [], set()
+    for k, a in enumerate(cands):
+        if k in used:
+            continue
+        used.add(k)
+        if a["gap"] is not None and a["extent_m"] >= WALL_EXTENT_M:
+            events.append({"type": "through", "side": None, "members": [k], "arc_m": a["arc_m"],
+                           "score": a["score"], "opening": opening_outline(frame, *a["gap"])})
+            continue
+        m = next((m for m, b in enumerate(cands) if m not in used and b["side"] != a["side"]
+                  and abs(b["arc_m"] - a["arc_m"]) <= PAIR_ARC_M), None)
+        if m is None:
+            events.append({"type": "pass", "side": a["side"], "members": [k], "arc_m": a["arc_m"],
+                           "score": a["score"]})
+            continue
+        b = cands[m]
+        used.add(m)
+        ev = {"type": "between", "side": None, "members": [k, m],
+              "arc_m": min(a["arc_m"], b["arc_m"]), "score": a["score"] + b["score"]}
+        if a["extent_m"] >= WALL_EXTENT_M and b["extent_m"] >= WALL_EXTENT_M:
+            d = np.linalg.norm(a["vis_xz"][:, None] - b["vis_xz"][None], axis=2)
+            i, j = np.unravel_index(d.argmin(), d.shape)
+            ev.update(type="through", opening=opening_outline(frame, a["vis_xz"][i], b["vis_xz"][j]))
+        events.append(ev)
+    top = sorted(events, key=lambda e: -e["score"])[:MAX_EVENTS]
+    return sorted(top, key=lambda e: e["arc_m"])
+
+
+def _stop_anchors(frame, goal):
+    """Visible, salient blobs with a cell within STOP_FAR_M of the goal."""
+    out = []
+    for b in np.unique(frame.lab[frame.lab > 0]):
+        cells = np.argwhere(frame.lab == b)
+        xz = frame.grid.xz(cells)
+        d = np.linalg.norm(xz - goal, axis=1)
+        if d.min() > STOP_FAR_M:
+            continue
+        vis = visible_cells(frame, cells[d <= STOP_FAR_M + KEEP_NEAR_ROUTE_M], int(b))
+        if len(vis) < MIN_VISIBLE_CELLS:
+            continue
+        o = object_outline(frame, vis)
+        if o["area"] < MIN_AREA:
+            continue
+        out.append({"blob": int(b), "near_xz": xz[d.argmin()], "dist": float(d.min()),
+                    "vis_xz": vis, "outline": o})
+    return out
+
+
+def stop_phrase(frame, route_xz, events):
+    """Where the route ends: near an object, just after the last event, or a rough distance
+    from an object on the line of approach; None when nothing fits (the route is dropped)."""
+    rg = route_geometry(route_xz)
+    goal = rg["pts"][-1]
+    back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal
+    head = goal - back
+    head /= max(np.linalg.norm(head), 1e-9)
+    right = np.array([-head[1], head[0]])
+    anchors = _stop_anchors(frame, goal)
+    near = [x for x in anchors if x["dist"] <= STOP_NEAR_M]
+    if near:
+        x = min(near, key=lambda x: x["dist"])
+        v = x["near_xz"] - goal
+        along, lat = float(v @ head), float(v @ right)
+        rel = "in front of" if along > abs(lat) else "just past" if along < -abs(lat) else "next to"
+        return {"type": "near", "relation": rel, "anchor": x}
+    if events and rg["arc"][-1] - events[-1]["arc_m"] <= AFTER_LAST_M:
+        return {"type": "after_last", "relation": "just after", "anchor": None}
+    far = []
+    for x in anchors:
+        v = x["near_xz"] - goal
+        if abs(v @ head) / max(np.linalg.norm(v), 1e-9) >= APPROACH_COS:
+            far.append((x["dist"], x, bool(v @ head > 0)))
+    if far:
+        dist, x, ahead = min(far, key=lambda t: t[0])
+        step = min(DISTANCE_STEPS, key=lambda s: abs(s - dist))
+        return {"type": "distance", "relation": "before" if ahead else "past", "distance_m": step, "anchor": x}
+    return None
+
+
+def _none(reason, **diag):
+    return {"reason": reason, "events": [], "stop": None, "objects": {}, "diag": diag}
+
+
+def _cells(xz, n=CHECK_CELLS):
+    xz = np.asarray(xz, float)
+    if len(xz) > n:
+        xz = xz[np.linspace(0, len(xz) - 1, n).astype(int)]
+    return [[round(float(a), 3), round(float(b), 3)] for a, b in xz]
+
+
+def describe_route(sample_dir, candidate_index):
+    """The events + stop phrase for one candidate route of one frame (see module docstring)."""
+    sd = Path(sample_dir)
+    if not (sd / "state.npz").exists():
+        return _none("no_state")
+    meta, frame = load_frame(sd)
+    cm = meta.get("candidates", [])
+    if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
+        return _none("bad_candidate")
+    route = np.asarray(cm[candidate_index]["polyline_xz"], float)
+    cands = candidates(frame, route)
+    events = build_events(frame, cands)
+    stop = stop_phrase(frame, route, events)
+    if stop is None:
+        return _none("no_stop_anchor", n_events=len(events))
+    objects = {}
+
+    def add(key, kind, outline, cells):
+        oid = f"{frame.name}:{key}"
+        objects.setdefault(oid, {"object_id": oid, "kind_hint": kind,
+                                 **{k: outline[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")},
+                                 "cells_xz": _cells(cells)})
+        return oid
+
+    rows = []
+    for e in events:
+        blobs = [cands[m]["blob"] for m in e["members"]]
+        if e["type"] == "through":
+            ids = [add("gap" + "-".join(map(str, blobs)), "opening", e["opening"], e["opening"]["gap_xz"])]
+        else:
+            ids = [add(f"b{cands[m]['blob']}", "object", cands[m]["outline"], cands[m]["vis_xz"]) for m in e["members"]]
+        row = {"type": e["type"], "side": e["side"], "objects": ids, "arc_m": round(e["arc_m"], 2)}
+        if e["type"] == "through":
+            row["gap_xz"] = e["opening"]["gap_xz"]
+        rows.append(row)
+    st = {"type": stop["type"], "relation": stop["relation"], "distance_m": stop.get("distance_m"), "object": None}
+    if stop["anchor"] is not None:
+        a = stop["anchor"]
+        st["object"] = add(f"b{a['blob']}", "object", a["outline"], a["vis_xz"])
+    return {"reason": None, "events": rows, "stop": st, "objects": objects,
+            "goal_xz": [round(float(v), 3) for v in route[-1]],
+            "pose_xz": [float(v) for v in meta["pose_xz"]], "heading_xz": [float(v) for v in meta["heading_xz"]],
+            "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
+
+
+def collect_objects(rows):
+    """(rows without their "objects", one object row per id). Both routes of a pair share
+    their frame's objects; the first route's outline wins (its name serves both)."""
+    objects, kept = {}, []
+    for r in rows:
+        r = dict(r)
+        for oid, o in (r.pop("objects", None) or {}).items():
+            objects.setdefault(oid, {**o, "image": r["image"]})
+        kept.append(r)
+    return kept, list(objects.values())

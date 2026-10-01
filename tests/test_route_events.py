@@ -163,3 +163,135 @@ def test_poor_fit_falls_back(tmp_path):
     frame.depth_fit = calibrate_depth(frame.depth, frame.cam, frame.grid)
     assert frame.depth_fit is None or frame.depth_fit[2] > 0.3
     assert object_outline(frame, vis)["depth_fallback"] is True
+
+
+from rover_vlm.route_events import (  # noqa: E402
+    MAX_EVENTS, build_events, collect_objects, describe_route, stop_phrase,
+)
+
+
+def test_opposite_sides_close_along_the_route_merge_into_between(tmp_path):
+    s = _free()
+    s[40:46, 62:68] = OCC        # x 3.1..3.4, z 2.0..2.3 : route's left there (0.625 m)
+    s[40:46, 32:38] = OCC        # x 1.6..1.9, z 2.0..2.3 : route's right there (0.625 m)
+    route = [(2.5, 0.2), (2.5, 1.5), (2.5, 2.8), (2.6, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert [e["type"] for e in ev] == ["between"] and ev[0]["side"] is None
+    assert len(ev[0]["members"]) == 2
+
+
+def test_doorway_in_one_wall_is_a_through_event(tmp_path):
+    s = _free()
+    s[40:42, 10:47] = OCC        # wall z 2.0..2.1, x 0.5..2.35
+    s[40:42, 53:90] = OCC        # wall x 2.65..4.5 (gap 2.35..2.65 = doorway)
+    s[4:42, 8:10] = OCC         # side walls joining both halves into one blob
+    s[4:42, 90:92] = OCC
+    s[4:6, 8:92] = OCC        # back wall 0.8 m behind the first usable route point (> PASS_M)
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    d = write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8))
+    _, frame = load_frame(d)
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert [e["type"] for e in ev] == ["through"]
+    p, q = ev[0]["opening"]["gap_xz"]
+    assert abs(p[0] - q[0]) == pytest.approx(0.3, abs=0.1)
+
+
+def test_top_three_by_score_then_route_order(tmp_path):
+    s = _free()
+    for z0 in (16, 30, 44, 58, 72):                      # five posts, alternating sides
+        x0 = 56 if (z0 // 14) % 2 else 40
+        s[z0:z0 + 4, x0:x0 + 4] = OCC
+    route = [(2.5, 0.2), (2.5, 4.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert len(ev) <= MAX_EVENTS
+    assert [e["arc_m"] for e in ev] == sorted(e["arc_m"] for e in ev)
+
+
+def _stop_state():
+    s = _free()
+    s[20:30, 52:58] = OCC                                # box A (passed on the left)
+    s[70:80, 36:60] = OCC                                # cabinet x 1.8..3.0, z 3.5..4.0 (>= 1% of the image)
+    return s
+
+
+STOP_ROUTE = [(2.5, 0.2), (3.3, 1.0), (3.3, 1.6), (2.5, 2.9)]   # ends 0.6 m before the cabinet
+
+
+def test_stop_near_an_object_ahead_is_in_front_of(tmp_path):
+    route = STOP_ROUTE
+    _, frame = load_frame(write_sample(tmp_path / "s", _stop_state(), [route]))
+    st = stop_phrase(frame, np.array(route), [])
+    assert st["type"] == "near" and st["relation"] == "in front of"
+
+
+def test_stop_just_after_the_last_event(tmp_path):
+    s = _free()
+    s[30:40, 52:58] = OCC                             # box A: x 2.6..2.9, z 1.5..2.0
+    route = [(2.5, 0.2), (3.3, 1.0), (3.7, 2.7)]      # goal 1.15 m from box A, 1.35 m of route after its closest approach
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    ev = build_events(frame, candidates(frame, np.array(route)))
+    assert stop_phrase(frame, np.array(route), ev)["type"] == "after_last"
+
+
+def test_stop_at_a_rough_distance_before_an_object_ahead(tmp_path):
+    s = _free()
+    s[90:94, 30:70] = OCC                                # sideboard x 1.5..3.5, z 4.5..4.7
+    route = [(2.5, 0.2), (2.5, 2.5)]                     # goal 2.0 m short of it, nothing passed
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    st = stop_phrase(frame, np.array(route), [])
+    assert st["type"] == "distance" and st["relation"] == "before" and st["distance_m"] == 2.0
+
+
+def test_open_floor_goal_with_nothing_around_has_no_stop(tmp_path):
+    route = [(2.5, 0.2), (2.5, 2.5)]
+    _, frame = load_frame(write_sample(tmp_path / "s", _free(), [route]))
+    assert stop_phrase(frame, np.array(route), []) is None
+
+
+def test_describe_route_rows_and_object_ids(tmp_path):
+    route = STOP_ROUTE
+    d = write_sample(tmp_path / "s00001", _stop_state(), [route])
+    out = describe_route(d, 0)
+    assert out["reason"] is None
+    assert out["events"][0]["type"] == "pass" and out["events"][0]["side"] == "left"
+    oid = out["events"][0]["objects"][0]
+    assert oid.startswith("s00001:b") and out["objects"][oid]["kind_hint"] == "object"
+    assert out["stop"]["object"] in out["objects"]
+    assert 4 <= len(out["objects"][oid]["cells_xz"]) <= 40
+    assert describe_route(d, 5)["reason"] == "bad_candidate"
+    (d / "state.npz").unlink()
+    assert describe_route(d, 0)["reason"] == "no_state"
+
+
+def test_collect_objects_dedupes_shared_objects():
+    o = {"object_id": "f:b1", "polygon": [], "kind_hint": "object"}
+    rows = [{"id": "f_L", "image": "img.png", "objects": {"f:b1": o}},
+            {"id": "f_R", "image": "img.png", "objects": {"f:b1": dict(o, polygon=[[0, 0]])}}]
+    kept, objects = collect_objects(rows)
+    assert [r.get("objects") for r in kept] == [None, None]
+    assert len(objects) == 1 and objects[0]["polygon"] == [] and objects[0]["image"] == "img.png"
+
+
+# --- real frames (NFS); skipped where the dataset is not mounted --------------------------
+AUG = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated_aug/train")
+ORIG = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train")
+REAL = [
+    # (sample dir, candidate, world xz of the obstacle a person names, audit group)
+    (AUG / "00372-GMwtBqNLGBs/samples/00372-GMwtBqNLGBs_c030_y1", 0, (-0.79, 10.86), "C: armchair hidden by a strip at the camera"),
+    (ORIG / "00206-uhkqDVMtEnn/samples/00206-uhkqDVMtEnn_c040", 4, (6.82, -1.21), "A: pillar, not the grazed wall"),
+    (AUG / "00475-g7hUFVNac26/samples/00475-g7hUFVNac26_c013_y1", 2, (5.34, 1.97), "A: post on the line, not the sofa"),
+]
+
+
+@pytest.mark.parametrize("sd,cand,xz,why", REAL, ids=[r[3] for r in REAL])
+def test_real_frame_names_the_obstacle_a_person_would(sd, cand, xz, why):
+    if not (sd / "state.npz").exists():
+        pytest.skip("dataset not mounted")
+    out = describe_route(sd, cand)
+    assert out["reason"] is None, out
+    event_objects = [o for e in out["events"] for o in e["objects"]]
+    near = [o for o in event_objects
+            if np.linalg.norm(np.array(out["objects"][o]["cells_xz"]) - xz, axis=1).min() <= 0.4]
+    assert near, f"{why}: events {out['events']}"
