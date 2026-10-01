@@ -695,7 +695,9 @@ def _event_followed(floor, e):
 
     pass: every object is passed on `side` (the route's side). wall: the wall stays on the
     rover's side `side`, i.e. the route passes it on the opposite side. Both within
-    FOLLOW_NEAR_M; a graze (< PASS_TIE_M) counts either way."""
+    FOLLOW_NEAR_M; a graze (< PASS_TIE_M) counts either way. between: one member on each side,
+    both within FOLLOW_NEAR_M; a grazed member counts on either side. through: the gap ends on
+    opposite sides."""
     kind = e.get("type")
     if kind in ("pass", "wall"):
         obs = e.get("obstacles") or []
@@ -714,7 +716,9 @@ def _event_followed(floor, e):
     if len(groups) < 2 or not len(groups[0]) or not len(groups[1]):
         return 0
     a, b = (_pass_side(floor, g) for g in groups[:2])
-    return int(a[0] != b[0] and max(a[1], b[1]) <= FOLLOW_NEAR_M)
+    # between: a grazed member (< PASS_TIE_M) counts as on either side, as for pass/wall (final review)
+    tie = kind == "between" and min(a[1], b[1]) < PASS_TIE_M
+    return int((a[0] != b[0] or tie) and max(a[1], b[1]) <= FOLLOW_NEAR_M)
 
 
 def description_follow(pred_path, check, gt_end_uv=None):

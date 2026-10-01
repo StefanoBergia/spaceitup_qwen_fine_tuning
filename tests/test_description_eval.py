@@ -196,3 +196,15 @@ def test_two_object_pass_needs_every_object_on_the_side():
     assert description_follow(to_image(STRAIGHT), c)["events"] == [0]
     c = check([{"type": "pass", "side": "left", "obstacles": [[[-0.6, 1.5]], []], "gap_xz": None}])
     assert description_follow(to_image(STRAIGHT), c)["events"] == [0]          # malformed second group
+
+
+def test_between_member_that_the_path_grazes_counts_on_either_side():
+    # final review M-graze: a member within PASS_TIE_M flips side between a dense and a sparse
+    # path, so (as for pass/wall) it counts as on either side
+    c = check([{"type": "between", "side": None,
+                "obstacles": [[[0.1, 2.0]], [[0.6, 2.0]]], "gap_xz": None}])
+    straight = to_image([(0.0, 0.8), (0.0, 2.0), (0.0, 4.0)])          # both on the same side, one grazed
+    assert description_follow(straight, c)["events"] == [1]
+    far = check([{"type": "between", "side": None,
+                  "obstacles": [[[0.3, 2.0]], [[0.6, 2.0]]], "gap_xz": None}])
+    assert description_follow(straight, far)["events"] == [0]          # no graze: same side fails
