@@ -1408,6 +1408,74 @@ no instruction (reason-coded; their plain copy stays). Spec: `docs/superpowers/s
    then `finalize-general --instructions outputs/instr_labels_v2/train_i4.jsonl outputs/instr_labels_v2/eval_i4.jsonl`
    (kept records carry `habitat_meta.instruction_source` = `cosmos` paraphrase or `template`)
 
+### Route descriptions (d1, 2026-09-30)
+
+A 100-label spot check of the i4 labels (84 correct) put the failures in four groups: the
+crossing rule picked the wrong obstacle among several (A), the outline also covered what stands
+behind so Cosmos named that (B), occupied cells beside the rover hid everything (C), nothing
+clear to name (D, kept). The end goal is a VLM that **generates a path from a text description**,
+and one landmark per route under-specifies a path while the goal point pins it (the text barely
+matters). d1 therefore describes the **whole route**: up to 3 events along it plus a stop
+phrase, for the ground-truth route and the second feasible route of the same frame. Geometry
+decides what is true; Cosmos only names objects (one call per object, on its own crop) and then
+phrases the sentence (a text-only call). Training mixes 70% "image + entry + description" with
+30% "image + entry + goal + description". Spec: `docs/superpowers/specs/2026-09-30-route-descriptions-design.md`.
+
+Geometry rules (`src/rover_vlm/route_events.py`):
+- Occupied cells within `NEAR_CAMERA_M = 0.5` m (the rover radius) of the camera are neither
+  occluders nor candidates (group C). Object outlines are depth-trimmed (group B; poor depth fit
+  falls back to the column outline).
+- Events are `pass` (obstacle within 0.7 m of the route, side from the route normal),
+  `between` (obstacles on opposite sides within 0.5 m along the route) and `through` (two
+  wall-like blobs with a gap of at least 0.5 m that the route crosses). The 3 highest-scoring
+  (sqrt outline area x route offset from the entry-goal line) are kept, in route order.
+- Stop phrase, first rule that fits: `near` (salient visible object within 1 m of the goal:
+  "in front of" / "just past" / "next to"), `after_last` ("just after" the last event, goal
+  within 1.5 m of it), `distance` ("N metres past the last obstacle" when nothing visible is near
+  the goal, at most 4 m; otherwise a rough distance before/past an object in the approach cone),
+  else the route is dropped (`no_stop_anchor`). About 30% of routes, the long ones with the goal
+  5-10 m past the last obstacle, are dropped this way.
+
+1. Events (CPU, 4 workers; smoke run first):
+   `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`
+   `uv run scripts/prepare_habitat_instr.py events --limit 200`, then without `--limit` →
+   `data/prepared_habitat_instr_v2/{events,objects}_{train,eval}.jsonl`, `events_meta.json`
+   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`)
+2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
+   `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`
+   → `outputs/instr_events_audit.html` (publish with the `db` capability)
+3. Label gate (GPU, unattended: Cosmos server + name stage + compose stage in one job, 300
+   eval routes, then the job stops): `sbatch slurm/label_descriptions.sbatch` →
+   `outputs/instr_labels_v3/{names,desc}_*_d1.jsonl`. After a prompt fix restart the gate with
+   `OVERWRITE=1 sbatch slurm/label_descriptions.sbatch`. The same stages by hand:
+   `uv run scripts/label_descriptions.py --stage name ...` (run once per split), then
+   `--stage compose ...` (see the script's docstring; `--gate` exits 2 below accept 0.9 or above
+   0.1 template fallback)
+4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
+   `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
+   → `outputs/instr_d1_audit.html`
+5. Full run (train + eval, resumable; re-submit after a TIMEOUT): `STAGE=full sbatch slurm/label_descriptions.sbatch`
+6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` →
+   `data/prepared_habitat_instr_v3/{train_desc,eval_desc_entry,eval_desc_goal,eval_desc_pairs,eval_desc_shuffled}.json`
+   (70/30 entry/goal forms, both routes of a pair share a form, scene-disjoint re-asserted)
+7. Train: `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v3/train_desc.json outputs/runs_desc/d1 ...`
+   as for v2 (the eval sbatch looks for the adapter at `outputs/runs_desc/d1/adapter`)
+8. Eval: `sbatch slurm/eval_descriptions.sbatch` (`ADAPTER=<dir> TAG=<tag>` to override; finished
+   cells are skipped) → `outputs/eval_desc/<set>/<tag>/metrics.json`
+9. Videos (CPU, login node): `uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag d1`
+   → `outputs/eval_desc/<set>/<tag>/paths.mp4` (ground truth grey, prediction orange, description
+   under each tile; `--n` frames)
+
+Reading the metrics: `metrics.json` gets a `description` block (`eval.aggregate_habitat_metrics`).
+`follow_rate` = the back-projected predicted path satisfies every event and the stop (`pass`:
+obstacle on the stated side; `between`: both sides; `through`: crosses the gap; stop: endpoint
+within 0.75 m of the true goal); `event_rate_by_type` and `stop_rate` split it; `pair_success` =
+both routes of a frame followed (a text-blind model is near 0%). `endpoint_error_median` has no
+goal in the entry form, so read it against `constant_goal_endpoint_error_median` (every
+prediction ending at the set's mean goal; goals cluster near x = 0.5, so that baseline is close).
+`eval_desc_shuffled` gives each frame another frame's description: its follow rate should fall
+well below `eval_desc_entry`, otherwise the model is not reading the text.
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
