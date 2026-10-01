@@ -150,6 +150,34 @@ def test_trimmed_outline_drops_the_background_above_a_low_object(tmp_path):
     assert trim["area"] < col["area"]
 
 
+def test_outline_keeps_only_the_depth_piece_holding_the_object(tmp_path):
+    """Two things at one depth, apart in the image; the blob's cells hull both (a long wall) but
+    only the piece holding the cells' own pixels is the object."""
+    s = _free()
+    s[28:34, 48:54] = OCC                        # the object: x 2.4..2.7
+    route = [(2.5, 0.2), (3.2, 1.2), (3.2, 1.9), (2.5, 3.0)]
+    f0 = load_frame(write_sample(tmp_path / "noimg", s, [route]))[1]
+    b1 = int(f0.lab[30, 50])
+    vis1 = visible_cells(f0, np.argwhere(f0.lab == b1), b1)
+    far = np.array([[1.5, 1.45]])                # a cell of the same blob, ~0.4 widths to the side
+    vis = np.vstack([vis1, far])
+    u_far = f0.cam.uv(far)[0][0, 0]
+    box = column_outline(f0, vis1, top=0.5)["polygon"]
+    block = [[u_far - 0.1, 0.55], [u_far - 0.04, 0.55], [u_far - 0.04, 0.66], [u_far - 0.1, 0.66]]
+    cover = [[0.56, 0.66], [1, 0.66], [1, 1], [0.56, 1]]   # nearer stuff: no floor strip joins the pieces
+    H = W = 128
+    depth = _depth_image(f0.cam, cover, 0.7)
+    for poly in (box, block):
+        m = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(m).polygon([(u * W, v * H) for u, v in poly], fill=1)
+        depth = np.where(np.asarray(m, bool), _depth_image(f0.cam, [[0, 0], [1, 0], [1, 1], [0, 1]], 1.3), depth)
+    frame = load_frame(write_sample(tmp_path / "d", s, [route], depth=depth))[1]
+    assert column_outline(frame, vis)["bbox"][2] > u_far - 0.01        # the column hull spans both
+    trim = object_outline(frame, vis)
+    assert trim["depth_fallback"] is False
+    assert trim["bbox"][2] < u_far - 0.1                                # ... the trimmed one stops short of the block
+
+
 def test_no_depth_png_falls_back_to_the_column_outline(tmp_path):
     frame, vis = _box_frame(tmp_path, with_depth=False)
     assert frame.depth is None and frame.depth_fit is None

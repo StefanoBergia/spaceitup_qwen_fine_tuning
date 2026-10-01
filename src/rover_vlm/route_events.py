@@ -189,9 +189,36 @@ def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
             & (metres >= fwd.min() - DEPTH_BAND_M) & (metres <= fwd.max() + DEPTH_BAND_M))
     if keep.sum() < MIN_MASK_PX:
         return col
+    keep, seeded = _seeded_pieces(frame, keep, vis_xz, top)
+    if not seeded:
+        return col
     ys, xs = np.nonzero(keep)
     pts = np.stack([(xs + 0.5) / W, (ys + 0.5) / H], 1)[:: max(1, len(xs) // 4000)]
     return outline_dict(convex_hull(pts), depth_fallback=False)
+
+
+PIECE_MAX_PX = 128   # the connected-pieces labelling runs on a mask at most this many px on its long side
+
+
+def _seeded_pieces(frame, keep, vis_xz, top):
+    """(keep', True) with `keep` cut to its 8-connected pieces that hold a seed pixel (the cells'
+    projections at heights 0, top/2, top); (keep, False) when no piece holds one. Gate 1: a hull over
+    several things at one depth (two chairs and a doorway) made Cosmos name the wrong object."""
+    H, W = keep.shape
+    st = max(1, -(-max(H, W) // PIECE_MAX_PX))
+    small = keep[::st, ::st]
+    lab, _ = components(small)
+    ids = set()
+    for h in (0.0, top / 2, top):
+        uv, fwd = frame.cam.uv(np.asarray(vis_xz), h)
+        uv = np.nan_to_num(uv[fwd > 1e-6], nan=0.0, posinf=1.0, neginf=0.0)
+        c = np.clip((uv[:, 0] * W).astype(int), 0, W - 1) // st
+        r = np.clip((uv[:, 1] * H).astype(int), 0, H - 1) // st
+        ids.update(int(i) for i in lab[np.minimum(r, lab.shape[0] - 1), np.minimum(c, lab.shape[1] - 1)] if i)
+    if not ids:
+        return keep, False
+    full = np.isin(np.kron(lab, np.ones((st, st), int))[:H, :W], list(ids)) & keep
+    return full, bool(full.any())
 
 
 def candidates(frame, route_xz, outline=None):
