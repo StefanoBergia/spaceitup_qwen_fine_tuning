@@ -270,3 +270,72 @@ def test_entry_prompt_has_the_entry_and_text_but_no_goal():
     q = instruction_endpoints_prompt([0.167, 1.0, 1], [0.5, 0.6, 1], "x")
     assert p.split("Coordinates are")[1].split("The first waypoint")[0] == q.split("Coordinates are")[1].split("The first waypoint")[0].replace(
         "Predict the traversable route between those two points", "Predict the route")
+
+
+import copy  # noqa: E402
+import json as _json  # noqa: E402
+
+from rover_vlm.descriptions import (  # noqa: E402
+    desc_check, finalize_descriptions, prompt_form, shuffled_texts, with_description,
+)
+
+
+def _rec(rid, sample, pair=None):
+    path = [[0.2, 1.0, 1], [0.3, 0.8, 1], [0.5, 0.6, 1]]
+    return {"id": rid, "image": ["x.png"],
+            "conversations": [{"from": "human", "value": "old"}, {"from": "gpt", "value": _json.dumps({"path": path})}],
+            "habitat_meta": {"sample_id": sample, "pair_id": pair, "scene_id": "s", "kind": "instructed"}}
+
+
+def _ev(rid):
+    return {"id": rid, "reason": None, "events": [PASS_L], "stop": NEAR, "goal_xz": [1.0, 2.0],
+            "pose_xz": [0.0, 0.0], "heading_xz": [0.0, 1.0]}
+
+
+OBJS = {"f:b1": {"cells_xz": [[0.1, 1.0], [0.2, 1.0]]}, "f:b5": {"cells_xz": [[1.0, 2.5]]}}
+
+
+def test_prompt_form_is_stable_and_about_seventy_percent():
+    forms = [prompt_form(f"frame{i}") for i in range(2000)]
+    assert forms == [prompt_form(f"frame{i}") for i in range(2000)]
+    assert 0.66 < forms.count("entry") / len(forms) < 0.74
+
+
+def test_with_description_forms_and_check():
+    chk = desc_check(_ev("a"), OBJS)
+    assert chk["events"][0]["obstacles"] == [[[0.1, 1.0], [0.2, 1.0]]] and chk["goal_xz"] == [1.0, 2.0]
+    rec = _rec("a", "f1")
+    e = with_description(rec, "Go left of the table and stop.", "cosmos", "entry", chk)
+    g = with_description(rec, "Go left of the table and stop.", "cosmos", "goal", chk)
+    assert "goal" not in e["conversations"][0]["value"].lower() and "[0.5, 0.6]" in g["conversations"][0]["value"]
+    assert e["habitat_meta"]["goal_in_prompt"] is False and g["habitat_meta"]["goal_in_prompt"] is True
+    assert rec["conversations"][0]["value"] == "old"                      # not mutated
+
+
+def test_finalize_keeps_survivors_and_only_full_pairs():
+    recs = [_rec("p_L", "f1", "p"), _rec("p_R", "f1", "p"), _rec("q_L", "f2", "q"), _rec("q_R", "f2", "q"),
+            _rec("s_L", "f3")]
+    events = {r["id"]: _ev(r["id"]) for r in recs}
+    events["q_R"] = dict(events["q_R"], reason="no_stop_anchor")
+    desc = {r["id"]: {"id": r["id"], "passed": True, "description": "Go left of the table and stop.",
+                      "instruction_source": "cosmos"} for r in recs}
+    out = finalize_descriptions(recs, events, desc, OBJS)
+    assert [r["id"] for r in out["kept"]] == ["p_L", "p_R", "q_L", "s_L"]
+    assert [r["id"] for r in out["pairs"]] == ["p_L", "p_R"]
+    forms = {r["id"]: r["habitat_meta"]["prompt_form"] for r in out["kept"]}
+    assert forms["p_L"] == forms["p_R"]                                   # a pair shares its form
+    assert out["stats"]["dropped_geometry"] == 1 and out["stats"]["pairs_kept"] == 1
+
+
+def test_shuffled_texts_come_from_other_frames():
+    recs = []
+    for i in range(6):
+        r = with_description(_rec(f"r{i}", f"f{i // 2}"), f"text {i}", "cosmos", "entry", desc_check(_ev("x"), OBJS))
+        recs.append(r)
+    out = shuffled_texts(recs)
+    by = {r["id"]: r for r in recs}
+    for r in out:
+        src = next(o for o in recs if o["habitat_meta"]["instruction"] == r["habitat_meta"]["instruction"])
+        assert src["habitat_meta"]["sample_id"] != by[r["id"]]["habitat_meta"]["sample_id"]
+        assert r["habitat_meta"]["instruction_source"] == "shuffled"
+        assert r["habitat_meta"]["desc_check"] == by[r["id"]]["habitat_meta"]["desc_check"]

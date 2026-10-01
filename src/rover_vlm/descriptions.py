@@ -9,14 +9,17 @@ text only) and the finalize helpers that turn labels into training/eval records.
 Pure and CPU-only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
+import copy
 import io
+import random
 import re
 from collections import Counter
 
 from PIL import Image, ImageDraw
 
+from .habitat_data import description_entry_prompt, instruction_endpoints_prompt
 from .instructions import (
-    _DRAWING, _EGOCENTRIC, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _stable_index, choose_style,
+    _DRAWING, _EGOCENTRIC, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index, choose_style,
     head_noun, normalize_name,
 )
 from .traces import SCENE_INTRO, answer_payload, parse_trace
@@ -354,3 +357,77 @@ def name_rows_split(rows):
 def names_missing(row, named, rejected):
     """Route objects with no name row or only an error row (a retryable gap, not a rejection)."""
     return [o for o in route_objects(row) if o not in named and o not in rejected]
+
+
+ENTRY_SHARE = 70   # percent of frames whose records get the entry-only prompt (user, 2026-09-30)
+
+
+def prompt_form(sample_id):
+    """'entry' (no goal in the prompt) or 'goal', fixed per frame so a pair shares it."""
+    return "entry" if _stable_index("form:" + sample_id, 100) < ENTRY_SHARE else "goal"
+
+
+def desc_check(ev, objects):
+    """What eval.description_follow needs, carried in the record (no file access at eval time)."""
+    return {"pose_xz": ev["pose_xz"], "heading_xz": ev["heading_xz"], "goal_xz": ev["goal_xz"],
+            "events": [{"type": e["type"], "side": e["side"],
+                        "obstacles": [objects[o]["cells_xz"] for o in e["objects"]],
+                        "gap_xz": e.get("gap_xz")} for e in ev["events"]]}
+
+
+def with_description(rec, text, source, form, check):
+    new = copy.deepcopy(rec)
+    path = _answer_path(new)
+    new["conversations"][0]["value"] = (description_entry_prompt(path[0], text) if form == "entry"
+                                        else instruction_endpoints_prompt(path[0], path[-1], text))
+    new["habitat_meta"].update({"instruction": text, "instruction_source": source, "prompt_form": form,
+                                "desc_check": check, "goal_in_prompt": form == "goal"})
+    return new
+
+
+def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects):
+    kept, geo, unlabelled, rejected = [], 0, 0, 0
+    for rec in label_recs:
+        ev, row = events_by_id.get(rec["id"]), desc_by_id.get(rec["id"])
+        if not ev or ev.get("reason") is not None:
+            geo += 1
+            continue
+        if row is None:
+            unlabelled += 1
+            continue
+        if not row.get("passed"):
+            rejected += 1
+            continue
+        form = prompt_form(rec["habitat_meta"]["sample_id"])
+        kept.append(with_description(rec, row["description"], row["instruction_source"], form, desc_check(ev, objects)))
+    groups = {}
+    for r in kept:
+        if r["habitat_meta"].get("pair_id"):
+            groups.setdefault(r["habitat_meta"]["pair_id"], []).append(r)
+    pairs = [r for g in groups.values() if len(g) == 2 for r in g]
+    return {"kept": kept, "pairs": pairs,
+            "stats": {"records": len(label_recs), "kept": len(kept), "dropped_geometry": geo,
+                      "unlabelled": unlabelled, "rejected": rejected, "pairs_kept": len(pairs) // 2,
+                      "entry_form": sum(r["habitat_meta"]["prompt_form"] == "entry" for r in kept),
+                      "template": sum(r["habitat_meta"]["instruction_source"] == "template" for r in kept)}}
+
+
+def as_form(rec, form):
+    hm = rec["habitat_meta"]
+    return with_description(rec, hm["instruction"], hm["instruction_source"], form, hm["desc_check"])
+
+
+def shuffled_texts(recs, seed=0):
+    """Entry-form copies whose description comes from a record of another frame (the check
+    and the answer stay the record's own): a text-reading model should get worse here."""
+    order = list(recs)
+    random.Random(seed).shuffle(order)
+    n = len(order)
+    for k in range(1, n):
+        src = [order[(i + k) % n] for i in range(n)]
+        if all(a["habitat_meta"]["sample_id"] != b["habitat_meta"]["sample_id"] for a, b in zip(order, src)):
+            break
+    else:
+        raise ValueError("cannot shuffle: every record shares one frame")
+    return [with_description(a, b["habitat_meta"]["instruction"], "shuffled", "entry", a["habitat_meta"]["desc_check"])
+            for a, b in zip(order, src)]

@@ -37,6 +37,8 @@ frame object for Cosmos to name. CPU, 4 single-threaded workers:
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     uv run scripts/prepare_habitat_instr.py events --limit 200     # smoke run (prints timing)
     uv run scripts/prepare_habitat_instr.py events
+    # after slurm/label_descriptions.sbatch (STAGE=full)
+    uv run scripts/prepare_habitat_instr.py finalize-descriptions
 
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
@@ -50,6 +52,7 @@ from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
 
+from rover_vlm.descriptions import as_form, finalize_descriptions, shuffled_texts
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
@@ -138,6 +141,8 @@ def stage_finalize(args):
 
 
 V2_OUT = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
+V3_OUT = REPO_ROOT / "data" / "prepared_habitat_instr_v3"
+D1_LABELS = REPO_ROOT / "outputs" / "instr_labels_v3"
 WRONG_SIDE_N, HANDWRITTEN_N, V2_SEED = 300, 30, 7
 HANDWRITTEN = REPO_ROOT / "configs" / "instructions_handwritten_v2.json"
 
@@ -334,6 +339,41 @@ def stage_events(args):
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
 
 
+def stage_finalize_descriptions(args):
+    import random
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    meta, splits = {}, {}
+    for name in SPLITS:
+        recs = json.loads((args.events_dir / f"labelset_{name}.json").read_text())
+        events = {r["id"]: r for r in map(json.loads, (args.events_dir / f"events_{name}.jsonl").open())}
+        objects = {o["object_id"]: o for o in map(json.loads, (args.events_dir / f"objects_{name}.jsonl").open())}
+        desc = _label_rows([args.labels / f"desc_{name}_d1.jsonl"])
+        out = finalize_descriptions(recs, events, desc, objects)
+        if out["stats"]["unlabelled"] > 0.01 * max(1, out["stats"]["records"] - out["stats"]["dropped_geometry"]) \
+                and not args.allow_missing:
+            raise SystemExit(f"{name}: {out['stats']['unlabelled']} described routes have no label row (> 1%) — "
+                             "finish slurm/label_descriptions.sbatch or pass --allow-missing")
+        splits[name] = out
+        meta[name] = out["stats"]
+        print(f"{name}: {json.dumps(out['stats'])}", flush=True)
+    assert_scene_disjoint(splits["train"]["kept"], splits["eval"]["kept"])
+    d = args.out_dir
+    train = splits["train"]["kept"]
+    random.Random(V2_SEED).shuffle(train)
+    (d / "train_desc.json").write_text(json.dumps(train, indent=1))
+    ev = splits["eval"]
+    files = {"eval_desc_entry": [as_form(r, "entry") for r in ev["kept"]],
+             "eval_desc_goal": [as_form(r, "goal") for r in ev["kept"]],
+             "eval_desc_pairs": [as_form(r, "entry") for r in ev["pairs"]],
+             "eval_desc_shuffled": shuffled_texts([as_form(r, "entry") for r in ev["kept"]], seed=V2_SEED)}
+    for fname, rs in files.items():
+        (d / f"{fname}.json").write_text(json.dumps(rs, indent=1))
+        meta["eval"][fname] = len(rs)
+    meta["train"]["train_desc"] = len(train)
+    (d / "meta_v3.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
@@ -359,9 +399,15 @@ def main() -> None:
     h = sub.add_parser("events", help="d1: route events + stop phrase per labelset record (CPU)")
     h.add_argument("--out-dir", type=Path, default=V2_OUT)
     h.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
+    k = sub.add_parser("finalize-descriptions", help="d1: train/eval files from labelled descriptions (CPU)")
+    k.add_argument("--events-dir", type=Path, default=V2_OUT)
+    k.add_argument("--labels", type=Path, default=D1_LABELS)
+    k.add_argument("--out-dir", type=Path, default=V3_OUT)
+    k.add_argument("--allow-missing", action="store_true")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events}[args.stage](args)
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events,
+     "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 
 if __name__ == "__main__":
