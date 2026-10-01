@@ -249,7 +249,9 @@ def candidates(frame, route_xz, outline=None):
         if dist[j, k] > PASS_M:
             continue
         ext = xz.max(0) - xz.min(0)
-        along = float(step[dist.min(0) <= PASS_M].sum())
+        alongside = dist.min(0) <= PASS_M
+        along = float(step[alongside].sum())
+        along_end = float(rg["arc"][usable][alongside].max())   # where the route leaves the blob
         wall = bool(np.hypot(*ext) >= WALL_EXTENT_M and along >= ALONG_MIN_M)
         near = dist.min(1) <= (WALL_KEEP_M if wall else KEEP_NEAR_ROUTE_M)
         vis = visible_cells(frame, cells[near], int(b))
@@ -264,7 +266,7 @@ def candidates(frame, route_xz, outline=None):
             "blob": int(b), "pass_m": float(dist[j, k]), "arc_m": float(rg["arc"][i]),
             "side": "left" if on_right else "right",
             "offset_m": float(rg["offset"][i]), "extent_m": float(np.hypot(*ext)),
-            "wall": wall, "along_m": along,
+            "wall": wall, "along_m": along, "along_end_arc_m": along_end,
             "gap": _threaded_gap(xz, dist, usable, rg), "vis_xz": vis, "outline": o, "route_pts": rg["pts"],
             "score": float(np.sqrt(o["area"]) * max(rg["offset"][i], OFFSET_FLOOR_M)),
         })
@@ -447,20 +449,30 @@ def _wall_like(xz):
     return float(np.hypot(*np.ptp(np.asarray(xz), axis=0))) >= WALL_EXTENT_M
 
 
-def _event_anchor(event, cands):
-    """(anchor, arc_m) standing for an event in a "past" stop: the opening of a through event, else
-    its last member (along the route) that is not wall-like; None when every member is wall-like
-    (a wall-like anchor only takes "in front of", Review Focus 3)."""
+def _event_anchor(event, cands, route_len):
+    """(anchor, arc_m) standing for an event in a "past" stop, or None.
+
+    A through event -> its opening. Otherwise the member passed last that can be stopped past:
+    an object from its closest approach (arc_m); a wall-like member (extent >= WALL_EXTENT_M, Review
+    Focus 3) only once the route has left it -- from the last route point within PASS_M of it
+    (along_end_arc_m), and only when more than AFTER_LAST_M of route follows (controller ruling)."""
     if event["type"] == "through":
         blobs = [cands[m]["blob"] for m in event["members"]]
         gap = event["opening"]["gap_xz"]
         return {"blob": blobs[0], "vis_xz": gap, "outline": event["opening"],
                 "key": _gap_key(blobs, gap), "kind": "opening"}, event["arc_m"]
-    ok = [cands[m] for m in event["members"] if cands[m]["extent_m"] < WALL_EXTENT_M]
+    ok = []
+    for m in event["members"]:
+        c = cands[m]
+        if c["extent_m"] < WALL_EXTENT_M:
+            ok.append((c["arc_m"], c))
+        elif route_len - c["along_end_arc_m"] > AFTER_LAST_M:
+            ok.append((c["along_end_arc_m"], c))
     if not ok:
         return None
-    c = max(ok, key=lambda c: c["arc_m"])
-    return {"blob": c["blob"], "vis_xz": c["vis_xz"], "outline": c["outline"]}, c["arc_m"]
+    arc, c = max(ok, key=lambda t: t[0])
+    return {"blob": c["blob"], "vis_xz": c["vis_xz"], "outline": c["outline"],
+            "kind": "wall" if c["wall"] else "object"}, arc
 
 
 def _distance(relation, metres, anchor):
@@ -474,8 +486,9 @@ def stop_phrase(frame, route_xz, events, cands=None):
        (a blob mostly beside the goal is skipped -- "next to" is gone -- and a wall-like blob,
        extent >= WALL_EXTENT_M, only takes "in front of"); the next-nearest is tried in turn;
     2. after_last: at most AFTER_LAST_M of route after the last event;
-    3. distance past the last event's anchor, any remaining length, as a coarse amount (when the
-       last event is all wall-like, the latest earlier event with a non-wall anchor);
+    3. distance past the last event's anchor, any remaining length, as a coarse amount; a wall-like
+       member only counts once the route has left it (see _event_anchor); when the last event has
+       no such anchor, the latest earlier event that has one;
     4. distance before / past the nearest blob on the line of approach (within STOP_FAR_M);
        a wall-like blob only "before" (it is ahead: in front of, at a distance).
     None when nothing fits (the route is dropped). Visibility and outlines (the expensive part)
@@ -500,9 +513,8 @@ def stop_phrase(frame, route_xz, events, cands=None):
             return {"type": "near", "relation": rel, "anchor": x}
     if events and rg["arc"][-1] - events[-1]["end_arc_m"] <= AFTER_LAST_M:
         return {"type": "after_last", "relation": "just after", "anchor": None}
-    # how far past the last thing passed, when nothing visible is near the goal; a wall-like last
-    # event cannot be stopped "past", so the latest event with an anchor that can stands in
-    last = next((a for a in (_event_anchor(e, cands) for e in reversed(events)) if a), None) \
+    # how far past the last thing passed, when nothing visible is near the goal
+    last = next((a for a in (_event_anchor(e, cands, rg["arc"][-1]) for e in reversed(events)) if a), None) \
         if cands is not None else None
     if last is not None:
         return _distance("past", rg["arc"][-1] - last[1], last[0])

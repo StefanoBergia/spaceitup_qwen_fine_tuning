@@ -649,3 +649,51 @@ def test_wall_ahead_of_the_goal_is_in_front_of(tmp_path):
     st = stop_phrase(frame, np.array(route), [])
     assert st["type"] == "near" and st["relation"] == "in front of"
     assert np.hypot(*np.ptp(frame.grid.xz(np.argwhere(frame.lab == st["anchor"]["blob"])), axis=0)) >= WALL_EXTENT_M
+
+
+# --- controller ruling on Task 14 concern 1: a wall anchors "past" only once the route has left it ---
+def _short_wall_state(nz=200):
+    s = np.full((nz, 100), FREE, np.uint8)
+    s[10:50, 68:70] = OCC                                # wall x 3.4..3.5, z 0.5..2.5
+    return s
+
+
+@pytest.mark.parametrize("beyond,amount", [(2.2, "a little"), (4.0, "well")])
+def test_wall_anchors_a_past_stop_once_the_route_has_left_it(tmp_path, beyond, amount):
+    # the route stays within PASS_M of the wall up to z ~2.94, then runs on `beyond` metres
+    route = [(2.5, 0.2), (2.9, 0.8), (2.9, 2.94 + beyond)]
+    d = write_sample(tmp_path / "s00006", _short_wall_state(), [route])
+    _, frame = load_frame(d)
+    cs = candidates(frame, np.array(route))
+    assert [c["wall"] for c in cs] == [True]
+    rg = route_geometry(np.array(route))
+    assert cs[0]["along_end_arc_m"] == pytest.approx(2.86, abs=0.1)
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["wall"]
+    st = stop_phrase(frame, np.array(route), ev, cs)
+    assert st["type"] == "distance" and st["relation"] == "past" and st["amount"] == amount
+    assert st["anchor"]["blob"] == cs[0]["blob"]
+    assert st["distance_m"] == pytest.approx(rg["arc"][-1] - cs[0]["along_end_arc_m"], abs=0.051)
+    out = describe_route(d, 0)
+    assert out["reason"] is None and out["stop"]["object"] == out["events"][0]["objects"][0]
+    assert out["objects"][out["stop"]["object"]]["kind_hint"] == "wall"
+
+
+def test_goal_still_alongside_the_wall_gets_no_wall_past_stop(tmp_path):
+    route = [(2.5, 0.2), (2.9, 0.8), (2.9, 3.6)]         # the wall runs on to z 4.5: still beside the goal
+    _, frame = load_frame(write_sample(tmp_path / "s", _wall_left_state(), [route]))
+    cs = candidates(frame, np.array(route))
+    assert [c["wall"] for c in cs] == [True]
+    assert route_geometry(np.array(route))["arc"][-1] - cs[0]["along_end_arc_m"] <= 1.5
+    st = stop_phrase(frame, np.array(route), build_events(frame, cs), cs)
+    assert st is None or st["anchor"] is None or st["anchor"]["blob"] != cs[0]["blob"], st
+
+
+@pytest.mark.parametrize("goal_z,amount", [(3.3, "just"), (2.5, "a little")])
+def test_line_of_approach_stop_uses_coarse_amounts(tmp_path, goal_z, amount):
+    s = _free()
+    s[90:94, 40:60] = OCC                                # cabinet x 2.0..3.0, z 4.5..4.7 (not wall-like)
+    route = [(2.5, 0.2), (2.5, goal_z)]                  # 1.2 m / 2.0 m short of it, nothing passed
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    st = stop_phrase(frame, np.array(route), [])
+    assert st["type"] == "distance" and st["relation"] == "before" and st["amount"] == amount
