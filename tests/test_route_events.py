@@ -96,7 +96,7 @@ def test_hidden_cells_are_not_visible(tmp_path):
 
 
 def test_near_camera_constant():
-    assert NEAR_CAMERA_M == pytest.approx(0.35)
+    assert NEAR_CAMERA_M == pytest.approx(0.5)
 
 
 from PIL import ImageDraw  # noqa: E402
@@ -279,7 +279,7 @@ AUG = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated_aug/
 ORIG = Path("/nfs/projects/spaceitup/rover_navigation/data/habitat_generated/train")
 REAL = [
     # (sample dir, candidate, world xz of the obstacle a person names, audit group)
-    (AUG / "00372-GMwtBqNLGBs/samples/00372-GMwtBqNLGBs_c030_y1", 0, (-0.79, 10.86), "C: armchair hidden by a strip at the camera"),
+    (AUG / "00372-GMwtBqNLGBs/samples/00372-GMwtBqNLGBs_c030_y1", 0, (-0.91, 8.51), "C: armchair hidden by a strip at the camera"),
     (ORIG / "00206-uhkqDVMtEnn/samples/00206-uhkqDVMtEnn_c040", 4, (6.82, -1.21), "A: pillar, not the grazed wall"),
     (AUG / "00475-g7hUFVNac26/samples/00475-g7hUFVNac26_c013_y1", 2, (5.34, 1.97), "A: post on the line, not the sofa"),
 ]

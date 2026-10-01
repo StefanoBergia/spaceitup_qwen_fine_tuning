@@ -25,9 +25,10 @@ from .landmarks import (
 
 PASS_M = 0.7              # an obstacle this close to the route is something it passes
 START_SKIP_M = 0.3        # ignore what the route passes in its first metres (the rover's own spot)
-# The rover's start pose is collision-free: occupied cells this close to the camera are map
-# artefacts or things below the lens, never occluders or landmarks (00372, 2026-09-30).
-NEAR_CAMERA_M = 0.35
+# The rover's start pose is collision-free for its footprint (objects.json rover.radius_m = 0.5), so
+# occupied cells this close to the camera are map artefacts or things below the lens, never occluders
+# or landmarks. 00372 (2026-09-30): a 2 m wide strip 0.22-0.45 m ahead blocked every ray at 0.35.
+NEAR_CAMERA_M = 0.5
 MIN_VISIBLE_CELLS = 4
 MIN_AREA = 0.01           # outline area as a fraction of the image
 KEEP_NEAR_ROUTE_M = 1.5   # outline only the part of a long blob (a wall) near the route
