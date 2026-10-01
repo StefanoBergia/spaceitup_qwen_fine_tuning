@@ -120,3 +120,40 @@ def test_constant_goal_baseline_uses_the_endpoint_error_population():
              "metrics": None, "habitat_meta": {"desc_check": c}}]
     agg = aggregate_description_metrics(rows)
     assert agg["constant_goal_endpoint_error_median"] == pytest.approx(0.0)
+
+
+# --- final-review fixes (F6) ---------------------------------------------------------------
+from rover_vlm.eval import PASS_TIE_M, STOP_TOL_UV  # noqa: E402
+
+
+def test_stop_in_image_space_when_the_gt_end_is_known():
+    c = check([], goal=(0.0, 4.0))
+    pred = to_image([(0.0, 0.8), (0.0, 5.0)])         # 1 m past goal_xz: the floor check says no
+    end = pred[-1][:2]
+    assert description_follow(pred, c)["stop"] == 0
+    assert description_follow(pred, c, gt_end_uv=end)["stop"] == 1
+    assert description_follow(pred, c, gt_end_uv=[end[0] + 0.8 * STOP_TOL_UV, end[1]])["stop"] == 1
+    assert description_follow(pred, c, gt_end_uv=[end[0] + 1.5 * STOP_TOL_UV, end[1]])["stop"] == 0
+
+
+def test_grazing_pass_counts_regardless_of_sign():
+    c = check([{"type": "pass", "side": "right", "obstacles": POST, "gap_xz": None}])
+    graze = [(0.0, 0.8), (0.05 + 0.6 * PASS_TIE_M, 2.0), (0.0, 4.0)]   # on the left, but grazing
+    clear = [(0.0, 0.8), (0.05 + 2.0 * PASS_TIE_M, 2.0), (0.0, 4.0)]   # clearly on the left
+    assert description_follow(to_image(graze), c)["events"] == [1]
+    assert description_follow(to_image(clear), c)["events"] == [0]
+
+
+def test_aggregate_uses_the_gt_terminus_and_reports_the_gt_ceiling():
+    c_l = check([{"type": "pass", "side": "left", "obstacles": POST, "gap_xz": None}])
+    c_r = check([{"type": "pass", "side": "right", "obstacles": POST, "gap_xz": None}])
+    gt_path = to_image([(0.0, 0.8), (0.8, 2.0), (0.0, 5.0)])         # ends 1 m past goal_xz
+    rows = [{"id": rid, "parsed": {"path": gt_path}, "gt": {"goal": gt_path[-1], "path": gt_path},
+             "metrics": None, "habitat_meta": {"desc_check": c, "pair_id": None}}
+            for rid, c in (("a", c_l), ("b", c_r))]
+    agg = aggregate_description_metrics(rows)
+    assert agg["stop_rate"] == 1.0                     # image-space stop vs the GT terminus
+    assert agg["follow_rate"] == 0.5 and agg["gt_follow_rate"] == 0.5
+    no_gt = [dict(rows[0], gt=None)]
+    agg = aggregate_description_metrics(no_gt)
+    assert agg["stop_rate"] == 0.0 and agg["gt_follow_rate"] is None   # floor fallback

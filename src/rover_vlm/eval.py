@@ -649,7 +649,15 @@ def wrong_side_metrics(records):
 
 # --- route descriptions (prompt d1, 2026-09-30) ---------------------------------------
 FOLLOW_NEAR_M = 2.0    # a prediction farther than this from an obstacle did not "pass" it
-STOP_TOL_M = 0.75      # the predicted end within this of the true goal = stopped right
+STOP_TOL_M = 0.75      # floor fallback only: predicted end within this of goal_xz = stopped right
+# The stop is judged in image space when the record's GT terminus is known: back-projecting
+# to the floor is unstable far away (at 5-8 m a 0.005 error in v is > 0.75 m) and ~6% of
+# round-4 answers end at goal_uv_norm, which is not the projection of goal_xz. 0.03 (normalised
+# image units, ~15 px at 512) is a chosen tolerance, not a fitted one.
+STOP_TOL_UV = 0.03
+# A pass this close is a graze: its side flips between a dense and a sparse path, so it counts
+# as satisfied whichever side it lands on.
+PASS_TIE_M = 0.15
 MAX_FLOOR_M = 15.0
 
 
@@ -687,7 +695,7 @@ def _event_followed(floor, e):
         if not obs or not len(obs[0]):
             return 0
         side, dist = _pass_side(floor, obs[0])
-        return int(side == e.get("side") and dist <= FOLLOW_NEAR_M)
+        return int(dist < PASS_TIE_M or (side == e.get("side") and dist <= FOLLOW_NEAR_M))
     if kind == "between":
         groups = e.get("obstacles") or []
     elif kind == "through":
@@ -701,8 +709,11 @@ def _event_followed(floor, e):
     return int(a[0] != b[0] and max(a[1], b[1]) <= FOLLOW_NEAR_M)
 
 
-def description_follow(pred_path, check):
-    """Did a predicted path do what its description says? Per event and the stop."""
+def description_follow(pred_path, check, gt_end_uv=None):
+    """Did a predicted path do what its description says? Per event and the stop.
+
+    With `gt_end_uv` (the record's GT terminus, image [x, y]) the stop is the path's last
+    waypoint within STOP_TOL_UV of it; without it, the floor check against goal_xz."""
     floor = image_to_floor(pred_path or [], check["pose_xz"], check["heading_xz"])
     n = len(check["events"])
     if len(floor):  # consecutive duplicate waypoints give a zero tangent in _pass_side
@@ -711,21 +722,38 @@ def description_follow(pred_path, check):
     if len(floor) < 2:
         return {"follows": 0, "events": [0] * n, "stop": 0}
     res = [_event_followed(floor, e) for e in check["events"]]
-    stop = int(np.linalg.norm(floor[-1] - np.asarray(check["goal_xz"], float)) <= STOP_TOL_M)
+    if gt_end_uv is not None:
+        end = np.asarray(pred_path[-1][:2], float)
+        stop = int(np.linalg.norm(end - np.asarray(gt_end_uv[:2], float)) <= STOP_TOL_UV)
+    else:
+        stop = int(np.linalg.norm(floor[-1] - np.asarray(check["goal_xz"], float)) <= STOP_TOL_M)
     return {"follows": int(all(res) and stop), "events": res, "stop": stop}
+
+
+def _gt_end_uv(rec):
+    """The record's GT terminus in the image: the answer path's last waypoint, else the goal."""
+    gt = rec.get("gt") or {}
+    if gt.get("path"):
+        return gt["path"][-1][:2]
+    return gt["goal"][:2] if gt.get("goal") else None
 
 
 def aggregate_description_metrics(records):
     """Summary for records carrying habitat_meta.desc_check, else None. Unparseable
-    predictions count as not followed and stay in every denominator."""
+    predictions count as not followed and stay in every denominator. gt_follow_rate runs
+    the same check on each record's GT path: the ceiling a perfect model would reach."""
     rows = [r for r in records if (r.get("habitat_meta") or {}).get("desc_check")]
     if not rows:
         return None
-    follows, stops, by_type, pairs = {}, [], {}, {}
+    follows, stops, by_type, pairs, gt_follows = {}, [], {}, {}, []
     for r in rows:
         chk = r["habitat_meta"]["desc_check"]
         path = (r.get("parsed") or {}).get("path")
-        f = description_follow(path, chk) if path else {"follows": 0, "events": [0] * len(chk["events"]), "stop": 0}
+        end = _gt_end_uv(r)
+        f = (description_follow(path, chk, end) if path
+             else {"follows": 0, "events": [0] * len(chk["events"]), "stop": 0})
+        if (r.get("gt") or {}).get("path"):
+            gt_follows.append(description_follow(r["gt"]["path"], chk, end)["follows"])
         follows[r["id"]] = f["follows"]
         stops.append(f["stop"])
         for e, ok in zip(chk["events"], f["events"]):
@@ -738,6 +766,7 @@ def aggregate_description_metrics(records):
     return {
         "n_records": len(rows),
         "follow_rate": float(np.mean(list(follows.values()))),
+        "gt_follow_rate": float(np.mean(gt_follows)) if gt_follows else None,
         "stop_rate": float(np.mean(stops)),
         "event_rate_by_type": {k: float(np.mean(v)) for k, v in sorted(by_type.items())},
         "n_pairs": len(full),
