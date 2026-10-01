@@ -27,3 +27,9 @@ def test_panel_has_one_tile_per_row(tmp_path):
     one = rdv.panel(p, [_row("s", None, p)], px=200)
     two = rdv.panel(p, [_row("a", "p", p), _row("b", "p", p)], px=200)
     assert two.width == 2 * one.width and one.height == two.height and one.height > 200
+
+
+def test_missing_images_lists_unknown_ids():
+    frames = [[_row("a", "p", "x"), _row("b", "p", "x")], [_row("c", None, "x")]]
+    assert rdv.missing_images(frames, {"a": "x", "c": "y"}) == ["b"]
+    assert rdv.missing_images(frames, {"a": 1, "b": 2, "c": 3}) == []

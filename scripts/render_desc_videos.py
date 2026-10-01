@@ -42,6 +42,11 @@ def pick_frames(rows, n):
     return frames[:n]
 
 
+def missing_images(frames, images):
+    """Ids of picked rows that have no image in the eval data file, in order."""
+    return [r["id"] for f in frames for r in f if r["id"] not in images]
+
+
 def _tile(image_path, row, px, font):
     img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
     d = ImageDraw.Draw(img)
@@ -78,6 +83,10 @@ def main() -> None:
     frames = pick_frames(rows, args.n)
     if not frames:
         raise SystemExit(f"no predictions in {run}")
+    data_file = args.data_dir / f"{args.set}.json"
+    missing = missing_images(frames, images)
+    if missing:
+        raise SystemExit(f"{len(missing)} prediction ids not in {data_file}, e.g. {missing[:3]}")
     width = max(len(f) for f in frames) * 448
     height = 448 + TEXT_H
     out = run / "paths.mp4"
