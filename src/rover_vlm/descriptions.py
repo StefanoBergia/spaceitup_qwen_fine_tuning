@@ -48,11 +48,24 @@ def template_description(events, stop, names):
     return text[0].upper() + text[1:]
 
 
+def _noun_forms(noun):
+    """Singular plus plurals: +s/es, f->ves, fe->ves, consonant+y->ies."""
+    forms = [noun, noun + "s", noun + "es"]
+    if noun.endswith("fe"):
+        forms.append(noun[:-2] + "ves")
+    elif noun.endswith("f"):
+        forms.append(noun[:-1] + "ves")
+    if len(noun) > 1 and noun.endswith("y") and noun[-2] not in "aeiou":
+        forms.append(noun[:-1] + "ies")
+    return forms
+
+
 def _find_name(text, name, start):
     noun = head_noun(name)
     if not noun:
         return None
-    return re.compile(rf"\b{re.escape(noun)}(?:e?s)?\b", re.I).search(text, start)
+    forms = "|".join(re.escape(f) for f in _noun_forms(noun))
+    return re.compile(rf"\b(?:{forms})\b", re.I).search(text, start)
 
 
 def _side_rejects(text, events, spans):

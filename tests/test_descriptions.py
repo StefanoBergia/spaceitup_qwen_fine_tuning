@@ -100,3 +100,14 @@ def test_good_names_pass():
     assert name_rejects("grey sofa", "object", "object") == []
     assert name_rejects("white wall", "wall", "object") == []
     assert name_rejects("arched doorway", "opening", "opening") == []
+
+
+@pytest.mark.parametrize("name,plural", [
+    ("bookshelf", "bookshelves"), ("shelf", "shelves"), ("knife", "knives"),
+    ("pantry", "pantries"), ("table", "tables"), ("box", "boxes"),
+])
+def test_irregular_plurals_match_name(name, plural):
+    names = {"f:x": name, "f:b5": "fridge"}
+    ev = [{"type": "pass", "side": "left", "objects": ["f:x"]}]
+    t = f"Go left of the {plural} and stop in front of the fridge."
+    assert description_rejects(t, ev, NEAR, names) == [], t
