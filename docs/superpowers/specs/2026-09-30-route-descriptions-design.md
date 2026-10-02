@@ -335,3 +335,28 @@ Clarifications (final review, 2026-10-01):
      carry `prompt_version` d2, the constant is shared). Text rules and the template are unchanged.
 - **Declined.** N1+: accepting `opening` for need "object" too (objects typed as openings stay
   mismatches). File names `*_d1.jsonl` and `--mode d1` are kept.
+
+## Addendum A4 (2026-10-02, namer A/B)
+
+- **Audit of gate r2** (job 92136): 84 correct / 11 wrong name / 2 unnatural / 2 unsure / 1 wrong
+  stop of 100 -- below the 90% gate. No side errors. The wrong names mostly name a small detail
+  inside the outline instead of the outlined thing ("metallic door handle", "light switch",
+  "electrical outlet cover", "carved wooden chair leg", "white door panel"); 6/11 are `between`
+  events. Both unnatural labels come from the style "a command that also says briefly why or where
+  it leads" ("... to avoid the obstacle").
+- **Rejected.** A part-word reject list, scored offline: it catches 3/11 wrong names and drops
+  3/84 correct ones.
+- **Decisions** (user chose Gemma 3 12B as the namer, Cosmos3-Nano d2 still composes):
+  1. `NAMER=cosmos|gemma` in `slurm/label_descriptions.sbatch` (default cosmos, unchanged);
+     `gemma` serves `google/gemma-3-12b-it` for the two name passes, stops it, then serves
+     Cosmos3-Nano for the compose passes; outputs carry a `_gemma` tag suffix
+     (`names_gate_gemma_d1.jsonl`, `desc_gate_gemma_d1.jsonl`). Same `--max-tokens` for both.
+  2. Naming prompt gains, after instruction 1: "Name the whole thing the outline covers, not a
+     small part on it (a handle, a switch, a socket, a leg)." Same prompt for both namers.
+  3. `D1_STYLES` = shared `STYLES` minus "a command that also says briefly why or where it
+     leads", plus "a calm, step-by-step instruction" (stable per route id); shared `STYLES` (i4)
+     unchanged.
+  4. `PROMPT_VERSION = "d3"`.
+  5. `audit_instruction_labels.py --mode d1 --ids FILE` re-audits exactly the routes of the
+     previous page (file order, `--n` ignored) and prints how many ids were not passed, so the
+     Gemma-named run compares directly against the 100 routes already marked.

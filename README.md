@@ -1489,6 +1489,7 @@ found 72% true):
 4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
    `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
    → `outputs/instr_d1_audit.html`
+   (`--ids FILE`, one route id per line, audits exactly those passed routes instead of a random sample — re-audit the same routes for an A/B)
 5. Full run (train + eval, resumable; re-submit after a TIMEOUT): `STAGE=full sbatch slurm/label_descriptions.sbatch`
 6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` →
    `data/prepared_habitat_instr_v3/{train_desc,eval_desc_entry,eval_desc_goal,eval_desc_pairs,eval_desc_shuffled}.json`

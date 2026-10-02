@@ -351,3 +351,28 @@ def test_audit_template_text_gets_the_rows_kinds():
     objects = {"f:b1": {"kind_hint": "wall"}, "f:b2": {"kind_hint": "object"}, "f:b9": {"kind_hint": "wall"}}
     assert audit.row_kinds(row, objects) == {"f:b1": "wall", "f:b2": "object"}   # only the row's ids
     assert "past the end of the object 1" in audit.template_text(row, objects)
+
+
+def test_audit_select_d1_rows_by_ids_keeps_file_order_and_counts_missing():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    ok = [{"id": i} for i in ("a", "b", "c", "d")]
+    rows, missing = audit.select_d1_rows(ok, ["c", "a", "zz", "b"], n=1, seed=0)
+    assert [r["id"] for r in rows] == ["c", "a", "b"]        # file order, --n ignored
+    assert missing == 1
+    rows, missing = audit.select_d1_rows(ok, None, n=2, seed=0)   # no ids: the old random sample
+    assert len(rows) == 2 and missing == 0
+
+
+def test_audit_read_ids_ignores_blank_lines_and_whitespace(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    f = tmp_path / "ids.txt"
+    f.write_text("r5\n\n  r7  \n\t\nr9\n")
+    assert audit.read_ids(f) == ["r5", "r7", "r9"]

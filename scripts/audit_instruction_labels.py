@@ -288,6 +288,21 @@ def events_item(rec, row, objects, text=None):
             "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
 
 
+def read_ids(path):
+    """Route ids from a text file, one per line; blank lines and surrounding whitespace ignored."""
+    return [ln.strip() for ln in Path(path).read_text().splitlines() if ln.strip()]
+
+
+def select_d1_rows(ok, ids, n, seed):
+    """The passed d1 rows to audit: exactly `ids` in order (n ignored) if given, else a random n.
+    Returns (rows, number of ids that are not among the passed rows)."""
+    if ids is None:
+        return random.Random(seed).sample(ok, min(n, len(ok))), 0
+    by_id = {r["id"]: r for r in ok}
+    rows = [by_id[i] for i in ids if i in by_id]
+    return rows, len(ids) - len(rows)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=100)
@@ -305,6 +320,8 @@ def main() -> None:
     ap.add_argument("--events", type=Path, default=None, help="events_*.jsonl (--mode events)")
     ap.add_argument("--objects", type=Path, default=None, help="objects_*.jsonl (--mode events)")
     ap.add_argument("--desc", type=Path, default=None, help="desc_*_d1.jsonl (--mode d1)")
+    ap.add_argument("--ids", type=Path, default=None,
+                    help="route ids, one per line (--mode d1): audit exactly these passed routes, in order; ignores --n")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -335,7 +352,9 @@ def main() -> None:
         ev = {r["id"]: r for r in jsonl(args.events)}
         objects = {o["object_id"]: o for o in jsonl(args.objects)}
         ok = [r for r in jsonl(args.desc) if r.get("passed")]
-        rows = random.Random(args.seed).sample(ok, min(args.n, len(ok)))
+        rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
+        if args.ids:
+            print(f"--ids: {len(rows)} shown, {missing} id(s) missing or not passed in {args.desc}")
         items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"]) for r in rows]
         for it, r in zip(items, rows):
             it["source"] = r["instruction_source"]
