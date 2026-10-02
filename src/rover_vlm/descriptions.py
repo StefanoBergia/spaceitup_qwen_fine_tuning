@@ -344,10 +344,11 @@ it would say it. The route, in order:
 {steps}
 Then: {_stop_line(events, stop, names, kinds)}.
 
-Write it as {style}, in {shape}. Keep every step in this order and keep each object's name.
-Copy each step's direction words exactly as written: 'on your left' / 'on your right' after a wall
-stays that way; 'left of' / 'right of' before an object stays that way; a step with 'between' or
-'through' has no left or right, so do not add one. Keep where to stop. You may add small words
+Write it as {style}, in {shape}. Keep every step in this order and keep each object's name. Copy each step's direction words exactly
+as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that
+way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of'
+/ 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add
+one. Keep where to stop. You may add small words
 ("then", "carefully", "keep going"), but add no other objects, sides or directions.
 Write numbers as words. At most 45 words.
 

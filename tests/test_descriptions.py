@@ -695,10 +695,10 @@ def test_compose_prompt_d2_direction_paragraph():
     from rover_vlm.descriptions import PROMPT_VERSION
     p = " ".join(compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence").split())
     assert PROMPT_VERSION == "d2"
-    assert ("Keep every step in this order and keep each object's name. Copy each step's direction words exactly "
-            "as written: 'on your left' / 'on your right' after a wall stays that way; 'left of' / 'right of' "
-            "before an object stays that way; a step with 'between' or 'through' has no left or right, so do "
-            "not add one. Keep where to stop.") in p
+    assert (
+        "Keep every step in this order and keep each object's name. Copy each step's direction words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add one. Keep where to stop."
+    ) in p
+    assert "after a wall stays that way" not in p
     assert "the word left or right that goes with it" not in p
     assert "never say 'your left/right'" not in p
 

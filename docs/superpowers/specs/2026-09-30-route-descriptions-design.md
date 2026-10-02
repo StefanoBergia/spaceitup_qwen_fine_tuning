@@ -324,10 +324,14 @@ Clarifications (final review, 2026-10-01):
      cabinet); "unit", "white unit", "large unit" stay generic.
   3. **C1.** `label_descriptions.py --max-tokens` default 2048 -> 4096 (both stages).
   4. **C2.** Compose prompt d2 (`PROMPT_VERSION = "d2"`): the contradicting sentences are replaced
-     by "Keep every step in this order and keep each object's name. Copy each step's direction words
-     exactly as written: 'on your left' / 'on your right' after a wall stays that way; 'left of' /
-     'right of' before an object stays that way; a step with 'between' or 'through' has no left or
-     right, so do not add one. Keep where to stop." The naming prompt is unchanged (its rows also
+     by "Keep every step in this order and keep each object's name. Copy each step's direction
+     words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on
+     your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left
+     of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or
+     'through' has no left or right, so do not add one. Keep where to stop." (final review I1: the
+     first d2 wording keyed the egocentric form on "after a wall",      but wall-kind events are
+     often furniture -- a counter, a sofa -- so Cosmos again asked whether it      was a wall;
+     34/70 gate-r1 fallbacks came from that group.) The naming prompt is unchanged (its rows also
      carry `prompt_version` d2, the constant is shared). Text rules and the template are unchanged.
 - **Declined.** N1+: accepting `opening` for need "object" too (objects typed as openings stay
   mismatches). File names `*_d1.jsonl` and `--mode d1` are kept.
