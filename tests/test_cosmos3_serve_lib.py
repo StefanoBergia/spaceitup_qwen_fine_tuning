@@ -169,3 +169,49 @@ def test_sbatch_failed_gate_stops_job_and_server(fake):
 def test_sbatch_rejects_unknown_namer(fake):
     r, calls = _run_sbatch(fake, {"NAMER": "bogus"})
     assert r.returncode == 1 and not calls
+
+
+# --- NAMER=mix: Gemma names, Cosmos names the clashes, Cosmos composes ----------------------
+def _kinds(calls):
+    return "".join("S" if c.startswith("SERVE") else "n" if "--stage name" in c else "c" for c in calls)
+
+
+def test_sbatch_mix_gate_order_commands_and_files(fake):
+    r, calls = _run_sbatch(fake, {"NAMER": "mix", "OVERWRITE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert [c for c in calls if c.startswith("SERVE")] == ["SERVE google/gemma-3-12b-it", "SERVE nvidia/Cosmos3-Nano"]
+    # gemma names (2 passes), ONE switch, cosmos names (2 passes), compose (2 passes)
+    assert _kinds(calls) == "Snn" + "Snn" + "cc"
+    assert _outs(calls) == (["names_gate_gemma_d1.jsonl"] * 2 + ["names_gate_d1.jsonl"] * 2
+                            + ["desc_gate_mix_d1.jsonl"] * 2)
+    comp = [c for c in calls if "--stage compose" in c]
+    for c in comp:
+        assert "--names " in c and "names_gate_gemma_d1.jsonl" in c.split("--names ")[1].split()[0]
+        assert c.split("--fallback-names ")[1].split()[0].endswith("names_gate_d1.jsonl")
+    assert "--gate" not in comp[0] and "--gate" in comp[1] and "--gate" in calls[-1]
+    assert sum("--gate" in c for c in calls) == 1
+    assert "--overwrite" in calls[1] and "--overwrite" not in calls[2]      # gemma name pass 1 / 2
+    assert "--overwrite" in [c for c in calls if "names_gate_d1" in c][0]   # cosmos name pass 1 too
+    assert "NAMER=mix STAGE=full" in r.stdout
+
+
+def test_sbatch_mix_full_eval_then_train_per_pass(fake):
+    r, calls = _run_sbatch(fake, {"NAMER": "mix", "STAGE": "full"})
+    assert r.returncode == 0, r.stderr
+    assert _kinds(calls) == "S" + "nnnn" + "S" + "nnnn" + "cccc"
+    outs = _outs(calls)
+    assert outs[:4] == ["names_eval_gemma_d1.jsonl"] * 2 + ["names_train_gemma_d1.jsonl"] * 2
+    assert outs[4:8] == ["names_eval_d1.jsonl"] * 2 + ["names_train_d1.jsonl"] * 2
+    assert outs[8:] == ["desc_eval_mix_d1.jsonl"] * 2 + ["desc_train_mix_d1.jsonl"] * 2
+    assert not any("--overwrite" in c for c in calls)
+
+
+def test_sbatch_mix_failed_gate_propagates(fake):
+    r, calls = _run_sbatch(fake, {"NAMER": "mix", "FAIL_GATE": "1"})
+    assert r.returncode == 2 and "gate labelled" not in r.stdout
+
+
+@pytest.mark.parametrize("namer", ["cosmos", "gemma"])
+def test_sbatch_cosmos_and_gemma_compose_have_no_fallback(fake, namer):
+    r, calls = _run_sbatch(fake, {"NAMER": namer})
+    assert r.returncode == 0 and not any("--fallback-names" in c for c in calls)

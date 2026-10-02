@@ -926,3 +926,13 @@ def test_touching_blob_between_two_clear_neighbours_does_not_stop_them_merging(t
     assert sum(c["touch"] for c in cs) == 1 and len(cs) == 3
     ev = build_events(frame, cs)
     assert [e["type"] for e in ev] == ["pass"] and len(ev[0]["members"]) == 2
+
+
+# --- finalize-descriptions --desc-suffix (A5): _mix reads desc_{split}_mix_d1.jsonl ----------
+@pytest.mark.parametrize("argv,stem", [([], "desc_{}_d1.jsonl"), (["--desc-suffix", "_mix"], "desc_{}_mix_d1.jsonl")])
+def test_finalize_descriptions_desc_suffix(monkeypatch, tmp_path, argv, stem):
+    seen = {}
+    monkeypatch.setattr(prepare_instr, "stage_finalize_descriptions", lambda a: seen.update(vars(a)))
+    monkeypatch.setattr("sys.argv", ["prep", "finalize-descriptions", *argv])
+    prepare_instr.main()
+    assert prepare_instr.desc_path(seen["labels"], "eval", seen["desc_suffix"]).name == stem.format("eval")

@@ -1486,12 +1486,19 @@ found 72% true):
    `OVERWRITE=1` is for gate re-runs only, never on a full run). Outputs carry a `_gemma` suffix (`names_gate_gemma_d1.jsonl`,
    `desc_gate_gemma_d1.jsonl`), so the Cosmos files are never touched; audit them by passing
    `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl`.
+   **`NAMER=mix`** (Addendum A5, the full-run setup): Gemma names every split
+   (`names_<tag>_gemma_d1.jsonl`), the job switches to Cosmos once, Cosmos names the same splits
+   (`names_<tag>_d1.jsonl`), then composes with the Gemma names and falls back to the Cosmos names
+   for routes where Gemma named two different objects the same (`name:clash`) →
+   `desc_<tag>_mix_d1.jsonl`. Full run:
+   `NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch` (re-submit the same line after a
+   TIMEOUT; never `OVERWRITE=1` on a full run). Finalize it with `--desc-suffix _mix` (step 6).
 4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
    `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
    → `outputs/instr_d1_audit.html` (Gemma run: `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl --out outputs/instr_d1_audit_gemma.html`; the page title carries the desc file stem)
    (`--ids FILE`, one route id per line, audits exactly those passed routes instead of a random sample — re-audit the same routes for an A/B)
 5. Full run (train + eval, resumable; re-submit after a TIMEOUT): `STAGE=full sbatch slurm/label_descriptions.sbatch`
-6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` →
+6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` (NAMER=mix: add `--desc-suffix _mix`) →
    `data/prepared_habitat_instr_v3/{train_desc,eval_desc_entry,eval_desc_goal,eval_desc_pairs,eval_desc_shuffled}.json`
    (70/30 entry/goal forms, both routes of a pair share a form, scene-disjoint re-asserted)
 7. Train: `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v3/train_desc.json outputs/runs_desc/d1 ...`

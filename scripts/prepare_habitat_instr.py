@@ -339,6 +339,11 @@ def stage_events(args):
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
 
 
+def desc_path(labels: Path, split: str, suffix: str = "") -> Path:
+    """Composed-description file of one split: desc_<split><suffix>_d1.jsonl (suffix "_mix" = NAMER=mix)."""
+    return labels / f"desc_{split}{suffix}_d1.jsonl"
+
+
 def stage_finalize_descriptions(args):
     import random
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -347,7 +352,7 @@ def stage_finalize_descriptions(args):
         recs = json.loads((args.events_dir / f"labelset_{name}.json").read_text())
         events = {r["id"]: r for r in map(json.loads, (args.events_dir / f"events_{name}.jsonl").open())}
         objects = {o["object_id"]: o for o in map(json.loads, (args.events_dir / f"objects_{name}.jsonl").open())}
-        desc = _label_rows([args.labels / f"desc_{name}_d1.jsonl"])
+        desc = _label_rows([desc_path(args.labels, name, args.desc_suffix)])
         out = finalize_descriptions(recs, events, desc, objects)
         if out["stats"]["unlabelled"] > 0.01 * max(1, out["stats"]["records"] - out["stats"]["dropped_geometry"]) \
                 and not args.allow_missing:
@@ -403,6 +408,8 @@ def main() -> None:
     k.add_argument("--events-dir", type=Path, default=V2_OUT)
     k.add_argument("--labels", type=Path, default=D1_LABELS)
     k.add_argument("--out-dir", type=Path, default=V3_OUT)
+    k.add_argument("--desc-suffix", default="",
+                   help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,

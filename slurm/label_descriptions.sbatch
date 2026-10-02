@@ -22,8 +22,15 @@
 # so the Cosmos files are never touched. Combinable with STAGE=full (and OVERWRITE=1 for gate re-runs only):
 #     NAMER=gemma sbatch slurm/label_descriptions.sbatch
 #     NAMER=gemma STAGE=full sbatch slurm/label_descriptions.sbatch   # re-submit the same line after a TIMEOUT; never OVERWRITE=1 on a full run
+#
+# NAMER=mix (Addendum A5): Gemma names every split -> names_<tag>_gemma_d1.jsonl; ONE switch to
+# Cosmos; Cosmos names the same splits -> names_<tag>_d1.jsonl; Cosmos composes with the Gemma
+# names, falling back to the Cosmos names where Gemma's are unusable (name clash) ->
+# desc_<tag>_mix_d1.jsonl:
+#     NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch   # re-submit the same line after a TIMEOUT; never OVERWRITE=1 on a full run
 # Afterwards, on the login node:
-#     uv run scripts/prepare_habitat_instr.py finalize-descriptions
+#     uv run scripts/prepare_habitat_instr.py finalize-descriptions            # cosmos / gemma
+#     uv run scripts/prepare_habitat_instr.py finalize-descriptions --desc-suffix _mix
 #SBATCH --job-name=cosmos3-label-desc
 #SBATCH --partition=A100
 #SBATCH --gres=gpu:3g.40gb:1
@@ -56,8 +63,11 @@ GEMMA_MODEL="${GEMMA_MODEL:-google/gemma-3-12b-it}"
 case "$NAMER" in
     cosmos) SFX="" ;;
     gemma) SFX="_gemma" ;;   # Gemma outputs never overwrite the Cosmos files
-    *) echo "NAMER must be cosmos or gemma, got '$NAMER'"; exit 1 ;;
+    mix) SFX="_mix" ;;       # desc files only; the names-file suffix is set per phase below
+    *) echo "NAMER must be cosmos, gemma or mix, got '$NAMER'"; exit 1 ;;
 esac
+NAME_SFX="$SFX"            # suffix of the names file written by name_stage / read by compose
+FALLBACK=()                # mix: extra compose args naming the Cosmos fallback names file
 echo "NAMER=$NAMER file suffix='${SFX}' STAGE=$STAGE"
 
 serve() {  # serve <model>: stop whatever runs, start this model, wait until healthy (sets BASE)
@@ -88,17 +98,17 @@ name_stage() {  # name_stage <split> <tag> [--limit N]
     local s=$1 tag=$2; shift 2
     local first gate limit; parse_opts "$@"
     local name_args=(--stage name --events "$D/events_$s.jsonl" --objects "$D/objects_$s.jsonl"
-                     --out "$OUT/names_${tag}${SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
-    echo; echo "=============== name: $tag$SFX (pass 1) ==============="
+                     --out "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== name: $tag$NAME_SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" "$first" "${limit[@]}"
-    echo; echo "=============== name: $tag$SFX (pass 2, retries errors; summary is report-only) ==============="
+    echo; echo "=============== name: $tag$NAME_SFX (pass 2, retries errors; summary is report-only) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" --resume "${limit[@]}"
 }
 
 compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
     local s=$1 tag=$2; shift 2
     local first gate limit; parse_opts "$@"
-    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}${SFX}_d1.jsonl"
+    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" "${FALLBACK[@]}"
                      --out "$OUT/desc_${tag}${SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== compose: $tag$SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${comp_args[@]}" "$first" "${limit[@]}"
@@ -108,36 +118,59 @@ compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
 
 # Order: NAMER=cosmos -> one Cosmos server, per split
 # name+compose (today's order). NAMER=gemma -> Gemma names every split, then one switch to
-# Cosmos which composes every split. A failed compose gate exits 2 under set -e.
-if [ "$NAMER" = "gemma" ]; then
-    serve "$GEMMA_MODEL"
-else
+# Cosmos which composes every split. NAMER=mix -> Gemma names every split, ONE switch to Cosmos,
+# which names the same splits (the fallback names) and then composes them with both files.
+# A failed compose gate exits 2 under set -e.
+mix_cosmos_phase() {  # mix_cosmos_phase <split> <tag> [opts]: Cosmos names (fallback file) for one split
+    NAME_SFX=""
+    name_stage "$@"
+}
+mix_compose() {  # mix_compose <split> <tag> [opts]: compose with Gemma names + Cosmos fallback names
+    local tag=$2
+    NAME_SFX="_gemma"
+    FALLBACK=(--fallback-names "$OUT/names_${tag}_d1.jsonl")
+    compose_stage "$@"
+}
+
+if [ "$NAMER" = "cosmos" ]; then
     serve "$COSMOS_MODEL"
+else
+    serve "$GEMMA_MODEL"
 fi
+[ "$NAMER" = "mix" ] && NAME_SFX="_gemma"
 
 if [ "$STAGE" = "gate" ]; then
-    if [ "$NAMER" = "gemma" ]; then
-        name_stage eval gate --limit 300
-        serve "$COSMOS_MODEL"
-        compose_stage eval gate --limit 300 --gate
-    else
-        name_stage eval gate --limit 300
-        compose_stage eval gate --limit 300 --gate
-    fi
-    echo "gate labelled — audit it, then: $([ "$NAMER" = gemma ] && echo "NAMER=gemma ")STAGE=full sbatch slurm/label_descriptions.sbatch"
+    case "$NAMER" in
+        gemma) name_stage eval gate --limit 300
+               serve "$COSMOS_MODEL"
+               compose_stage eval gate --limit 300 --gate ;;
+        mix)   name_stage eval gate --limit 300
+               serve "$COSMOS_MODEL"
+               mix_cosmos_phase eval gate --limit 300
+               mix_compose eval gate --limit 300 --gate ;;
+        *)     name_stage eval gate --limit 300
+               compose_stage eval gate --limit 300 --gate ;;
+    esac
+    echo "gate labelled — audit it, then: $([ "$NAMER" != cosmos ] && echo "NAMER=$NAMER ")STAGE=full sbatch slurm/label_descriptions.sbatch"
     exit 0
 fi
-if [ "$NAMER" = "gemma" ]; then
-    name_stage eval eval
-    name_stage train train
-    serve "$COSMOS_MODEL"
-    compose_stage eval eval
-    compose_stage train train
-else
-    name_stage eval eval
-    compose_stage eval eval
-    name_stage train train
-    compose_stage train train
-fi
+case "$NAMER" in
+    gemma) name_stage eval eval
+           name_stage train train
+           serve "$COSMOS_MODEL"
+           compose_stage eval eval
+           compose_stage train train ;;
+    mix)   name_stage eval eval
+           name_stage train train
+           serve "$COSMOS_MODEL"
+           mix_cosmos_phase eval eval
+           mix_cosmos_phase train train
+           mix_compose eval eval
+           mix_compose train train ;;
+    *)     name_stage eval eval
+           compose_stage eval eval
+           name_stage train train
+           compose_stage train train ;;
+esac
 echo; echo "=============== done ==============="
 wc -l "$OUT"/*_d1.jsonl

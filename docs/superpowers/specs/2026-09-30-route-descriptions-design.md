@@ -362,3 +362,31 @@ Clarifications (final review, 2026-10-01):
      Gemma-named run compares directly against the 100 routes already marked.
   6. The naming image is letterboxed to a square (black bands above and below the two panels) so
      Gemma's 896x896 resize keeps each panel's aspect (final review I1).
+
+## Addendum A5 (2026-10-02, mixed namer)
+
+- **Evidence** (same-route re-audit of 99 routes): Gemma names 84 ok vs Cosmos names 83 ok; the
+  errors are complementary (only 2 routes wrong under both). Gemma's characteristic new error is
+  two different objects of one route getting the same name ("go between the wooden bench and the
+  wooden bench", "keep the wooden dining table on your left, then ... on your right"): 30/296
+  passed Gemma routes vs 6/282 Cosmos. Offline estimate on the audited routes: Gemma names, Cosmos
+  names on same-name routes (when distinct), else drop -> 86/97 ok (88.7%), 8 fallbacks, 2 drops.
+  The user chose this setup; Cosmos3-Nano keeps composing.
+- **Clash rule.** `name_clash(row, names)` (descriptions.py): a route clashes when two DIFFERENT
+  object ids among its event members + stop object have the same `head_noun` under the names used.
+  Unnamed objects are not a clash (that stays `unnamed_object`). `label_route(..., fallback_names)`:
+  all objects named in `names` and no clash -> `names` (`"namer": "primary"`); else if
+  `fallback_names` names all of them with no clash -> those (`"namer": "fallback"`); else
+  `unnamed_object` if some object is unnamed in both, `name:clash` if names exist but clash
+  (not passed). A Cosmos-only run now also rejects its clashing routes as `name:clash`.
+  `--stage compose --fallback-names FILE`; an object named in either file is not a retryable gap.
+  `summarize_d1` reports the `namer` counts of passed rows.
+- **`NAMER=mix`** in `slurm/label_descriptions.sbatch`: Gemma name passes ->
+  `names_<tag>_gemma_d1.jsonl`; stop Gemma; serve Cosmos (one switch); Cosmos name passes ->
+  `names_<tag>_d1.jsonl`; Cosmos compose with `--names names_<tag>_gemma_d1.jsonl
+  --fallback-names names_<tag>_d1.jsonl` -> `desc_<tag>_mix_d1.jsonl`. Gate: eval only (gated on
+  compose pass 2); full: eval then train for each phase. `NAMER=cosmos|gemma` are unchanged.
+- **Full run:** `NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch` (re-submit the same
+  line after a TIMEOUT; never `OVERWRITE=1` on a full run).
+- **Finalize:** `uv run scripts/prepare_habitat_instr.py finalize-descriptions --desc-suffix _mix`
+  (default suffix "" keeps reading `desc_<split>_d1.jsonl`).
