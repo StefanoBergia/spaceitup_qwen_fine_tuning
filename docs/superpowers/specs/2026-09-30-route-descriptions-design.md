@@ -276,23 +276,20 @@ Clarifications (final review, 2026-10-01):
 ## Addendum A2 (2026-10-02, Gate 1 r2)
 
 - **Rule.** A blob whose closest distance to the usable route (arc > `START_SKIP_M`) is below
-  `TOUCH_M = 0.2` m is not an event candidate. The route runs *through* it, so the left/right
-  side at the single closest-approach point (which lies on the obstacle) is undefined.
+  `TOUCH_M = 0.2` m is a "touching" blob: `candidates()` marks it and `build_events` lets it join only
+  a `through` event (a doorway jamb), never a pass / wall / between. The route runs *through* it,
+  so the left/right side at the single closest-approach point (which lies on the obstacle) is
+  undefined. Touching singles are dropped before the left-to-right merge, so their clear
+  neighbours merge as before.
 - **Evidence.** Gate 1 r2 (89/100): 5 of the 11 flagged routes (4 "wrong relative position", 1
   "wrong object") have such a blob (00660: the rack is on the rover's right at 36 route points,
   on its left at 6; the closest point was one of the 6). Over 800 random train routes 8.1% have
   one, 64/67 of those events are walls, and the distance is bimodal: 65 events < 0.05 m, none in
   0.05-0.2 m, the rest >= 0.2 m (the planner keeps ~0.45-0.5 m clearance elsewhere).
 - **Doorway exception.** A blob the route threads through a gap (`_threaded_gap` not None and
-  extent >= `WALL_EXTENT_M`, i.e. what `build_events` turns into a `through` event) stays a
-  candidate; doorway behaviour is unchanged even when a jamb is within `TOUCH_M`.
-- **Zero-event routes must be straight.** A route with no events is phrased "Go straight ahead,
-  and stop ...". Of the 114 zero-event train routes (Addendum A run) the max offset from the
-  entry->goal line has median 0.71 m (77 > 0.5 m, 36 > 1 m), so the sentence is false for most,
-  and the touch rule creates more (00423, 00599 became "go straight ahead" while bending round
-  a door / left-then-right). Decision 2026-10-02: a zero-event route whose max offset exceeds
-  `STRAIGHT_MAX_M = 0.3` m is dropped, reason `no_events_bent`; straighter ones are unchanged,
-  and routes with >= 1 event are unaffected whatever their offset.
+  extent >= `WALL_EXTENT_M`) is never touching. A doorway of two separate wall halves whose jamb is
+  within `TOUCH_M` of the route still becomes a `through` (a touching blob may pair with its
+  neighbour into a through, ignoring the side test); doorway behaviour is unchanged.
 - **Schema.** `events_meta.json` carries `"schema": "d1-addendumA2"`; the labeller and the
   events/d1 audit refuse events files built before this rule.
 - **Not changed.** Depth-fallback outlines stay (fix B, dropping them, was declined); stop rules,

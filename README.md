@@ -1463,7 +1463,7 @@ found 72% true):
    (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`, `no_events_bent`). `events_meta.json` carries
    `"schema": "d1-addendumA2"`; `label_descriptions.py` and the events/d1 audit refuse events files
    without it (rerun this step). A2 rule: a blob the route runs through (closest distance < 0.2 m,
-   `TOUCH_M`) is not an event candidate, unless it is a doorway the route threads. A route with no events must be straight (max offset from its
+   `TOUCH_M`) can only be part of a `through` (doorway jamb), never a pass / wall / between. A route with no events must be straight (max offset from its
    entry->goal line <= 0.3 m, `STRAIGHT_MAX_M`) or it is dropped as `no_events_bent`.
 2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
    `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`

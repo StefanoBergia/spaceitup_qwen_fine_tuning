@@ -9,7 +9,7 @@ opposite passes into between), a stop phrase says where the route ends (coarse a
 a little / well), and each outline is trimmed with the frame's depth so it does not swallow what stands behind. Cosmos later only
 names the objects and phrases the sentence (rover_vlm.descriptions).
 
-A blob the route runs through (closest distance < TOUCH_M) has no defined side, so it is not a candidate unless it is a doorway the route threads (Addendum A2).
+A blob the route runs through (closest distance < TOUCH_M) has no defined side: candidates() marks it "touch" and build_events lets it join only a through event (a doorway jamb), never a pass / wall / between (Addendum A2).
 
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
@@ -259,9 +259,9 @@ def candidates(frame, route_xz, outline=None):
         if dist[j, k] > PASS_M:
             continue
         gap = _threaded_gap(xz, dist, usable, rg)
-        if dist[j, k] < TOUCH_M and not (gap is not None and float(np.hypot(*np.ptp(xz, axis=0))) >= WALL_EXTENT_M):
-            continue   # the route runs through this blob: no side (Addendum A2); a threaded doorway stays
         ext = xz.max(0) - xz.min(0)
+        is_doorway = gap is not None and float(np.hypot(*ext)) >= WALL_EXTENT_M
+        touch = bool(dist[j, k] < TOUCH_M and not is_doorway)   # the route runs through it: no side (Addendum A2)
         alongside = dist.min(0) <= PASS_M
         along = float(step[alongside].sum())
         along_end = float(rg["arc"][usable][alongside].max())   # where the route leaves the blob
@@ -279,7 +279,7 @@ def candidates(frame, route_xz, outline=None):
             "blob": int(b), "pass_m": float(dist[j, k]), "arc_m": float(rg["arc"][i]),
             "side": "left" if on_right else "right",
             "offset_m": float(rg["offset"][i]), "extent_m": float(np.hypot(*ext)),
-            "wall": wall, "along_m": along, "along_end_arc_m": along_end,
+            "wall": wall, "touch": touch, "along_m": along, "along_end_arc_m": along_end,
             "gap": gap, "vis_xz": vis, "outline": o, "route_pts": rg["pts"],
             "score": float(np.sqrt(o["area"]) * max(rg["offset"][i], OFFSET_FLOOR_M)),
         })
@@ -391,14 +391,15 @@ def _merge(frame, a, b, cands):
     members = a["members"] + b["members"]
     if len({cands[m]["blob"] for m in members}) < len(members):
         return None
-    if _obstacle_side(a) != _obstacle_side(b):
+    touching = any(cands[m]["touch"] for m in members)   # a touching blob's side is undefined: only a through can use it
+    if touching or _obstacle_side(a) != _obstacle_side(b):
         ca, cb = cands[a["members"][0]], cands[b["members"][0]]
         if (ca["extent_m"] >= WALL_EXTENT_M and cb["extent_m"] >= WALL_EXTENT_M
                 and abs(cb["arc_m"] - ca["arc_m"]) <= PAIR_ARC_M):
             pq = _crossing_pair(ca["vis_xz"], cb["vis_xz"], ca["route_pts"])
             if pq is not None:
                 return _event("through", None, members, cands, opening=opening_outline(frame, *pq))
-        return _event("between", None, members, cands)
+        return None if touching else _event("between", None, members, cands)
     if a["type"] == b["type"] == "pass":
         return _event("pass", a["side"], members, cands)
     return None
@@ -418,10 +419,27 @@ def build_events(frame, cands):
             single.append(_event("wall", OTHER_SIDE[a["side"]], [k], cands))
         else:
             single.append(_event("pass", a["side"], [k], cands))
-    events, i = [], 0
+    touch = [cands[e["members"][0]]["touch"] for e in single]
+    # A touching blob (the route runs through it, Addendum A2) has no side: it may only be one half of a
+    # through (a doorway jamb). Pair those first; every other touching single is dropped from the sequence,
+    # so its clear neighbours still merge exactly as they did before the rule.
+    seq, i = [], 0
     while i < len(single):
-        m = _merge(frame, single[i], single[i + 1], cands) if i + 1 < len(single) else None
-        events.append(m or single[i])
+        m = None
+        if i + 1 < len(single) and (touch[i] or touch[i + 1]):
+            m = _merge(frame, single[i], single[i + 1], cands)
+            m = m if m and m["type"] == "through" else None
+        if m:
+            seq.append(m)
+            i += 2
+        else:
+            if not touch[i]:
+                seq.append(single[i])
+            i += 1
+    events, i = [], 0
+    while i < len(seq):
+        m = _merge(frame, seq[i], seq[i + 1], cands) if i + 1 < len(seq) else None
+        events.append(m or seq[i])
         i += 2 if m else 1
     top = sorted(events, key=lambda e: -e["score"])[:MAX_EVENTS]
     return sorted(top, key=lambda e: e["arc_m"])

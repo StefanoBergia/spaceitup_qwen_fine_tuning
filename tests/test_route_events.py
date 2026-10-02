@@ -822,7 +822,7 @@ def test_long_wall_the_route_clips_the_end_of_is_not_a_candidate(tmp_path):
     route = [(2.5, 0.2), (2.5, 2.05), (2.5, 3.6)]
     _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
     cs = candidates(frame, np.array(route))
-    assert cs == []
+    assert [c["touch"] for c in cs] == [True]
     assert build_events(frame, cs) == []
 
 
@@ -831,7 +831,9 @@ def test_small_object_the_route_runs_over_is_not_a_candidate(tmp_path):
     s[40:46, 48:54] = OCC            # box x 2.4..2.7, z 2.0..2.3, on the route
     route = [(2.5, 0.2), (2.5, 3.6)]
     _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
-    assert candidates(frame, np.array(route)) == []
+    cs = candidates(frame, np.array(route))
+    assert [c["touch"] for c in cs] == [True]
+    assert build_events(frame, cs) == []
 
 
 def test_obstacle_at_0_3_m_is_still_a_candidate(tmp_path):
@@ -840,7 +842,8 @@ def test_obstacle_at_0_3_m_is_still_a_candidate(tmp_path):
     route = [(2.5, 0.2), (2.5, 3.6)]
     _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
     cs = candidates(frame, np.array(route))
-    assert len(cs) == 1 and 0.2 <= cs[0]["pass_m"] <= 0.4
+    assert len(cs) == 1 and 0.2 <= cs[0]["pass_m"] <= 0.4 and not cs[0]["touch"]
+    assert [e["type"] for e in build_events(frame, cs)] == ["pass"]
 
 
 def test_doorway_with_jambs_closer_than_touch_m_is_still_through(tmp_path):
@@ -883,3 +886,43 @@ def test_bent_route_with_an_event_is_described(tmp_path):
     out = describe_route(write_sample(tmp_path / "s", _stop_state(), [STOP_ROUTE]), 0)
     assert out["reason"] is None and len(out["events"]) >= 1
     assert route_geometry(STOP_ROUTE)["offset"].max() > STRAIGHT_MAX_M
+
+
+def _halves_state(left_end_col, right_start_col):
+    s = _free()
+    s[40:42, 2:left_end_col] = OCC           # two unjoined wall halves, opening between the columns
+    s[40:42, right_start_col:98] = OCC
+    return s
+
+
+def test_two_wall_halves_with_a_jamb_closer_than_touch_m_are_still_through(tmp_path):
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    s = _halves_state(47, 60)                # jamb cell centre x 2.325 (0.175 m off the route), other 3.025
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route], pose=(2.5, 0.8)))
+    cs = candidates(frame, np.array(route))
+    assert any(c["touch"] for c in cs)
+    assert [e["type"] for e in build_events(frame, cs)] == ["through"]
+
+
+def test_a_touching_blob_is_never_in_a_non_through_event(tmp_path):
+    s = _free()
+    s[40:42, 48:78] = OCC                    # wall the route clips (touching)
+    s[10:16, 56:62] = OCC                    # a box ahead-left, clear of the route (z 0.5..0.8)
+    route = [(2.5, 0.2), (2.5, 2.05), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    for e in build_events(frame, cs):
+        assert e["type"] == "through" or not any(cs[m]["touch"] for m in e["members"])
+
+
+def test_touching_blob_between_two_clear_neighbours_does_not_stop_them_merging(tmp_path):
+    s = _free()
+    s[10:16, 56:62] = OCC                    # box A on the left, z 0.5..0.8
+    s[36:42, 48:54] = OCC                    # box on the route (touching), z 1.8..2.1
+    s[60:66, 56:62] = OCC                    # box C on the left, z 3.0..3.3
+    route = [(2.5, 0.2), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    assert sum(c["touch"] for c in cs) == 1 and len(cs) == 3
+    ev = build_events(frame, cs)
+    assert [e["type"] for e in ev] == ["pass"] and len(ev[0]["members"]) == 2
