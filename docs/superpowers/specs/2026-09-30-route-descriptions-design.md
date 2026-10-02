@@ -272,3 +272,21 @@ Clarifications (final review, 2026-10-01):
   height min(top, 0.25 m) catches objects lower than top/2.
 - `events_meta.json` carries `"schema": "d1-addendumA"`; the labeller and the events/d1 audit
   refuse events files without it.
+
+## Addendum A2 (2026-10-02, Gate 1 r2)
+
+- **Rule.** A blob whose closest distance to the usable route (arc > `START_SKIP_M`) is below
+  `TOUCH_M = 0.2` m is not an event candidate. The route runs *through* it, so the left/right
+  side at the single closest-approach point (which lies on the obstacle) is undefined.
+- **Evidence.** Gate 1 r2 (89/100): 5 of the 11 flagged routes (4 "wrong relative position", 1
+  "wrong object") have such a blob (00660: the rack is on the rover's right at 36 route points,
+  on its left at 6; the closest point was one of the 6). Over 800 random train routes 8.1% have
+  one, 64/67 of those events are walls, and the distance is bimodal: 65 events < 0.05 m, none in
+  0.05-0.2 m, the rest >= 0.2 m (the planner keeps ~0.45-0.5 m clearance elsewhere).
+- **Doorway exception.** A blob the route threads through a gap (`_threaded_gap` not None and
+  extent >= `WALL_EXTENT_M`, i.e. what `build_events` turns into a `through` event) stays a
+  candidate; doorway behaviour is unchanged even when a jamb is within `TOUCH_M`.
+- **Schema.** `events_meta.json` carries `"schema": "d1-addendumA2"`; the labeller and the
+  events/d1 audit refuse events files built before this rule.
+- **Not changed.** Depth-fallback outlines stay (fix B, dropping them, was declined); stop rules,
+  merging and scores are untouched.

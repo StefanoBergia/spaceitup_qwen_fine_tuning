@@ -9,6 +9,8 @@ opposite passes into between), a stop phrase says where the route ends (coarse a
 a little / well), and each outline is trimmed with the frame's depth so it does not swallow what stands behind. Cosmos later only
 names the objects and phrases the sentence (rover_vlm.descriptions).
 
+A blob the route runs through (closest distance < TOUCH_M) has no defined side, so it is not a candidate unless it is a doorway the route threads (Addendum A2).
+
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
@@ -25,6 +27,10 @@ from .landmarks import (
 )
 
 PASS_M = 0.7              # an obstacle this close to the route is something it passes
+# Gate 1 r2 (2026-10-02): a blob the route runs *through* (closest distance ~0.01 m, vs the planner's
+# ~0.45-0.5 m clearance everywhere else) has no defined side at the closest point -- left/right is a
+# coin flip (8% of routes, 64/67 of them walls; bimodal: <0.05 m or >=0.2 m). Not a candidate.
+TOUCH_M = 0.2
 START_SKIP_M = 0.3        # ignore what the route passes in its first metres (the rover's own spot)
 # The rover's start pose is collision-free for its footprint (objects.json rover.radius_m = 0.5), so
 # occupied cells this close to the camera are map artefacts or things below the lens, never occluders
@@ -252,6 +258,9 @@ def candidates(frame, route_xz, outline=None):
         j, k = np.unravel_index(dist.argmin(), dist.shape)
         if dist[j, k] > PASS_M:
             continue
+        gap = _threaded_gap(xz, dist, usable, rg)
+        if dist[j, k] < TOUCH_M and not (gap is not None and float(np.hypot(*np.ptp(xz, axis=0))) >= WALL_EXTENT_M):
+            continue   # the route runs through this blob: no side (Addendum A2); a threaded doorway stays
         ext = xz.max(0) - xz.min(0)
         alongside = dist.min(0) <= PASS_M
         along = float(step[alongside].sum())
@@ -271,7 +280,7 @@ def candidates(frame, route_xz, outline=None):
             "side": "left" if on_right else "right",
             "offset_m": float(rg["offset"][i]), "extent_m": float(np.hypot(*ext)),
             "wall": wall, "along_m": along, "along_end_arc_m": along_end,
-            "gap": _threaded_gap(xz, dist, usable, rg), "vis_xz": vis, "outline": o, "route_pts": rg["pts"],
+            "gap": gap, "vis_xz": vis, "outline": o, "route_pts": rg["pts"],
             "score": float(np.sqrt(o["area"]) * max(rg["offset"][i], OFFSET_FLOOR_M)),
         })
     return sorted(out, key=lambda c: c["arc_m"])
@@ -627,7 +636,7 @@ def describe_route(sample_dir, candidate_index):
             "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
 
 
-EVENTS_SCHEMA = "d1-addendumA"   # stamped into events_meta.json by prepare_habitat_instr.py events
+EVENTS_SCHEMA = "d1-addendumA2"  # stamped into events_meta.json by prepare_habitat_instr.py events
 
 
 def check_events_schema(events_path):

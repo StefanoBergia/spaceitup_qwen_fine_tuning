@@ -43,7 +43,7 @@ S_ROUTE = [(2.5, 0.2), (3.3, 1.0), (3.3, 1.6), (1.8, 2.4), (1.8, 3.0), (2.5, 3.6
 def _s_state():
     s = _free()
     s[20:30, 52:58] = OCC        # box A: x 2.6..2.9, z 1.0..1.5 (on the route's right there)
-    s[46:56, 44:54] = OCC        # box B: x 2.2..2.7, z 2.3..2.8 (on the route's left there)
+    s[50:58, 46:52] = OCC        # box B: x 2.3..2.6, z 2.5..2.9 (on the route's left there; >= TOUCH_M off the route)
     return s
 
 
@@ -475,7 +475,7 @@ def test_event_row_carries_record_fields(tmp_path):
 def test_stop_falls_back_to_distance_past_the_last_event(tmp_path):
     """Rough distance past the last thing passed, when nothing visible is near the goal."""
     s = _free()
-    s[10:20, 52:58] = OCC                             # box A: x 2.6..2.9, z 0.5..1.0
+    s[18:28, 52:58] = OCC                             # box A: x 2.6..2.9, z 0.9..1.4 (clear of the route's first leg)
     route = [(2.5, 0.2), (3.3, 0.8), (3.3, 2.0), (3.3, 3.0), (4.6, 3.0)]   # ends heading sideways, off the box's line
     d = write_sample(tmp_path / "s00002", s, [route])
     _, frame = load_frame(d)
@@ -796,7 +796,7 @@ from rover_vlm.route_events import EVENTS_SCHEMA, check_events_schema  # noqa: E
 
 def test_events_schema_check_accepts_stamped_meta(tmp_path):
     (tmp_path / "events_meta.json").write_text(json.dumps({"schema": EVENTS_SCHEMA, "train": {}}))
-    assert EVENTS_SCHEMA == "d1-addendumA"
+    assert EVENTS_SCHEMA == "d1-addendumA2"
     check_events_schema(tmp_path / "events_train.jsonl")          # no raise
 
 
@@ -806,3 +806,47 @@ def test_events_schema_check_refuses_old_or_missing_meta(tmp_path, meta):
         (tmp_path / "events_meta.json").write_text(json.dumps(meta))
     with pytest.raises(SystemExit, match="events files predate Addendum A — rerun prepare_habitat_instr.py events"):
         check_events_schema(tmp_path / "events_eval.jsonl")
+
+
+# --- Addendum A2 (Gate 1 r2): a blob the route runs through is not a candidate ---------------
+from rover_vlm.route_events import TOUCH_M  # noqa: E402
+
+
+def test_touch_constant():
+    assert TOUCH_M == 0.2
+
+
+def test_long_wall_the_route_clips_the_end_of_is_not_a_candidate(tmp_path):
+    s = _free()
+    s[40:42, 48:78] = OCC            # wall x 2.4..3.9, z 2.0..2.1: two cells right of the route, the rest left
+    route = [(2.5, 0.2), (2.5, 2.05), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    assert cs == []
+    assert build_events(frame, cs) == []
+
+
+def test_small_object_the_route_runs_over_is_not_a_candidate(tmp_path):
+    s = _free()
+    s[40:46, 48:54] = OCC            # box x 2.4..2.7, z 2.0..2.3, on the route
+    route = [(2.5, 0.2), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    assert candidates(frame, np.array(route)) == []
+
+
+def test_obstacle_at_0_3_m_is_still_a_candidate(tmp_path):
+    s = _free()
+    s[40:46, 56:62] = OCC            # box x 2.8..3.1: nearest cell centre ~0.32 m from the route
+    route = [(2.5, 0.2), (2.5, 3.6)]
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    cs = candidates(frame, np.array(route))
+    assert len(cs) == 1 and 0.2 <= cs[0]["pass_m"] <= 0.4
+
+
+def test_doorway_with_jambs_closer_than_touch_m_is_still_through(tmp_path):
+    route = [(2.5, 0.8), (2.5, 2.05), (2.5, 3.6)]
+    d = write_sample(tmp_path / "s", _doorway_state((47, 60)), [route], pose=(2.5, 0.8))   # jamb 0.175 m off the route
+    _, frame = load_frame(d)
+    cs = candidates(frame, np.array(route))
+    assert min(c["pass_m"] for c in cs) < TOUCH_M
+    assert [e["type"] for e in build_events(frame, cs)] == ["through"]

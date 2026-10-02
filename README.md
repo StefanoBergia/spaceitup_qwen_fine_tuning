@@ -1461,8 +1461,9 @@ found 72% true):
    `uv run scripts/prepare_habitat_instr.py events --limit 200`, then without `--limit` →
    `data/prepared_habitat_instr_v2/{events,objects}_{train,eval}.jsonl`, `events_meta.json`
    (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`). `events_meta.json` carries
-   `"schema": "d1-addendumA"`; `label_descriptions.py` and the events/d1 audit refuse events files
-   without it (rerun this step).
+   `"schema": "d1-addendumA2"`; `label_descriptions.py` and the events/d1 audit refuse events files
+   without it (rerun this step). A2 rule: a blob the route runs through (closest distance < 0.2 m,
+   `TOUCH_M`) is not an event candidate, unless it is a doorway the route threads.
 2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
    `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`
    → `outputs/instr_events_audit.html` (publish with the `db` capability)
