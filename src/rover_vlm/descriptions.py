@@ -31,6 +31,7 @@ _SIDE = re.compile(r"\b(left|right)\b", re.I)
 _BREAK = re.compile(r"[,;.]|\bthen\b|\band\b", re.I)
 GENERIC_NAMES = {"object", "thing", "item", "area", "region", "stuff", "something", "space", "structure",
                  "furniture", "obstacle", "piece", "unit"}   # head_noun("piece of furniture") == "piece"
+UNIT_MODIFIERS = {"shelving", "shelf", "storage", "kitchen", "wall", "tv", "display", "corner", "drawer", "cabinet"}
 _CONJUNCTION = re.compile(r"\b(?:and|then|or)\b", re.I)     # would split the name at _BREAK
 # "right" meaning "exactly", not a side: blanked out before any side-word check. "next to",
 # "by" and "beside" are no longer stop relations (Addendum A) but stay here: a description may
@@ -230,8 +231,19 @@ def name_rejects(name, kind, need):
     out = []
     if len(name.split()) > 4:
         out.append("name:long")
-    if head_noun(name) in GENERIC_NAMES or head_noun(name) is None:
-        out.append("name:generic")
+    # Rule N2: "unit" is not generic when preceded by a modifier from UNIT_MODIFIERS
+    noun = head_noun(name)
+    if noun in GENERIC_NAMES or noun is None:
+        if noun == "unit":
+            # Check if the word before "unit" is in UNIT_MODIFIERS
+            words = name.lower().split()
+            if len(words) >= 2 and words[-2] in UNIT_MODIFIERS:
+                # It's a valid unit (e.g., "shelving unit"), not generic
+                pass
+            else:
+                out.append("name:generic")
+        else:
+            out.append("name:generic")
     if _DRAWING.search(name):
         out.append("name:drawing")
     if _SIDE.search(name):
@@ -242,7 +254,11 @@ def name_rejects(name, kind, need):
         out.append("name:digits")
     if re.search(r"[,/;()\"'`\u2018\u2019\u201c\u201d]", name):
         out.append("name:punct")
-    if (need == "opening") != (kind == "opening"):   # need "wall": a wall, or a door in it ("object")
+    # Rule N1: kind "opening" for need "wall" is NOT a kind:mismatch (doors/windows in a wall)
+    # Reject only: need "opening" + kind != "opening", or need "object" + kind "opening"
+    if kind == "opening" and need not in ("opening", "wall"):
+        out.append("kind:mismatch")
+    elif kind != "opening" and need == "opening":
         out.append("kind:mismatch")
     return out
 

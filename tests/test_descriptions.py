@@ -398,9 +398,50 @@ def test_name_rejects_conjunctions(name):
     assert "name:conjunction" in name_rejects(name, "object", "object")
 
 
-@pytest.mark.parametrize("name", ["furniture", "piece of furniture", "obstacle", "storage unit", "wooden piece"])
+@pytest.mark.parametrize("name", ["furniture", "piece of furniture", "obstacle", "wooden piece"])
 def test_name_rejects_more_generic_names(name):
     assert "name:generic" in name_rejects(name, "object", "object")
+
+
+# --- Task 1: name rules N1 + N2 (rule for doors in walls, unit modifiers) ---
+
+def test_name_rule_n1_opening_for_wall_not_mismatch():
+    # N1: kind "opening" for need "wall" is NOT a kind:mismatch (doors/windows in a wall)
+    assert name_rejects("open doorway", "opening", "wall") == []
+    assert name_rejects("glass door", "opening", "wall") == []
+    assert name_rejects("window with blind", "opening", "wall") == []
+
+
+def test_name_rule_n1_object_for_opening_is_mismatch():
+    # N1: need "opening" + kind "object" stays a mismatch
+    assert "kind:mismatch" in name_rejects("wooden frame", "object", "opening")
+
+
+def test_name_rule_n1_object_plus_opening_kind_is_mismatch():
+    # N1: need "object" + kind "opening" stays a mismatch
+    assert "kind:mismatch" in name_rejects("open doorway", "opening", "object")
+
+
+def test_name_rule_n2_unit_with_modifier_not_generic():
+    # N2: "unit" is not generic when preceded by a modifier from UNIT_MODIFIERS
+    assert name_rejects("white shelving unit", "object", "object") == []
+    assert name_rejects("shelf unit", "object", "object") == []
+    assert name_rejects("storage unit", "object", "object") == []
+    assert name_rejects("kitchen unit", "object", "object") == []
+    assert name_rejects("wall unit", "object", "object") == []
+    assert name_rejects("tv unit", "object", "object") == []
+    assert name_rejects("display unit", "object", "object") == []
+    assert name_rejects("corner unit", "object", "object") == []
+    assert name_rejects("drawer unit", "object", "object") == []
+    assert name_rejects("cabinet unit", "object", "object") == []
+
+
+def test_name_rule_n2_unit_without_modifier_is_generic():
+    # N2: "unit" stays generic without a modifier
+    assert "name:generic" in name_rejects("unit", "object", "object")
+    assert "name:generic" in name_rejects("white unit", "object", "object")
+    assert "name:generic" in name_rejects("large unit", "object", "object")
+    assert "name:generic" in name_rejects("blue unit", "object", "object")
 
 
 @pytest.mark.parametrize("text,stop", [
@@ -609,7 +650,6 @@ def test_naming_prompt_and_name_rules_for_walls():
     assert name_rejects("white wall", "wall", "wall") == []
     assert name_rejects("grey sofa", "object", "wall") == []
     assert name_rejects("wooden door", "object", "wall") == []
-    assert "kind:mismatch" in name_rejects("open doorway", "opening", "wall")
 
 
 def test_label_object_asks_with_the_wall_prompt():
