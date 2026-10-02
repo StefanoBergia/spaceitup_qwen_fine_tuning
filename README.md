@@ -1478,7 +1478,8 @@ found 72% true):
    the retry passes always resume). The same stages by hand:
    `uv run scripts/label_descriptions.py --stage name ...` (run once per split), then
    `--stage compose ...` (see the script's docstring; `--gate` exits 2 below accept 0.9 or above
-   0.1 template fallback)
+   0.1 template fallback). Gate r1 fixes (2026-10-02): compose prompt d2 (direction words copied
+   as written), `--max-tokens` default 4096, name rules N1 (doors/windows in a wall) and N2 ("shelving unit").
 4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
    `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
    → `outputs/instr_d1_audit.html`

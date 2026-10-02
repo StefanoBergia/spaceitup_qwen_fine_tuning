@@ -1,4 +1,4 @@
-"""Label route descriptions (prompt d1) with Cosmos3-Nano: name objects, then compose sentences.
+"""Label route descriptions (prompt d2) with Cosmos3-Nano: name objects, then compose sentences.
 
 Runs against the endpoint slurm/serve_cosmos3.sbatch (or slurm/label_descriptions.sbatch)
 publishes. Inputs come from `prepare_habitat_instr.py events`.
@@ -39,6 +39,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENDPOINT_FILE = REPO_ROOT / "outputs" / "cosmos3_endpoint.txt"
 
 
+DEFAULT_MAX_TOKENS = 4096  # gate r1: 2048 cut 96 of 140 compose replies before </answer>
+
+
 def jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
@@ -53,7 +56,8 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None, help="first N described routes (and their objects)")
     p.add_argument("--endpoint", default=None)
     p.add_argument("--model", default=None)
-    p.add_argument("--max-tokens", type=int, default=2048)
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                   help="both stages; thinking replies need room to reach </answer>")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--resume", action="store_true")

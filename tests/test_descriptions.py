@@ -641,8 +641,6 @@ def test_compose_prompt_wall_language():
     p = compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence")
     assert "1. keep the white wall on your left" in p
     assert "2. go left of the coffee table and the grey sofa" in p
-    assert "For walls, keep the words 'on your left/right' exactly as given; for other objects never say " \
-           "'your left/right'." in p
     assert 'Never say "your left" or "your right".' not in p
 
 
@@ -691,3 +689,25 @@ def test_wall_egocentric_form_survives_the_right_adverb_blanking():
     # "on your right past ..." : the right-adverb blanking must not hide the wall's egocentric word
     t = "Follow the glass partition on your right past its end, and stop just after it."
     assert description_rejects(t, [WALL_R], AFTER, NAMES) == []
+
+
+def test_compose_prompt_d2_direction_paragraph():
+    from rover_vlm.descriptions import PROMPT_VERSION
+    p = " ".join(compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence").split())
+    assert PROMPT_VERSION == "d2"
+    assert ("Keep every step in this order and keep each object's name. Copy each step's direction words exactly "
+            "as written: 'on your left' / 'on your right' after a wall stays that way; 'left of' / 'right of' "
+            "before an object stays that way; a step with 'between' or 'through' has no left or right, so do "
+            "not add one. Keep where to stop.") in p
+    assert "the word left or right that goes with it" not in p
+    assert "never say 'your left/right'" not in p
+
+
+def test_label_descriptions_max_tokens_default_is_4096():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "scripts" / "label_descriptions.py"
+    spec = importlib.util.spec_from_file_location("label_descriptions_script", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.DEFAULT_MAX_TOKENS == 4096

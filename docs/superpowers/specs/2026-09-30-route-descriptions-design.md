@@ -301,3 +301,33 @@ Clarifications (final review, 2026-10-01):
   events/d1 audit refuse events files built before this rule.
 - **Not changed.** Depth-fallback outlines stay (fix B, dropping them, was declined); stop rules,
   merging and scores are untouched.
+
+## Addendum A3 (2026-10-02, label gate r1)
+
+- **Evidence.** Gate job 92114 (300 eval routes, events schema d1-addendumA2): accept 0.890 < 0.9
+  (33 `unnamed_object`), template share 0.262 > 0.1.
+  - Names: 27/377 objects rejected. 16 are doors / windows on object or wall outlines that Cosmos
+    names well ("open doorway", "glass door", "window with blind") but types `kind: opening`, which
+    we scored `kind:mismatch`. 3 are "<x> unit" names flagged generic ("white shelving unit").
+    4 are thinking runs cut at max_tokens 2048 (parse failures). Offline rescoring of the stored
+    raws with N1 + N2 recovers 14 of the 33 routes (accept ~0.937).
+  - Compose: 70 routes fell back to the template; 96 of their 140 Cosmos replies never reached
+    `</answer>` (cut at 2048 tokens) while Cosmos argued with a contradiction in the prompt ("keep
+    the word left or right that goes with it" vs "for other objects never say 'your left/right'"),
+    worst on `between` steps (24/55 fell back), which have no side.
+- **Decisions.**
+  1. **N1.** `name_rejects`: kind "opening" for need "wall" is not a `kind:mismatch` (doors /
+     windows in a wall; the wall naming prompt already offers "a door in a wall"). Need "object" +
+     kind "opening" and need "opening" + kind != "opening" stay mismatches.
+  2. **N2.** A name whose head noun is "unit" is not generic when the word before it is in
+     `UNIT_MODIFIERS` (shelving, shelf, storage, kitchen, wall, tv, display, corner, drawer,
+     cabinet); "unit", "white unit", "large unit" stay generic.
+  3. **C1.** `label_descriptions.py --max-tokens` default 2048 -> 4096 (both stages).
+  4. **C2.** Compose prompt d2 (`PROMPT_VERSION = "d2"`): the contradicting sentences are replaced
+     by "Keep every step in this order and keep each object's name. Copy each step's direction words
+     exactly as written: 'on your left' / 'on your right' after a wall stays that way; 'left of' /
+     'right of' before an object stays that way; a step with 'between' or 'through' has no left or
+     right, so do not add one. Keep where to stop." The naming prompt is unchanged (its rows also
+     carry `prompt_version` d2, the constant is shared). Text rules and the template are unchanged.
+- **Declined.** N1+: accepting `opening` for need "object" too (objects typed as openings stay
+  mismatches). File names `*_d1.jsonl` and `--mode d1` are kept.

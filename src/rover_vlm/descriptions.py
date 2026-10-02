@@ -1,4 +1,4 @@
-"""Route descriptions (prompt d1): turning geometry's events into checked sentences.
+"""Route descriptions (prompt d2; d1 until gate r1): turning geometry's events into checked sentences.
 
 rover_vlm.route_events finds what a route passes and where it stops. This module holds the
 canonical template sentence, the text rules every description must pass (all names present
@@ -258,7 +258,7 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d1"
+PROMPT_VERSION = "d2"
 KINDS = {"object": "object", "wall": "wall", "opening": "opening", "doorway": "opening", "door": "opening",
          "arch": "opening", "archway": "opening", "passage": "opening", "gap": "opening"}
 SHAPES = ["one sentence", "two short sentences", "one sentence joined with 'then'",
@@ -344,10 +344,11 @@ it would say it. The route, in order:
 {steps}
 Then: {_stop_line(events, stop, names, kinds)}.
 
-Write it as {style}, in {shape}. Keep every step in this order, keep each object's name and
-the word left or right that goes with it, and keep where to stop. You may add small words
+Write it as {style}, in {shape}. Keep every step in this order and keep each object's name.
+Copy each step's direction words exactly as written: 'on your left' / 'on your right' after a wall
+stays that way; 'left of' / 'right of' before an object stays that way; a step with 'between' or
+'through' has no left or right, so do not add one. Keep where to stop. You may add small words
 ("then", "carefully", "keep going"), but add no other objects, sides or directions.
-For walls, keep the words 'on your left/right' exactly as given; for other objects never say 'your left/right'.
 Write numbers as words. At most 45 words.
 
 {_answer_block('{"description": "<the description>"}')}"""
