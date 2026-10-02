@@ -15,6 +15,13 @@
 # call passes --resume. After a prompt fix, re-run the gate from scratch (OVERWRITE applies to
 # the first pass of each stage only; the retry passes always resume):
 #     OVERWRITE=1 sbatch slurm/label_descriptions.sbatch
+#
+# NAMER=cosmos|gemma (default cosmos = the commands above, unchanged). NAMER=gemma serves
+# google/gemma-3-12b-it for the name passes, stops it, then serves Cosmos3-Nano for the
+# compose passes; outputs get a _gemma suffix (names_gate_gemma_d1.jsonl, desc_gate_gemma_d1.jsonl)
+# so the Cosmos files are never touched. Combinable with OVERWRITE=1 and STAGE=full:
+#     NAMER=gemma sbatch slurm/label_descriptions.sbatch
+#     NAMER=gemma OVERWRITE=1 STAGE=full sbatch slurm/label_descriptions.sbatch
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions
 #SBATCH --job-name=cosmos3-label-desc
@@ -43,13 +50,27 @@ for s in eval train; do
     done
 done
 
-cosmos3_start_server
-trap 'rm -f "$ENDPOINT_FILE"; kill $SERVER_PID 2>/dev/null || true' EXIT
-cosmos3_wait_healthy
+NAMER="${NAMER:-cosmos}"
+COSMOS_MODEL="$MODEL"
+GEMMA_MODEL="${GEMMA_MODEL:-google/gemma-3-12b-it}"
+case "$NAMER" in
+    cosmos) SFX="" ;;
+    gemma) SFX="_gemma" ;;   # Gemma outputs never overwrite the Cosmos files
+    *) echo "NAMER must be cosmos or gemma, got '$NAMER'"; exit 1 ;;
+esac
+echo "NAMER=$NAMER file suffix='${SFX}' STAGE=$STAGE"
 
-label() {  # label <split> <tag> [--limit N] [--gate]
-    local s=$1 tag=$2; shift 2
-    local first=--resume gate=() limit=()
+serve() {  # serve <model>: stop whatever runs, start this model, wait until healthy (sets BASE)
+    cosmos3_stop_server
+    MODEL=$1
+    cosmos3_start_server
+    cosmos3_wait_healthy
+}
+# Whichever server is running (or the half-started one) is stopped on exit, incl. a failed gate.
+trap 'cosmos3_stop_server' EXIT
+
+parse_opts() {  # parse_opts [--limit N] [--gate] -> sets first, gate, limit for the caller
+    first=--resume gate=() limit=()
     [ -n "${OVERWRITE:-}" ] && first=--overwrite   # only the first call of each stage overwrites
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -58,30 +79,65 @@ label() {  # label <split> <tag> [--limit N] [--gate]
         esac
         shift
     done
-    # Each stage runs twice: pass 1 may leave request-error rows, pass 2 (--resume) retries
-    # them. Names are report-only (their summary is printed, never gated), so a weak name
-    # pass still lets compose run and the audit sees both; only compose pass 2 gates.
+}
+
+# Each stage runs twice: pass 1 may leave request-error rows, pass 2 (--resume) retries
+# them. Names are report-only (their summary is printed, never gated), so a weak name
+# pass still lets compose run and the audit sees both; only compose pass 2 gates.
+name_stage() {  # name_stage <split> <tag> [--limit N]
+    local s=$1 tag=$2; shift 2
+    local first gate limit; parse_opts "$@"
     local name_args=(--stage name --events "$D/events_$s.jsonl" --objects "$D/objects_$s.jsonl"
-                     --out "$OUT/names_${tag}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
-    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}_d1.jsonl"
-                     --out "$OUT/desc_${tag}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
-    echo; echo "=============== name: $tag (pass 1) ==============="
+                     --out "$OUT/names_${tag}${SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== name: $tag$SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" "$first" "${limit[@]}"
-    echo; echo "=============== name: $tag (pass 2, retries errors; summary is report-only) ==============="
+    echo; echo "=============== name: $tag$SFX (pass 2, retries errors; summary is report-only) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" --resume "${limit[@]}"
-    echo; echo "=============== compose: $tag (pass 1) ==============="
+}
+
+compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
+    local s=$1 tag=$2; shift 2
+    local first gate limit; parse_opts "$@"
+    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}${SFX}_d1.jsonl"
+                     --out "$OUT/desc_${tag}${SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== compose: $tag$SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${comp_args[@]}" "$first" "${limit[@]}"
-    echo; echo "=============== compose: $tag (pass 2, retries errors${gate[*]:+, gated}) ==============="
+    echo; echo "=============== compose: $tag$SFX (pass 2, retries errors${gate[*]:+, gated}) ==============="
     "$UV" run scripts/label_descriptions.py "${comp_args[@]}" --resume "${limit[@]}" "${gate[@]}"
 }
 
+# Order: NAMER=cosmos -> one Cosmos server, per split
+# name+compose (today's order). NAMER=gemma -> Gemma names every split, then one switch to
+# Cosmos which composes every split. A failed compose gate exits 2 under set -e.
+if [ "$NAMER" = "gemma" ]; then
+    serve "$GEMMA_MODEL"
+else
+    serve "$COSMOS_MODEL"
+fi
+
 if [ "$STAGE" = "gate" ]; then
-    # set -e: a failed compose gate (exit 2) ends the job; the EXIT trap stops the server
-    label eval gate --limit 300 --gate
-    echo "gate labelled — audit it, then: STAGE=full sbatch slurm/label_descriptions.sbatch"
+    if [ "$NAMER" = "gemma" ]; then
+        name_stage eval gate --limit 300
+        serve "$COSMOS_MODEL"
+        compose_stage eval gate --limit 300 --gate
+    else
+        name_stage eval gate --limit 300
+        compose_stage eval gate --limit 300 --gate
+    fi
+    echo "gate labelled — audit it, then: $([ "$NAMER" = gemma ] && echo "NAMER=gemma ")STAGE=full sbatch slurm/label_descriptions.sbatch"
     exit 0
 fi
-label eval eval
-label train train
+if [ "$NAMER" = "gemma" ]; then
+    name_stage eval eval
+    name_stage train train
+    serve "$COSMOS_MODEL"
+    compose_stage eval eval
+    compose_stage train train
+else
+    name_stage eval eval
+    compose_stage eval eval
+    name_stage train train
+    compose_stage train train
+fi
 echo; echo "=============== done ==============="
 wc -l "$OUT"/*_d1.jsonl

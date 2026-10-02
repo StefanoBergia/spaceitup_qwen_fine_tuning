@@ -55,19 +55,36 @@ cosmos3_start_server() {
     echo "node=$(hostname) port=$PORT model=$MODEL max_model_len=$MAX_MODEL_LEN"
     nvidia-smi
 
-    # --hf-overrides loads only the reasoner tower out of the shared MoT checkpoint.
+    # --hf-overrides loads only the reasoner tower out of the shared MoT checkpoint, and
+    # --mm-encoder-tp-mode data is the Cosmos vision tower's mode; both are Cosmos-only, so a
+    # non-Cosmos model (e.g. google/gemma-3-12b-it) is served without them. $MODEL is read
+    # here, not at source time, so one job can serve several models in turn.
     # --allowed-local-media-path / lets the client pass file:// URIs, which matters because
     # the prepared splits reference images by absolute NFS path.
+    local cosmos_flags=()
+    case "$MODEL" in
+        *[Cc]osmos3*) cosmos_flags=(--hf-overrides '{"architectures": ["Cosmos3ReasonerForConditionalGeneration"]}'
+                                    --mm-encoder-tp-mode data) ;;
+    esac
     "$VENV/bin/vllm" serve "$MODEL" \
-        --hf-overrides '{"architectures": ["Cosmos3ReasonerForConditionalGeneration"]}' \
+        ${cosmos_flags[@]+"${cosmos_flags[@]}"} \
         --tensor-parallel-size 1 \
-        --mm-encoder-tp-mode data \
         --async-scheduling \
         --allowed-local-media-path / \
         --media-io-kwargs '{"video": {"num_frames": -1}}' \
         --max-model-len "$MAX_MODEL_LEN" \
         --host 0.0.0.0 --port "$PORT" &
     SERVER_PID=$!
+}
+
+cosmos3_stop_server() {
+    # Kill the server, wait for it to exit (frees the GPU memory), drop the endpoint file.
+    if [ -n "${SERVER_PID:-}" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=
+    fi
+    rm -f "$ENDPOINT_FILE"
 }
 
 cosmos3_wait_healthy() {
