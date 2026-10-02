@@ -1487,8 +1487,8 @@ found 72% true):
    `desc_gate_gemma_d1.jsonl`), so the Cosmos files are never touched; audit them by passing
    `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl`.
    **`NAMER=mix`** (Addendum A5, the full-run setup): Gemma names every split
-   (`names_<tag>_gemma_d1.jsonl`), the job switches to Cosmos once, Cosmos names the same splits
-   (`names_<tag>_d1.jsonl`), then composes with the Gemma names and falls back to the Cosmos names
+   (`names_<tag>_gemma_d1.jsonl`), the job switches to Cosmos once, Cosmos names
+   (`names_<tag>_d1.jsonl`; only the objects of routes the Gemma names cannot serve, eval split first), then composes with the Gemma names and falls back to the Cosmos names
    for routes where Gemma named two different objects the same (`name:clash`) →
    `desc_<tag>_mix_d1.jsonl`. Full run:
    `NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch` (re-submit the same line after a

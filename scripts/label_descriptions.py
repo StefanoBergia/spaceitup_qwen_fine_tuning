@@ -31,7 +31,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.descriptions import (
-    d1_gate_failures, label_object, label_route, name_rows_split, names_missing, route_objects, select_routes,
+    d1_gate_failures, label_object, label_route, name_rows_split, names_missing, objects_needing_fallback,
+    route_objects, select_routes,
     summarize_d1,
 )
 from rover_vlm.labelling_io import chat_text, chat_with_image, connect, prepare_output, resolve_endpoint
@@ -54,6 +55,8 @@ def main() -> None:
     p.add_argument("--events", type=Path, required=True, help="events_*.jsonl")
     p.add_argument("--objects", type=Path, help="objects_*.jsonl (stage name)")
     p.add_argument("--names", type=Path, help="names_*_d1.jsonl from stage name (stage compose)")
+    p.add_argument("--only-unusable-under", type=Path,
+                   help="stage name: only name objects of routes the name rows in FILE cannot serve (mix fallback)")
     p.add_argument("--fallback-names", type=Path,
                    help="second names file (same format); tried when --names leaves an object unnamed or clashes")
     p.add_argument("--out", type=Path, required=True)
@@ -74,7 +77,13 @@ def main() -> None:
     if args.stage == "name":
         if not args.objects:
             raise SystemExit("--stage name needs --objects objects_*.jsonl")
-        wanted = {o for r in routes for o in route_objects(r)}
+        if args.only_unusable_under:
+            if not args.only_unusable_under.exists():
+                raise SystemExit(f"--only-unusable-under {args.only_unusable_under} not found")
+            wanted = objects_needing_fallback(routes, jsonl(args.only_unusable_under))
+            print(f"only-unusable-under: {len(wanted)} objects of {len(routes)} routes", flush=True)
+        else:
+            wanted = {o for r in routes for o in route_objects(r)}
         items = [o for o in jsonl(args.objects) if o["object_id"] in wanted]
         missing = wanted - {o["object_id"] for o in items}
         if missing:

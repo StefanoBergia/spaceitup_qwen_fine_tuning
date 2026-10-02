@@ -198,11 +198,11 @@ def test_sbatch_mix_gate_order_commands_and_files(fake):
 def test_sbatch_mix_full_eval_then_train_per_pass(fake):
     r, calls = _run_sbatch(fake, {"NAMER": "mix", "STAGE": "full"})
     assert r.returncode == 0, r.stderr
-    assert _kinds(calls) == "S" + "nnnn" + "S" + "nnnn" + "cccc"
+    assert _kinds(calls) == "S" + "nnnn" + "S" + "nncc" + "nncc"
     outs = _outs(calls)
     assert outs[:4] == ["names_eval_gemma_d1.jsonl"] * 2 + ["names_train_gemma_d1.jsonl"] * 2
-    assert outs[4:8] == ["names_eval_d1.jsonl"] * 2 + ["names_train_d1.jsonl"] * 2
-    assert outs[8:] == ["desc_eval_mix_d1.jsonl"] * 2 + ["desc_train_mix_d1.jsonl"] * 2
+    assert outs[4:6] == ["names_eval_d1.jsonl"] * 2 and outs[6:8] == ["desc_eval_mix_d1.jsonl"] * 2
+    assert outs[8:10] == ["names_train_d1.jsonl"] * 2 and outs[10:] == ["desc_train_mix_d1.jsonl"] * 2
     assert not any("--overwrite" in c for c in calls)
 
 
@@ -215,3 +215,15 @@ def test_sbatch_mix_failed_gate_propagates(fake):
 def test_sbatch_cosmos_and_gemma_compose_have_no_fallback(fake, namer):
     r, calls = _run_sbatch(fake, {"NAMER": namer})
     assert r.returncode == 0 and not any("--fallback-names" in c for c in calls)
+
+
+def test_sbatch_mix_cosmos_name_phase_filters_to_unusable_routes(fake):
+    r, calls = _run_sbatch(fake, {"NAMER": "mix"})
+    assert r.returncode == 0, r.stderr
+    names = [c for c in calls if "--stage name" in c]
+    gemma = [c for c in names if "_gemma_d1" in c.split("--out ")[1].split()[0]]
+    cosmos = [c for c in names if c not in gemma]
+    assert len(gemma) == 2 and len(cosmos) == 2
+    assert not any("--only-unusable-under" in c for c in gemma)
+    for c in cosmos:
+        assert c.split("--only-unusable-under ")[1].split()[0].endswith("names_gate_gemma_d1.jsonl")

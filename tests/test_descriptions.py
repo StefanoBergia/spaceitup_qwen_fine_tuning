@@ -837,3 +837,33 @@ def test_summarize_d1_reports_namer_counts():
             {"id": "3", "passed": True, "instruction_source": "cosmos", "namer": "fallback", "rejects": []},
             {"id": "4", "passed": False, "rejects": ["name:clash"]}]
     assert summarize_d1(comp, "compose")["namer"] == {"primary": 2, "fallback": 1}
+
+
+# ---- I1: Cosmos names only the objects of routes unusable under the Gemma names ----------------
+def _name_rows(names, bad=(), err=()):
+    return ([{"id": k, "name": v, "passed": True} for k, v in names.items()]
+            + [{"id": k, "name": None, "passed": False} for k in bad]
+            + [{"id": k, "error": "boom"} for k in err])
+
+
+def test_objects_needing_fallback_selects_clashing_and_unnamed_routes_only():
+    from rover_vlm.descriptions import objects_needing_fallback
+    ok = {"id": "ok", "events": [PASS_L], "stop": NEAR}                       # f:b1, f:b5
+    clash = {"id": "cl", "events": [BETWEEN], "stop": NEAR}                   # f:b2, f:b3, f:b5
+    unnamed = {"id": "un", "events": [PASS_R, THROUGH], "stop": {**NEAR, "object": None}}   # f:b3, f:gap4
+    names = {"f:b1": "coffee table", "f:b5": "fridge", "f:b2": "wooden bench", "f:b3": "wooden bench"}
+    rows = _name_rows(names, bad=["f:gap4"])                                  # gap4 rejected -> unnamed
+    assert objects_needing_fallback([ok, clash, unnamed], rows) == {"f:b2", "f:b3", "f:b5", "f:gap4"}
+    # an error row (or no row at all) counts as unnamed too
+    rows = _name_rows({"f:b1": "coffee table"}, err=["f:b5"])
+    assert objects_needing_fallback([ok], rows) == {"f:b1", "f:b5"}
+    assert objects_needing_fallback([ok], _name_rows({"f:b1": "coffee table", "f:b5": "fridge"})) == set()
+
+
+def test_primary_usable_route_composes_with_fallback_file_lacking_its_objects():
+    from rover_vlm.descriptions import names_missing
+    route = _route([PASS_L], NEAR)
+    named, rejected = {"f:b1": "coffee table", "f:b5": "fridge"}, set()
+    assert names_missing(route, named, rejected, {}, set()) == []   # fallback never ran these objects
+    out = label_route(_good_ask(GOOD), route, named, seed=0, fallback_names={})
+    assert out["passed"] and out["namer"] == "primary"

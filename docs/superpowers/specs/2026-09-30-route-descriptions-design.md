@@ -390,3 +390,10 @@ Clarifications (final review, 2026-10-01):
   line after a TIMEOUT; never `OVERWRITE=1` on a full run).
 - **Finalize:** `uv run scripts/prepare_habitat_instr.py finalize-descriptions --desc-suffix _mix`
   (default suffix "" keeps reading `desc_<split>_d1.jsonl`).
+- **Fallback scope and order** (final review I1/I2). Cosmos names only the objects of routes that
+  are unusable under the Gemma names (`--stage name --only-unusable-under names_<tag>_gemma_d1.jsonl`:
+  an object unnamed, rejected or an error row there counts as unnamed; a route with a
+  `name_clash` is unusable) -- about 18% of the objects, since the fallback is read only for those
+  routes; `names_missing` stays satisfied because a primary-usable route never needs the fallback
+  file. Order for mix: Gemma names eval then train, ONE switch to Cosmos, then per split
+  `names (fallback) -> compose` (eval first), so the eval descriptions finish before train naming.

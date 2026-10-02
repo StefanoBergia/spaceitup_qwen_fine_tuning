@@ -495,6 +495,14 @@ def name_rows_split(rows):
     return named, rejected
 
 
+def objects_needing_fallback(routes, name_rows):
+    """Objects of the routes NOT usable under `name_rows` (the primary / Gemma name rows): an
+    object that is unnamed, rejected or only an error row there counts as unnamed, and a route
+    with a name_clash is unusable. These are the only objects the fallback namer must name."""
+    named, _ = name_rows_split(name_rows)
+    return {o for r in routes if not _usable(r, named) for o in route_objects(r)}
+
+
 def names_missing(row, named, rejected, fallback_named=None, fallback_rejected=None):
     """Route objects with no name row or only an error row (a retryable gap, not a rejection).
     A name in either file counts as present; an unnamed object is a rejection only when every

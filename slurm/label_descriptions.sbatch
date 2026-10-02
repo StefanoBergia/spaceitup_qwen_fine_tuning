@@ -68,6 +68,7 @@ case "$NAMER" in
 esac
 NAME_SFX="$SFX"            # suffix of the names file written by name_stage / read by compose
 FALLBACK=()                # mix: extra compose args naming the Cosmos fallback names file
+NAME_EXTRA=()              # mix: extra name-stage args (Cosmos names only what Gemma cannot serve)
 echo "NAMER=$NAMER file suffix='${SFX}' STAGE=$STAGE"
 
 serve() {  # serve <model>: stop whatever runs, start this model, wait until healthy (sets BASE)
@@ -98,7 +99,7 @@ name_stage() {  # name_stage <split> <tag> [--limit N]
     local s=$1 tag=$2; shift 2
     local first gate limit; parse_opts "$@"
     local name_args=(--stage name --events "$D/events_$s.jsonl" --objects "$D/objects_$s.jsonl"
-                     --out "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+                     --out "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "${NAME_EXTRA[@]}")
     echo; echo "=============== name: $tag$NAME_SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" "$first" "${limit[@]}"
     echo; echo "=============== name: $tag$NAME_SFX (pass 2, retries errors; summary is report-only) ==============="
@@ -119,16 +120,17 @@ compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
 # Order: NAMER=cosmos -> one Cosmos server, per split
 # name+compose (today's order). NAMER=gemma -> Gemma names every split, then one switch to
 # Cosmos which composes every split. NAMER=mix -> Gemma names every split, ONE switch to Cosmos,
-# which names the same splits (the fallback names) and then composes them with both files.
+# which names only the objects of routes Gemma cannot serve (--only-unusable-under), then composes
+# eval, names train, composes train (eval descriptions finish first).
 # A failed compose gate exits 2 under set -e.
-mix_cosmos_phase() {  # mix_cosmos_phase <split> <tag> [opts]: Cosmos names (fallback file) for one split
-    NAME_SFX=""
+mix_cosmos_phase() {  # mix_cosmos_phase <split> <tag> [opts]: Cosmos names ONLY the objects of routes
+    local tag=$2      # the Gemma names cannot serve (clash / unnamed); locals are seen by name_stage
+    local NAME_SFX="" NAME_EXTRA=(--only-unusable-under "$OUT/names_${tag}_gemma_d1.jsonl")
     name_stage "$@"
 }
 mix_compose() {  # mix_compose <split> <tag> [opts]: compose with Gemma names + Cosmos fallback names
     local tag=$2
-    NAME_SFX="_gemma"
-    FALLBACK=(--fallback-names "$OUT/names_${tag}_d1.jsonl")
+    local NAME_SFX="_gemma" FALLBACK=(--fallback-names "$OUT/names_${tag}_d1.jsonl")
     compose_stage "$@"
 }
 
@@ -137,7 +139,7 @@ if [ "$NAMER" = "cosmos" ]; then
 else
     serve "$GEMMA_MODEL"
 fi
-[ "$NAMER" = "mix" ] && NAME_SFX="_gemma"
+[ "$NAMER" = "mix" ] && NAME_SFX="_gemma"   # the Gemma name passes
 
 if [ "$STAGE" = "gate" ]; then
     case "$NAMER" in
@@ -164,8 +166,8 @@ case "$NAMER" in
            name_stage train train
            serve "$COSMOS_MODEL"
            mix_cosmos_phase eval eval
-           mix_cosmos_phase train train
            mix_compose eval eval
+           mix_cosmos_phase train train
            mix_compose train train ;;
     *)     name_stage eval eval
            compose_stage eval eval
