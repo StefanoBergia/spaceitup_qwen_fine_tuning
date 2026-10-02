@@ -290,6 +290,13 @@ Clarifications (final review, 2026-10-01):
   extent >= `WALL_EXTENT_M`) is never touching. A doorway of two separate wall halves whose jamb is
   within `TOUCH_M` of the route still becomes a `through` (a touching blob may pair with its
   neighbour into a through, ignoring the side test); doorway behaviour is unchanged.
+- **Zero-event routes must be straight.** A route with no events is phrased "Go straight ahead,
+  and stop ...". Of the 114 zero-event train routes (Addendum A run) the max offset from the
+  entry->goal line has median 0.71 m (77 > 0.5 m, 36 > 1 m), so the sentence is false for most,
+  and the touch rule creates more (00423, 00599 became "go straight ahead" while bending round
+  a door / left-then-right). Decision 2026-10-02: a zero-event route whose max offset exceeds
+  `STRAIGHT_MAX_M = 0.3` m is dropped, reason `no_events_bent`; straighter ones are unchanged,
+  and routes with >= 1 event are unaffected whatever their offset.
 - **Schema.** `events_meta.json` carries `"schema": "d1-addendumA2"`; the labeller and the
   events/d1 audit refuse events files built before this rule.
 - **Not changed.** Depth-fallback outlines stay (fix B, dropping them, was declined); stop rules,
