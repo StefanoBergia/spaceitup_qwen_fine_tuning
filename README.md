@@ -1482,13 +1482,13 @@ found 72% true):
    as written), `--max-tokens` default 4096, name rules N1 (doors/windows in a wall) and N2 ("shelving unit").
    **`NAMER=gemma`** (A/B vs the default `NAMER=cosmos`): the job serves `google/gemma-3-12b-it`
    for the two name passes, stops it, then serves Cosmos3-Nano for the compose passes
-   (`NAMER=gemma sbatch slurm/label_descriptions.sbatch`; combinable with `OVERWRITE=1` and
-   `STAGE=full`). Outputs carry a `_gemma` suffix (`names_gate_gemma_d1.jsonl`,
+   (`NAMER=gemma sbatch slurm/label_descriptions.sbatch`; combinable with `STAGE=full`;
+   `OVERWRITE=1` is for gate re-runs only, never on a full run). Outputs carry a `_gemma` suffix (`names_gate_gemma_d1.jsonl`,
    `desc_gate_gemma_d1.jsonl`), so the Cosmos files are never touched; audit them by passing
    `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl`.
 4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
    `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
-   → `outputs/instr_d1_audit.html`
+   → `outputs/instr_d1_audit.html` (Gemma run: `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl --out outputs/instr_d1_audit_gemma.html`; the page title carries the desc file stem)
    (`--ids FILE`, one route id per line, audits exactly those passed routes instead of a random sample — re-audit the same routes for an A/B)
 5. Full run (train + eval, resumable; re-submit after a TIMEOUT): `STAGE=full sbatch slurm/label_descriptions.sbatch`
 6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` →

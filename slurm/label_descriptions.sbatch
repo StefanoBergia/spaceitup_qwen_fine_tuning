@@ -19,9 +19,9 @@
 # NAMER=cosmos|gemma (default cosmos = the commands above, unchanged). NAMER=gemma serves
 # google/gemma-3-12b-it for the name passes, stops it, then serves Cosmos3-Nano for the
 # compose passes; outputs get a _gemma suffix (names_gate_gemma_d1.jsonl, desc_gate_gemma_d1.jsonl)
-# so the Cosmos files are never touched. Combinable with OVERWRITE=1 and STAGE=full:
+# so the Cosmos files are never touched. Combinable with STAGE=full (and OVERWRITE=1 for gate re-runs only):
 #     NAMER=gemma sbatch slurm/label_descriptions.sbatch
-#     NAMER=gemma OVERWRITE=1 STAGE=full sbatch slurm/label_descriptions.sbatch
+#     NAMER=gemma STAGE=full sbatch slurm/label_descriptions.sbatch   # re-submit the same line after a TIMEOUT; never OVERWRITE=1 on a full run
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions
 #SBATCH --job-name=cosmos3-label-desc

@@ -275,7 +275,7 @@ SHAPES = ["one sentence", "two short sentences", "one sentence joined with 'then
 
 
 def naming_image(image_path, polygon, crop_box, px=512):
-    """One JPEG, two panels: the frame with the object outlined and the rest dimmed, and a
+    """One square JPEG (black bands above and below), two panels: the frame with the object outlined and the rest dimmed, and a
     close-up of the object's box (multi-image requests are untested on the server)."""
     orig = Image.open(image_path).convert("RGB")
     img = orig.resize((px, px), Image.LANCZOS)
@@ -296,8 +296,12 @@ def naming_image(image_path, polygon, crop_box, px=512):
     canvas = Image.new("RGB", (2 * px, px), (0, 0, 0))
     canvas.paste(ctx, (0, 0))
     canvas.paste(crop, (px + (px - crop.width) // 2, (px - crop.height) // 2))
+    # letterboxed to square: Gemma's processor resizes to 896x896 without keeping the aspect, which
+    # would stretch each panel 2x (final review I1)
+    square = Image.new("RGB", (2 * px, 2 * px), (0, 0, 0))
+    square.paste(canvas, (0, px // 2))
     buf = io.BytesIO()
-    canvas.save(buf, "JPEG", quality=90)
+    square.save(buf, "JPEG", quality=90)
     return buf.getvalue()
 
 

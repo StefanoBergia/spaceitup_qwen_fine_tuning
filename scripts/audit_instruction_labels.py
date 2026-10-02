@@ -303,6 +303,12 @@ def select_d1_rows(ok, ids, n, seed):
     return rows, len(ids) - len(rows)
 
 
+def d1_title(desc):
+    """Page title for --mode d1: names the desc file unless it is the default gate file."""
+    stem = Path(desc).stem
+    return "Route Description Audit" if Path(desc).name == "desc_gate_d1.jsonl" else f"Route Description Audit \u2014 {stem}"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=100)
@@ -360,9 +366,9 @@ def main() -> None:
             it["source"] = r["instruction_source"]
         pop = {"passed": len(ok), "template": sum(r["instruction_source"] == "template" for r in ok)}
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "d1",
-                   "verdicts": VERDICTS["d1"], "source": str(args.desc)}
+                   "verdicts": VERDICTS["d1"], "source": str(args.desc), "title": d1_title(args.desc)}
         html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
-        html = html.replace("<title>Instruction Label Audit</title>", "<title>Route Description Audit</title>", 1)
+        html = html.replace("<title>Instruction Label Audit</title>", f"<title>{d1_title(args.desc)}</title>", 1)
         out = args.out or REPO_ROOT / "outputs" / "instr_d1_audit.html"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html)

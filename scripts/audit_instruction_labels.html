@@ -139,8 +139,8 @@ if (DATA.mode === "events") {
   document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1–${DATA.verdicts.length} mark and advance, ← → move.`;
 }
 if (DATA.mode === "d1") {
-  document.title = "Route Description Audit";
-  $("h1").textContent = "Route description audit";
+  document.title = DATA.title || "Route Description Audit";
+  $("h1").textContent = DATA.title || "Route description audit";
   $("sub").textContent = "Each route (magenta) has a description from Cosmos (or the template, marked). Numbered orange outlines are the obstacles in route order, green is where it stops. Are the names, sides and stop right, and would a person say it like that?";
   $("tgtleg").hidden = false;
   $("tgtleg").innerHTML = '<i style="background:#ffaa00"></i>orange = steps, in route order &nbsp; <i style="background:#3cdc3c"></i>green = stop object';

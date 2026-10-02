@@ -376,3 +376,13 @@ def test_audit_read_ids_ignores_blank_lines_and_whitespace(tmp_path):
     f = tmp_path / "ids.txt"
     f.write_text("r5\n\n  r7  \n\t\nr9\n")
     assert audit.read_ids(f) == ["r5", "r7", "r9"]
+
+
+def test_audit_d1_title_carries_the_desc_stem_unless_default():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    assert audit.d1_title(Path("x/desc_gate_d1.jsonl")) == "Route Description Audit"
+    assert audit.d1_title(Path("x/desc_gate_gemma_d1.jsonl")) == "Route Description Audit \u2014 desc_gate_gemma_d1"

@@ -152,7 +152,17 @@ def test_naming_image_is_two_panels(tmp_path):
     p = tmp_path / "f.png"
     Image.new("RGB", (512, 512), (120, 120, 120)).save(p)
     img = Image.open(io.BytesIO(naming_image(p, [[0.2, 0.2], [0.6, 0.2], [0.6, 0.7]], [0.15, 0.15, 0.65, 0.75])))
-    assert img.size == (1024, 512)
+    assert img.size == (1024, 1024)     # letterboxed square (final review I1)
+
+
+def test_naming_image_letterboxes_panels_into_a_black_square(tmp_path):
+    p = tmp_path / "f.png"
+    Image.new("RGB", (512, 512), (120, 120, 120)).save(p)
+    img = Image.open(io.BytesIO(naming_image(p, [], [0, 0, 1, 1]))).convert("RGB")
+    assert img.size == (1024, 1024)
+    assert sum(img.getpixel((300, 100))) < 30 and sum(img.getpixel((300, 1000))) < 30   # black bands
+    assert all(abs(c - 120) < 8 for c in img.getpixel((100, 512)))                     # left panel, middle band
+    assert all(abs(c - 120) < 8 for c in img.getpixel((800, 512)))                     # right panel
 
 
 def test_prompts_mention_what_matters():
@@ -216,7 +226,7 @@ def test_naming_image_enlarges_small_crop(tmp_path):
     p = tmp_path / "f.png"
     Image.new("RGB", (512, 512), (200, 200, 200)).save(p)
     img = Image.open(io.BytesIO(naming_image(p, [], [0.4, 0.4, 0.5, 0.5]))).convert("L")
-    right = img.crop((512, 0, 1024, 512)).point(lambda v: 255 if v > 30 else 0)
+    right = img.crop((512, 256, 1024, 768)).point(lambda v: 255 if v > 30 else 0)
     x0, y0, x1, y1 = right.getbbox()
     assert max(x1 - x0, y1 - y0) >= 500
 

@@ -360,3 +360,5 @@ Clarifications (final review, 2026-10-01):
   5. `audit_instruction_labels.py --mode d1 --ids FILE` re-audits exactly the routes of the
      previous page (file order, `--n` ignored) and prints how many ids were not passed, so the
      Gemma-named run compares directly against the 100 routes already marked.
+  6. The naming image is letterboxed to a square (black bands above and below the two panels) so
+     Gemma's 896x896 resize keeps each panel's aspect (final review I1).
