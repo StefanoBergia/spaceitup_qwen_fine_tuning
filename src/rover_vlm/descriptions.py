@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 
 from .habitat_data import description_entry_prompt, instruction_endpoints_prompt
 from .instructions import (
-    _DRAWING, _EGOCENTRIC, _TRAILING, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index, choose_style,
+    _DRAWING, _EGOCENTRIC, _TRAILING, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index,
     head_noun, normalize_name,
 )
 from .traces import SCENE_INTRO, answer_payload, parse_trace
@@ -258,7 +258,16 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d2"
+PROMPT_VERSION = "d3"
+
+# d1 speaking styles: the shared STYLES minus the "why or where it leads" one (audit of gate r2: both
+# unnatural labels came from it), plus a step-by-step one. The shared STYLES (i4) is unchanged.
+D1_STYLES = [s for s in STYLES if s != "a command that also says briefly why or where it leads"] + [
+    "a calm, step-by-step instruction"]
+
+
+def choose_d1_style(record_id):
+    return D1_STYLES[_stable_index("style:" + record_id, len(D1_STYLES))]
 KINDS = {"object": "object", "wall": "wall", "opening": "opening", "doorway": "opening", "door": "opening",
          "arch": "opening", "archway": "opening", "passage": "opening", "gap": "opening"}
 SHAPES = ["one sentence", "two short sentences", "one sentence joined with 'then'",
@@ -309,6 +318,7 @@ else dimmed. Right: a close-up of that region. {what}
 1. Name what is inside the outline in 1 to 4 words, the way a person would say it ("grey
    sofa", "stone column", "kitchen island", "open doorway"). Never use the words left or
    right, and never describe the picture itself (outline, panel, close-up, dimming).
+   Name the whole thing the outline covers, not a small part on it (a handle, a switch, a socket, a leg).
 2. Say what kind of thing it is: "object" (furniture, an appliance, a column), "wall" (part of
    a wall) or "opening" (a doorway, an arch, a gap between walls).
 
@@ -398,7 +408,7 @@ def label_route(ask_text, row, names, seed, kinds=None):
     if missing:
         return {**out, "passed": False, "description": None, "instruction_source": None,
                 "rejects": ["unnamed_object"], "missing": missing}
-    style, shape = choose_style(row["id"]), choose_shape(row["id"])
+    style, shape = choose_d1_style(row["id"]), choose_shape(row["id"])
     prompt = compose_prompt(row["events"], row["stop"], names, style, shape, kinds)
     rejects, raws = [], []
     for attempt, s in enumerate((seed, seed + 1), 1):

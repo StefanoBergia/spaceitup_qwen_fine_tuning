@@ -694,7 +694,7 @@ def test_wall_egocentric_form_survives_the_right_adverb_blanking():
 def test_compose_prompt_d2_direction_paragraph():
     from rover_vlm.descriptions import PROMPT_VERSION
     p = " ".join(compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence").split())
-    assert PROMPT_VERSION == "d2"
+    assert PROMPT_VERSION == "d3"
     assert (
         "Keep every step in this order and keep each object's name. Copy each step's direction words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add one. Keep where to stop."
     ) in p
@@ -711,3 +711,36 @@ def test_label_descriptions_max_tokens_default_is_4096():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.DEFAULT_MAX_TOKENS == 4096
+
+
+WHOLE_THING = ("Name the whole thing the outline covers, not a small part on it (a handle, a switch, "
+               "a socket, a leg).")
+
+
+def test_naming_prompt_says_whole_thing_for_every_need():
+    from rover_vlm.descriptions import naming_prompt
+    for need in ("opening", "wall", "object", "anything"):
+        p = " ".join(naming_prompt(need).split())
+        assert WHOLE_THING in p
+        assert p.index("1. Name what is inside the outline") < p.index(WHOLE_THING) < p.index("2. Say what kind")
+
+
+def test_d1_styles():
+    from rover_vlm.descriptions import D1_STYLES
+    from rover_vlm.instructions import STYLES
+    assert len(D1_STYLES) == 4
+    assert "a command that also says briefly why or where it leads" not in D1_STYLES
+    assert "a calm, step-by-step instruction" in D1_STYLES
+    assert STYLES[-1] == "a command that also says briefly why or where it leads" and len(STYLES) == 4
+    assert "a calm, step-by-step instruction" not in STYLES
+
+
+def test_label_route_uses_d1_styles():
+    from rover_vlm.descriptions import D1_STYLES, choose_d1_style, label_route
+    assert {choose_d1_style(f"r{i}") for i in range(200)} == set(D1_STYLES)
+    assert choose_d1_style("r7") == choose_d1_style("r7")
+    row = {"pair_id": None, "kind": "instructed", "events": [PASS_L], "stop": NEAR}
+    for rid in ("r1", "r2", "r3", "r4", "r5", "r6"):
+        seen = []
+        label_route(lambda p, s: (seen.append(" ".join(p.split())) or "", "stop"), {**row, "id": rid}, NAMES, seed=0)
+        assert choose_d1_style(rid) in seen[0]
