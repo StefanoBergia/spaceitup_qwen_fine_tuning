@@ -850,3 +850,36 @@ def test_doorway_with_jambs_closer_than_touch_m_is_still_through(tmp_path):
     cs = candidates(frame, np.array(route))
     assert min(c["pass_m"] for c in cs) < TOUCH_M
     assert [e["type"] for e in build_events(frame, cs)] == ["through"]
+
+
+# --- zero-event routes must be straight (Addendum A2) -------------------------------------------
+from rover_vlm.route_events import REASONS, STRAIGHT_MAX_M  # noqa: E402
+
+BENT_ROUTE = [(2.5, 0.2), (3.3, 1.0), (2.5, 2.5)]    # bows 0.8 m off its entry->goal line
+
+
+def test_straight_max_constant():
+    assert STRAIGHT_MAX_M == 0.3
+
+
+def test_zero_event_bent_route_is_dropped(tmp_path):
+    s = _free()
+    s[90:94, 30:70] = OCC                                # sideboard ahead: a stop exists, no event
+    d = write_sample(tmp_path / "s", s, [BENT_ROUTE])
+    out = describe_route(d, 0)
+    assert out["reason"] == "no_events_bent"
+    assert "no_events_bent" in REASONS
+
+
+def test_zero_event_straight_route_is_still_described(tmp_path):
+    s = _free()
+    s[90:94, 30:70] = OCC
+    out = describe_route(write_sample(tmp_path / "s", s, [[(2.5, 0.2), (2.5, 2.5)]]), 0)
+    assert out["reason"] is None and out["events"] == []
+    assert out["stop"]["type"] == "distance"
+
+
+def test_bent_route_with_an_event_is_described(tmp_path):
+    out = describe_route(write_sample(tmp_path / "s", _stop_state(), [STOP_ROUTE]), 0)
+    assert out["reason"] is None and len(out["events"]) >= 1
+    assert route_geometry(STOP_ROUTE)["offset"].max() > STRAIGHT_MAX_M

@@ -1460,10 +1460,11 @@ found 72% true):
    `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`
    `uv run scripts/prepare_habitat_instr.py events --limit 200`, then without `--limit` →
    `data/prepared_habitat_instr_v2/{events,objects}_{train,eval}.jsonl`, `events_meta.json`
-   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`). `events_meta.json` carries
+   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`, `no_events_bent`). `events_meta.json` carries
    `"schema": "d1-addendumA2"`; `label_descriptions.py` and the events/d1 audit refuse events files
    without it (rerun this step). A2 rule: a blob the route runs through (closest distance < 0.2 m,
-   `TOUCH_M`) is not an event candidate, unless it is a doorway the route threads.
+   `TOUCH_M`) is not an event candidate, unless it is a doorway the route threads. A route with no events must be straight (max offset from its
+   entry->goal line <= 0.3 m, `STRAIGHT_MAX_M`) or it is dropped as `no_events_bent`.
 2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
    `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`
    → `outputs/instr_events_audit.html` (publish with the `db` capability)

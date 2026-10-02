@@ -339,7 +339,8 @@ STOP_NEAR_M = 1.0
 AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
-REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "error")
+STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": its max offset from entry->goal must be within this
+REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "no_events_bent", "error")
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 
 
@@ -597,6 +598,8 @@ def describe_route(sample_dir, candidate_index):
     route = np.asarray(cm[candidate_index]["polyline_xz"], float)
     cands = candidates(frame, route)
     events = build_events(frame, cands)
+    if not events and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:
+        return _none("no_events_bent")                   # "go straight ahead" would be false
     stop = stop_phrase(frame, route, events, cands)
     if stop is None:
         return _none("no_stop_anchor", n_events=len(events))
