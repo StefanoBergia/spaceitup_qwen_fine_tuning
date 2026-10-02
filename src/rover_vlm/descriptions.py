@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 
 from .habitat_data import description_entry_prompt, instruction_endpoints_prompt
 from .instructions import (
-    _DRAWING, _EGOCENTRIC, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index, choose_style,
+    _DRAWING, _EGOCENTRIC, _TRAILING, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index, choose_style,
     head_noun, normalize_name,
 )
 from .traces import SCENE_INTRO, answer_payload, parse_trace
@@ -234,15 +234,10 @@ def name_rejects(name, kind, need):
     # Rule N2: "unit" is not generic when preceded by a modifier from UNIT_MODIFIERS
     noun = head_noun(name)
     if noun in GENERIC_NAMES or noun is None:
-        if noun == "unit":
-            # Check if the word before "unit" is in UNIT_MODIFIERS
-            words = name.lower().split()
-            if len(words) >= 2 and words[-2] in UNIT_MODIFIERS:
-                # It's a valid unit (e.g., "shelving unit"), not generic
-                pass
-            else:
-                out.append("name:generic")
-        else:
+        # Use the same word extraction as head_noun to strip trailing phrases correctly
+        words = re.findall(r"[a-z]+", _TRAILING.sub("", (name or "").lower()))
+        is_valid_unit = noun == "unit" and len(words) >= 2 and words[-2] in UNIT_MODIFIERS
+        if not is_valid_unit:
             out.append("name:generic")
     if _DRAWING.search(name):
         out.append("name:drawing")

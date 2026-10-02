@@ -434,6 +434,11 @@ def test_name_rule_n2_unit_with_modifier_not_generic():
     assert name_rejects("corner unit", "object", "object") == []
     assert name_rejects("drawer unit", "object", "object") == []
     assert name_rejects("cabinet unit", "object", "object") == []
+    # Trailing phrases should not interfere with the modifier check
+    assert name_rejects("shelving unit with books", "object", "object") == []
+    assert name_rejects("white shelving unit", "object", "object") == []
+    assert "name:generic" not in name_rejects("white shelf unit with door", "object", "object")
+    assert name_rejects("tv unit on wall", "object", "object") == []
 
 
 def test_name_rule_n2_unit_without_modifier_is_generic():
