@@ -754,3 +754,86 @@ def test_label_route_uses_d1_styles():
         seen = []
         label_route(lambda p, s: (seen.append(" ".join(p.split())) or "", "stop"), {**row, "id": rid}, NAMES, seed=0)
         assert choose_d1_style(rid) in seen[0]
+
+
+# ---- mixed namer: name clash + fallback names -------------------------------------------------
+def _route(events, stop):
+    return {"id": "f_L", "pair_id": None, "kind": "instructed", "events": events, "stop": stop}
+
+
+def test_name_clash_same_head_noun_on_two_ids():
+    from rover_vlm.descriptions import name_clash
+    row = _route([BETWEEN], NEAR)           # f:b2, f:b3, stop f:b5
+    assert not name_clash(row, NAMES)
+    assert name_clash(row, {**NAMES, "f:b2": "wooden bench", "f:b3": "old bench"})
+    assert name_clash(row, {**NAMES, "f:b5": "stone column"})      # event member vs stop object
+
+
+def test_name_clash_same_id_twice_and_unnamed_are_not_clashes():
+    from rover_vlm.descriptions import name_clash
+    row = _route([PASS_L, PASS_L], NEAR)    # f:b1 twice
+    assert not name_clash(row, NAMES)
+    row = _route([BETWEEN], NEAR)
+    assert not name_clash(row, {"f:b2": "bench"})                  # f:b3 / f:b5 unnamed
+
+
+def _good_ask(text):
+    return lambda p, s: (_reply({"description": text}), "stop")
+
+
+GOOD = "Please keep left of the coffee table and stop in front of the fridge."
+
+
+def test_label_route_primary_names_tagged_primary():
+    out = label_route(_good_ask(GOOD), _route([PASS_L], NEAR), NAMES, seed=0, fallback_names={"f:b1": "x"})
+    assert out["passed"] and out["namer"] == "primary"
+
+
+def test_label_route_uses_fallback_when_primary_unnamed():
+    primary = {"f:b5": "fridge"}            # f:b1 unnamed
+    out = label_route(_good_ask(GOOD), _route([PASS_L], NEAR), primary, seed=0, fallback_names=NAMES)
+    assert out["passed"] and out["namer"] == "fallback" and out["description"] == GOOD
+
+
+def test_label_route_uses_fallback_on_primary_clash_and_composes_with_fallback_names():
+    row = _route([BETWEEN], NEAR)
+    primary = {**NAMES, "f:b2": "wooden bench", "f:b3": "wooden bench"}
+    seen = []
+    out = label_route(lambda p, s: (seen.append(p) or "junk", "stop"), row, primary, seed=0, fallback_names=NAMES)
+    assert out["namer"] == "fallback" and any("stone column" in " ".join(p.split()) for p in seen)
+
+
+def test_label_route_clash_in_both_rejects_name_clash_without_a_call():
+    row = _route([BETWEEN], NEAR)
+    clash = {**NAMES, "f:b2": "wooden bench", "f:b3": "wooden bench"}
+
+    def boom(p, s):
+        raise AssertionError("no call expected")
+    out = label_route(boom, row, clash, seed=0, fallback_names=clash)
+    assert out["passed"] is False and out["rejects"] == ["name:clash"] and out["description"] is None
+    out = label_route(boom, row, clash, seed=0)       # Cosmos-only run: clash rule still applies
+    assert out["rejects"] == ["name:clash"]
+
+
+def test_label_route_unnamed_in_both_is_unnamed_object():
+    def boom(p, s):
+        raise AssertionError("no call expected")
+    out = label_route(boom, _route([PASS_L], NEAR), {"f:b5": "fridge"}, seed=0, fallback_names={"f:b5": "fridge"})
+    assert out["rejects"] == ["unnamed_object"] and out["missing"] == ["f:b1"]
+
+
+def test_names_missing_counts_a_name_in_either_file():
+    from rover_vlm.descriptions import names_missing
+    route = {"events": [{"objects": ["a", "b"]}, {"objects": ["c"]}], "stop": {"object": "d"}}
+    assert names_missing(route, {"a": "x"}, {"b"}, {"c": "y", "b": "z"}, set()) == ["d"]
+    # rejected in primary but only an error row in fallback -> still a retryable gap
+    assert names_missing(route, {"a": "x", "c": "y", "d": "w"}, {"b"}, {}, set()) == ["b"]
+    assert names_missing(route, {"a": "x", "c": "y", "d": "w"}, {"b"}, {}, {"b"}) == []
+
+
+def test_summarize_d1_reports_namer_counts():
+    comp = [{"id": "1", "passed": True, "instruction_source": "cosmos", "namer": "primary", "rejects": []},
+            {"id": "2", "passed": True, "instruction_source": "cosmos", "namer": "primary", "rejects": []},
+            {"id": "3", "passed": True, "instruction_source": "cosmos", "namer": "fallback", "rejects": []},
+            {"id": "4", "passed": False, "rejects": ["name:clash"]}]
+    assert summarize_d1(comp, "compose")["namer"] == {"primary": 2, "fallback": 1}

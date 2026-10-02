@@ -13,6 +13,8 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
         --events data/prepared_habitat_instr_v2/events_eval.jsonl \
         --names outputs/instr_labels_v3/names_eval_d1.jsonl \
         --out outputs/instr_labels_v3/desc_eval_d1.jsonl --concurrency 8 --resume
+    #   --fallback-names OTHER_names.jsonl: used per route when --names leaves an object unnamed or two
+    #   objects share a head noun ("name:clash"); rows carry "namer": primary|fallback
     # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
     # slurm/label_descriptions.sbatch keeps the name stage report-only)
 
@@ -52,6 +54,8 @@ def main() -> None:
     p.add_argument("--events", type=Path, required=True, help="events_*.jsonl")
     p.add_argument("--objects", type=Path, help="objects_*.jsonl (stage name)")
     p.add_argument("--names", type=Path, help="names_*_d1.jsonl from stage name (stage compose)")
+    p.add_argument("--fallback-names", type=Path,
+                   help="second names file (same format); tried when --names leaves an object unnamed or clashes")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--limit", type=int, default=None, help="first N described routes (and their objects)")
     p.add_argument("--endpoint", default=None)
@@ -82,6 +86,14 @@ def main() -> None:
         name_rows = jsonl(args.names)
         names, rejected = name_rows_split(name_rows)
         kinds = {r["id"]: r.get("need") for r in name_rows}   # kind_hint: walls get "past the end of"
+        fb_names = fb_rejected = None
+        if args.fallback_names:
+            if not args.fallback_names.exists():
+                raise SystemExit(f"--fallback-names {args.fallback_names} not found")
+            fb_rows = jsonl(args.fallback_names)
+            fb_names, fb_rejected = name_rows_split(fb_rows)
+            for r in fb_rows:                      # same object ids -> same need; fill ids the primary lacks
+                kinds.setdefault(r["id"], r.get("need"))
         items, key = routes, "id"
     args.out.parent.mkdir(parents=True, exist_ok=True)
     done, mode = prepare_output(args.out, resume=args.resume, overwrite=args.overwrite)
@@ -102,12 +114,12 @@ def main() -> None:
         def work(it):
             t0 = time.time()
             if args.stage == "compose":   # a name that never got an answer is retryable, not a rejection
-                gap = names_missing(it, names, rejected)
+                gap = names_missing(it, names, rejected, fb_names, fb_rejected)
                 if gap:
                     return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
                 row = (label_object(ask_image, it, args.seed) if args.stage == "name"
-                       else label_route(ask_text, it, names, args.seed, kinds))
+                       else label_route(ask_text, it, names, args.seed, kinds, fb_names))
             except Exception as e:  # noqa: BLE001 — one bad item must not kill the run
                 return {"id": it[key], "error": f"{type(e).__name__}: {e}"}
             row["latency_s"] = round(time.time() - t0, 2)

@@ -404,14 +404,41 @@ def route_objects(row):
     return ids + ([row["stop"]["object"]] if row["stop"]["object"] else [])
 
 
-def label_route(ask_text, row, names, seed, kinds=None):
+def name_clash(row, names):
+    """True when two DIFFERENT route objects (event members + stop) share a head noun under `names`.
+    Unnamed objects never clash (that is `unnamed_object`); the same id twice is one object."""
+    seen = set()
+    for o in dict.fromkeys(route_objects(row)):
+        h = head_noun(names[o]) if names.get(o) else None
+        if h:
+            if h in seen:
+                return True
+            seen.add(h)
+    return False
+
+
+def _usable(row, names):
+    return all(names.get(o) for o in route_objects(row)) and not name_clash(row, names)
+
+
+def label_route(ask_text, row, names, seed, kinds=None, fallback_names=None):
     """Compose one route's description: two Cosmos attempts, then the template. `kinds` (object
-    id -> kind_hint, e.g. the name rows' "need") lets the template say "past the end of" a wall."""
+    id -> kind_hint, e.g. the name rows' "need") lets the template say "past the end of" a wall.
+    `names` is tried first; if it leaves an object unnamed or two objects share a head noun,
+    `fallback_names` is tried; the row's "namer" says which one was used."""
     out = {"id": row["id"], "pair_id": row.get("pair_id"), "kind": row.get("kind"), "prompt_version": PROMPT_VERSION}
-    missing = [o for o in route_objects(row) if not names.get(o)]
-    if missing:
+    if _usable(row, names):
+        namer = "primary"
+    elif fallback_names is not None and _usable(row, fallback_names):
+        names, namer = fallback_names, "fallback"
+    else:
+        tried = [names] + ([fallback_names] if fallback_names is not None else [])
+        missing = [o for o in route_objects(row) if not any(n.get(o) for n in tried)]
+        if missing:
+            return {**out, "passed": False, "description": None, "instruction_source": None,
+                    "rejects": ["unnamed_object"], "missing": missing}
         return {**out, "passed": False, "description": None, "instruction_source": None,
-                "rejects": ["unnamed_object"], "missing": missing}
+                "rejects": ["name:clash"]}
     style, shape = choose_d1_style(row["id"]), choose_shape(row["id"])
     prompt = compose_prompt(row["events"], row["stop"], names, style, shape, kinds)
     rejects, raws = [], []
@@ -422,12 +449,13 @@ def label_route(ask_text, row, names, seed, kinds=None):
         rejects = description_rejects(text, row["events"], row["stop"], names)
         if not rejects:
             return {**out, "description": text, "instruction_source": "cosmos", "passed": True, "rejects": [],
-                    "cosmos_rejects": [], "style": style, "shape": shape, "attempts": attempt}
+                    "cosmos_rejects": [], "style": style, "shape": shape, "attempts": attempt,
+                    "namer": namer}
     tpl = template_description(row["events"], row["stop"], names, kinds)
     trej = description_rejects(tpl, row["events"], row["stop"], names)
     return {**out, "description": tpl if not trej else None, "instruction_source": "template",
             "passed": not trej, "rejects": trej, "cosmos_rejects": rejects, "style": style, "shape": shape,
-            "attempts": 2, "raw": raws}
+            "attempts": 2, "raw": raws, "namer": namer}
 
 
 def select_routes(rows, limit=None):
@@ -445,6 +473,7 @@ def summarize_d1(rows, stage):
         out["template_share"] = round(sum(r.get("instruction_source") == "template" for r in passed)
                                       / len(passed), 4) if passed else 0.0
         out["cosmos_rejects"] = dict(Counter(x for r in ok for x in r.get("cosmos_rejects", [])).most_common(15))
+        out["namer"] = dict(Counter(r["namer"] for r in passed if r.get("namer")))
     return out
 
 
@@ -466,9 +495,14 @@ def name_rows_split(rows):
     return named, rejected
 
 
-def names_missing(row, named, rejected):
-    """Route objects with no name row or only an error row (a retryable gap, not a rejection)."""
-    return [o for o in route_objects(row) if o not in named and o not in rejected]
+def names_missing(row, named, rejected, fallback_named=None, fallback_rejected=None):
+    """Route objects with no name row or only an error row (a retryable gap, not a rejection).
+    A name in either file counts as present; an unnamed object is a rejection only when every
+    file given ran it and rejected it."""
+    files = [(named, rejected)] + ([(fallback_named, fallback_rejected or set())]
+                                   if fallback_named is not None else [])
+    return [o for o in route_objects(row)
+            if not any(o in n for n, _ in files) and any(o not in r for _, r in files)]
 
 
 ENTRY_SHARE = 70   # percent of frames whose records get the entry-only prompt (user, 2026-09-30)
