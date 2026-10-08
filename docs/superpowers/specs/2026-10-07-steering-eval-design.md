@@ -261,3 +261,40 @@ text versions, records, metrics, gates (Gate 0 still ≥ 150 pairs per slice; be
 **Run order (replaces the spec's).** `steer-objects` → `STAGE=steer_names` (GPU) → `steer-propose` →
 `navmesh_plan.py` → `steer` → `steer-select` (Gate 0) → audit (Gate 1) → `STAGE=steer` compose (Gate 2) →
 `finalize-steer` → eval → report.
+
+## Addendum A2 (2026-10-08): one slice of stop pairs; the side slice is not viable on these frames
+
+**Why.** Built per A1 (plan Tasks 6–8), the navmesh pipeline still keeps almost nothing. On 200 original
+eval frames, with a stand-in name for every nameable object and routes planned on the real navmesh at
+0.30 m: **0 side pairs and 1 destination pair** (side: vias/stop off the navmesh, nothing else between the
+routes; destination: named objects < 1 m from the entry, so the stop point falls behind it). Lowering
+`MIN_AHEAD_M` to 0.5 changes nothing. The generator's own two-detour pairs (d1's 231 eval pairs) have a
+mapped object between the two routes in only 15 cases (1 with exactly one named object). What does work:
+**cutting one ground-truth route at two points with different stop phrases** — 111 / 200 original frames
+(55%), ends a median 0.18 apart in the image, each route failing the other's text. Probes:
+`.superpowers/sdd/2026-10-07-steering-eval/progress.md`.
+
+**Decisions (user, 2026-10-08).** The set has one slice, **stop**: same entry, same route, two stop points
+whose texts differ (in the stop phrase, and in the events the longer route adds). The side slice is dropped
+(it would need purpose-built Habitat frames). The side-slice and navmesh-planning code is removed (git
+history keeps it: commits 85c2727..2c29b6a). Everything else from the spec and A1 stands: every visible
+object is named (A1 §4), text versions, records, exclusivity, name clashes, metrics (the destination rule),
+gates — Gate 0 is ≥ 150 pairs for the one slice.
+
+**Pair construction (replaces "Pair construction" and A1 §1–3).**
+- Route: the frame's d1 ground-truth candidate polyline (`meta.candidates[candidate_index]`, planned by the
+  generator on the navmesh — drivable by construction).
+- Cuts at shares `CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)` of its length; a cut must keep ≥
+  `MIN_ROUTE_M = 1.5` m. Each cut is described from the rover's pose (`route_events.describe_xz`, as d1's
+  routes), and its answer is the part from where it reaches the image's bottom edge, built as in A1 §3.
+- A pair = two cuts whose stop phrases differ (`stop_key`), whose answer ends are ≥ `MIN_SEP_UV = 0.1` apart,
+  and which are mutually exclusive under `eval.description_follow`; tags A (earlier stop) / B. One pair per
+  viewpoint, the original frame first, then the largest end separation.
+- Names: the A5 rule per route; a stop object whose name's head noun is shared by another object of the frame
+  drops the pair; two stops at the same object ("just past" vs "well past the chair") are allowed.
+
+**Files.** `eval_steer_stop_{template,composed}_{entry,goal}.json` (4 files). Metric: the destination rule
+(prediction's end closer to its own route's end than to its sibling's), text-blind = 0%.
+
+**Run order (replaces A1's).** `steer-objects` → `STAGE=steer_names` (GPU) → `steer` → `steer-select`
+(Gate 0) → audit (Gate 1) → `STAGE=steer` compose (Gate 2) → `finalize-steer` → eval → report.
