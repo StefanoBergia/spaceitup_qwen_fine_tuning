@@ -379,3 +379,23 @@ def test_frame_pairs_with_recorded_then_looked_up_routes(tmp_path):
     routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
     pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.lookup_planner(routes))
     assert [p["pair_id"] for p in pairs if p["slice"] == "dest"] == [f"steer_dest_g_b{a}_b{b}"]
+
+
+def test_name_pair_clash_with_an_object_named_only_in_the_fallback(tmp_path):
+    meta, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    pair, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
+    oid = f"f:b{blob}"
+    assert st.name_pair(pair, {oid: "sofa"}, {}, {}) != "name_clash"
+    pair, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
+    assert st.name_pair(pair, {oid: "sofa"}, {"f:b999": "leather sofa"}, {}) == "name_clash"
+
+
+def test_lookup_planner_distinguishes_no_route_from_never_requested(tmp_path):
+    _, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    key = st.request_key("f", [(1.0, 2.0)])
+    plan = st.lookup_planner({key: None, st.request_key("f", [(3.0, 4.0)]): [[0, 0], [1, 1]]})
+    assert plan(frame, [(1.0, 2.0)]) is None
+    assert plan(frame, [(3.0, 4.0)]).shape == (2, 2)
+    with pytest.raises(KeyError):
+        plan(frame, [(9.0, 9.0)])

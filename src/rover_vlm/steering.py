@@ -2,8 +2,11 @@
 
 The d1 eval pairs could not test steering (2026-10-07): both routes of every pair end at the
 frame's goal and diverge only behind obstacles, so one route satisfied the other's events 94%
-of the time. Here routes are planned on the frame's own map (state.npz): known free floor the
-camera sees, at least CLEAR_M from every obstacle.
+of the time. Here the builders take an injected planner (Addendum A1): in production the scene
+navmesh baked at CLEAR_M = 0.30 m, planned by scripts/navmesh_plan.py and fed back through
+lookup_planner; the frame-map A* (map_planner) is the unit tests' stand-in. Routes may cross
+floor the camera never saw and leave the view: they are clipped like d1's, and stretches behind
+an obstacle carry v = 0 in the answer path.
 
 - side slice: same entry and stop, the route passes one named object O on opposite sides;
 - destination slice: same entry, two "stop in front of" targets clearly apart in the image.
@@ -207,9 +210,13 @@ def recording_planner(requests):
 
 
 def lookup_planner(routes):
-    """plan() answering from navmesh routes {key: route_xz or None} (navmesh_plan.py output)."""
+    """plan() answering from navmesh routes {key: route_xz or None} (navmesh_plan.py output): a None
+    value is "planned, no route"; a key that was never requested raises KeyError."""
     def plan(frame, waypoints_xz):
-        r = routes.get(request_key(frame.name, waypoints_xz))
+        key = request_key(frame.name, waypoints_xz)
+        if key not in routes:      # never requested: propose/steer drift, not a planning failure
+            raise KeyError(key)
+        r = routes[key]
         return None if r is None else np.asarray(r, float)
     return plan
 
@@ -399,11 +406,18 @@ def load_names(primary_rows, fallback_rows):
     return names, fallback, kinds
 
 
-def frame_clash(oid, names):
-    """True when another object of the same frame has a name with the same head noun."""
-    frame, h = oid.split(":")[0], head_noun(names.get(oid))
-    return bool(h) and any(o != oid and o.split(":")[0] == frame and head_noun(n) == h
-                           for o, n in names.items())
+def frame_clash(oid, chosen, names=None, fallback=None):
+    """True when another object of the same frame has a name with the same head noun as `oid`'s
+    chosen name. Another object's names count from `chosen` and from both name files (either name
+    of it counts), so a clash named only in the other file is still found."""
+    frame, h = oid.split(":")[0], head_noun(chosen.get(oid))
+    if not h:
+        return False
+    for src in (chosen, names or {}, fallback or {}):
+        for o, n in src.items():
+            if o != oid and o.split(":")[0] == frame and head_noun(n) == h:
+                return True
+    return False
 
 
 def name_pair(pair, names, fallback, kinds):
@@ -417,7 +431,7 @@ def name_pair(pair, names, fallback, kinds):
         if chosen is None:
             return "unnamed_object" if reject == "unnamed_object" else "name_clash"
         anchor = pair["anchor"] or r["target"]
-        if frame_clash(anchor, chosen):
+        if frame_clash(anchor, chosen, names, fallback):
             return "name_clash"
         heads.append(head_noun(chosen[anchor]))
         r.update(namer=namer, names={o: chosen[o] for o in route_objects(row)},
@@ -451,6 +465,9 @@ def frame_pairs(sample_dir, start_uv, names, fallback, kinds, plan):
         reasons["no_state"] += 1
         return [], reasons
     meta, frame = load_frame(sd)
+    pre = f"{frame.name}:"      # naming only needs this frame's objects
+    names = {o: n for o, n in names.items() if o.startswith(pre)}
+    fallback = {o: n for o, n in (fallback or {}).items() if o.startswith(pre)}
     start = entry_floor(meta, start_uv)
     if start is None:
         reasons["no_start"] += 1

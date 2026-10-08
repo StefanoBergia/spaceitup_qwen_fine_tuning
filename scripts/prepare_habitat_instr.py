@@ -368,12 +368,12 @@ def steer_frame(item):
         pairs, reasons = frame_pairs(item["sample_dir"], item["start_uv"], _STEER["names"],
                                      _STEER["fallback"], _STEER["kinds"],
                                      steering.map_planner())  # replaced in Task 8
+        floor_y = steering.floor_height(item["sample_dir"])
+        for p in pairs:
+            p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
+                     floor_y=floor_y)
     except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
         return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
-    floor_y = steering.floor_height(item["sample_dir"])
-    for p in pairs:
-        p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
-                 floor_y=floor_y)
     return pairs, dict(reasons), None
 
 
