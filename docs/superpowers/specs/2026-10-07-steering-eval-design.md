@@ -215,3 +215,49 @@ Models: d1 (`outputs/runs_desc/d1/adapter`); round-4 LoRA on the goal-form files
 
 Steering training data; re-rendering or re-planning in Habitat; new naming runs; changing d1's
 stop rules (open question 2 in NOTES.md — this set measures the stop, it does not fix it).
+
+## Addendum A1 (2026-10-08): routes on the scene navmesh at 0.3 m, every visible object named
+
+**Why.** Built as specified (plan Tasks 1–5, commit ff1c8ba), the frame-map planner kept **0 pairs** on
+all 2,105 eval frames (no errors). Throwaway probes on 200 original frames
+(`.superpowers/sdd/2026-10-07-steering-eval/progress.md`):
+- the known-free floor piece the entry connects to is median 3.1 m² (p10 0.05 m²), and floor behind an
+  object is never seen, so "a shared stop beyond O on known floor" almost never exists — 0 pairs even with
+  every blob named and no minimum distance;
+- treating unseen in-view floor as drivable (the generator's own `unknown_blocks=False`): 1 pair / 200;
+- on the true scene navmesh (feasibility only, before the text filters): at 0.45 m with d1's names 6% side /
+  1.5% dest frames; every visible object named 9% / 20%; **at 0.30 m with every object named 22% / 24%**
+  (≈ 185 / 205 of the 845 viewpoints as an upper bound). d1 named only the objects on its own routes: 64% of
+  eval frames have no nameable non-wall object.
+
+**Decisions (user, 2026-10-08).** Routes come from the scene navmesh baked at `CLEAR_M = 0.30` m; every
+visible non-wall object of the eval frames gets a name (one Gemma job). Everything not listed below is
+unchanged: pair rules (`MIN_SEP_UV`, `MIN_DEST_DU`, `DEST_GAP_M`, `MIN_AHEAD_M`, `INSIDE_FRAC`, two-sided
+enclosure on the frame map, events identical except O's side, identical stops, exclusivity, name clashes),
+text versions, records, metrics, gates (Gate 0 still ≥ 150 pairs per slice; below it, back to the user).
+
+1. **Clearance 0.30 m** (was 0.45): via points sit `0.30 + 0.1` m beside O, the navmesh is baked at agent
+   radius 0.30. Steering routes pass objects tighter than training routes (≈ 0.48 m); the side metric only
+   asks which side.
+2. **Planning in three steps.** (a) `steer-propose` (uv, CPU) runs the pair builders with a planner that
+   records every waypoint request (side: start → via → stop for each stop distance; destination: start →
+   target) and writes them; (b) `scripts/navmesh_plan.py` (the `habitat` env, run with
+   `~/miniforge3/envs/habitat/bin/python` — `conda run` picks up the repo's `.python-version`) snaps every
+   waypoint onto the navmesh (≤ 0.3 m), joins one geodesic per leg and writes the routes; (c) `steer` (uv)
+   runs the same builders with a planner that answers from those routes. The builders take the planner as
+   an argument; unit tests inject the frame-map A* (plan Task 1) as a stand-in. Routes planned on the
+   navmesh are navigable by construction, so the separate navmesh check is dropped.
+3. **Routes may cross unseen floor and leave the view**, like d1's: the answer is the route densified at
+   5 cm, projected, `v = 0` where the frame map has an occupied cell between camera and floor point
+   (`route_events.first_blocker`), clipped to the image, resampled with transitions. A route passing less
+   than 0.3 m in front of the camera is dropped (`behind_camera`).
+4. **Naming every visible object.** `steer-objects` (uv, CPU) writes an object row (as d1's: outline, crop,
+   image) for every eval-frame blob that is shorter than `WALL_EXTENT_M`, has ≥ `MIN_VISIBLE_CELLS`
+   visible cells and an outline ≥ `MIN_AREA`, and is not named yet; `STAGE=steer_names sbatch
+   slurm/label_descriptions.sbatch` names them with Gemma (`label_descriptions.py --stage name
+   --all-objects`). Names: primary = d1 Gemma ∪ steer Gemma (disjoint ids), fallback = d1 Cosmos. Name
+   quality is judged in the Gate 1 audit ("wrong object").
+
+**Run order (replaces the spec's).** `steer-objects` → `STAGE=steer_names` (GPU) → `steer-propose` →
+`navmesh_plan.py` → `steer` → `steer-select` (Gate 0) → audit (Gate 1) → `STAGE=steer` compose (Gate 2) →
+`finalize-steer` → eval → report.
