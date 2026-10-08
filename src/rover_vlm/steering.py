@@ -320,6 +320,8 @@ def dest_route(frame, meta, mask, start, blob):
     if desc["reason"] or stop.get("type") != "near" or stop.get("relation") != "in front of" \
             or stop.get("object") != oid:
         return None, "no_stop"
+    if any(oid in e["objects"] for e in desc["events"]):
+        return None, "target_passed"      # another cell of the blob lies within PASS_M of the route
     path = answer_path(frame.cam, route)
     if len(path) < 2:
         return None, "too_short"

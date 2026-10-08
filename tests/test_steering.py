@@ -239,3 +239,14 @@ def test_dest_route_too_short_and_wrong_stop(tmp_path, monkeypatch):
         "reason": None, "events": [], "stop": {"type": "near", "relation": "in front of", "object": "g:b999"}})
     r, why = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 70]))
     assert r is None and why == "no_stop"
+
+
+def test_dest_route_rejects_target_that_is_also_a_pass_event(tmp_path, monkeypatch):
+    meta, frame, mask = _frame(tmp_path, _dest_state(), name="h")
+    blob = int(frame.lab[70, 70])
+    oid = f"h:b{blob}"
+    monkeypatch.setattr(st, "describe_xz", lambda m, f, route: {
+        "reason": None, "events": [{"type": "pass", "side": "left", "objects": [oid]}],
+        "stop": {"type": "near", "relation": "in front of", "object": oid}})
+    r, why = st.dest_route(frame, meta, mask, START, blob)
+    assert r is None and why == "target_passed"
