@@ -9,8 +9,9 @@ that point visible, hollow = obstructed. That keeps the colour channel free to m
 
 import base64
 import io
+import textwrap
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 WHITE = (255, 255, 255)
 VIS_GREEN = (0, 160, 0)
@@ -129,3 +130,25 @@ def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, 
             img.thumbnail((max_px, max_px), Image.LANCZOS)
         panels.append(img)
     return side_by_side(*panels)
+
+
+DESC_PRED = (255, 140, 0)
+
+
+def description_panel(image_path, rows, px, text_h, max_lines):
+    """Prediction rows side by side, one tile each: the frame with the GT path (thick grey) and the
+    prediction (orange), the row's description underneath (render_desc_videos, visualize_steering)."""
+    font = ImageFont.load_default()
+    out = Image.new("RGB", (px * len(rows), px + text_h), (0, 0, 0))
+    for i, row in enumerate(rows):
+        img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
+        d = ImageDraw.Draw(img)
+        draw_polyline(d, [(p[0], p[1]) for p in row["gt"]["path"]], GT_GREY, px, px, width=8)
+        if (row.get("parsed") or {}).get("path"):
+            draw_polyline(d, [(p[0], p[1]) for p in row["parsed"]["path"]], DESC_PRED, px, px, width=4)
+        tile = Image.new("RGB", (px, px + text_h), (20, 20, 20))
+        tile.paste(img, (0, 0))
+        text = "\n".join(textwrap.wrap(row["habitat_meta"].get("instruction") or "", width=max(20, px // 8))[:max_lines])
+        ImageDraw.Draw(tile).multiline_text((6, px + 4), text, fill=(235, 235, 235), font=font, spacing=2)
+        out.paste(tile, (i * px, 0))
+    return out

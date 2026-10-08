@@ -1523,6 +1523,32 @@ prediction ending at the set's mean goal; goals cluster near x = 0.5, so that ba
 `eval_desc_shuffled` gives each frame another frame's description: its follow rate should fall
 well below `eval_desc_entry`, otherwise the model is not reading the text.
 
+### Steering eval (2026-10-07)
+
+Does d1 *steer* — does changing only the text change the route the way the text says? The d1
+pairs cannot tell (both routes end at the same goal and differ only behind obstacles). This
+eval-only set keeps each eval frame's ground-truth route and cuts it at two points whose stop phrases
+differ: same image, same entry, same route, two texts, two different ends; each route fails the other's
+text. Every visible object is named first. Side pairs (one object passed on either side) proved not viable
+on these frames — see the spec's Addenda A1/A2: `docs/superpowers/specs/2026-10-07-steering-eval-design.md`.
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py steer-objects               # objects to name (CPU)
+    STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # Gemma names them (GPU)
+    uv run scripts/prepare_habitat_instr.py steer                       # candidate stop pairs (CPU)
+    uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150)
+    uv run scripts/audit_instruction_labels.py --mode steer --n 50      # Gate 1 audit page (>= 90% true)
+    STAGE=steer sbatch slurm/label_descriptions.sbatch                  # composed text (GPU, < 1 h)
+    uv run scripts/prepare_habitat_instr.py finalize-steer              # 8 files; Gate 2 (>= 85% composed)
+    SETS=steer sbatch slurm/eval_descriptions.sbatch                    # d1 on the 4 sets
+    SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
+    uv run scripts/visualize_steering.py                                # outputs/steering_report.html
+    uv run scripts/render_desc_videos.py --set eval_steer_stop_template_entry --tag d1 --n 20
+
+Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, candidates, rows, meta),
+`data/prepared_habitat_instr_v3/eval_steer_stop_{template,composed}_{entry,goal}.json`,
+`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success (text-blind = 0%).
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,

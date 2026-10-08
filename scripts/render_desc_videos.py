@@ -13,15 +13,13 @@ Writes outputs/eval_desc/<set>/<tag>/paths.mp4.
 import argparse
 import json
 import subprocess
-import textwrap
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
-from rover_vlm.overlay import GT_GREY, draw_polyline
+from rover_vlm.overlay import description_panel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PRED = (255, 140, 0)
 HOLD_S = 3
 FPS = 2
 TEXT_H = 90
@@ -47,26 +45,8 @@ def missing_images(frames, images):
     return [r["id"] for f in frames for r in f if r["id"] not in images]
 
 
-def _tile(image_path, row, px, font):
-    img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
-    d = ImageDraw.Draw(img)
-    draw_polyline(d, [(p[0], p[1]) for p in row["gt"]["path"]], GT_GREY, px, px, width=8)
-    if (row.get("parsed") or {}).get("path"):
-        draw_polyline(d, [(p[0], p[1]) for p in row["parsed"]["path"]], PRED, px, px, width=4)
-    tile = Image.new("RGB", (px, px + TEXT_H), (20, 20, 20))
-    tile.paste(img, (0, 0))
-    text = "\n".join(textwrap.wrap(row["habitat_meta"].get("instruction") or "", width=max(20, px // 8))[:5])
-    ImageDraw.Draw(tile).multiline_text((6, px + 4), text, fill=(235, 235, 235), font=font, spacing=2)
-    return tile
-
-
 def panel(image_path, rows, px=448):
-    font = ImageFont.load_default()
-    tiles = [_tile(image_path, r, px, font) for r in rows]
-    out = Image.new("RGB", (px * len(tiles), tiles[0].height), (0, 0, 0))
-    for i, t in enumerate(tiles):
-        out.paste(t, (i * px, 0))
-    return out
+    return description_panel(image_path, rows, px, TEXT_H, 5)
 
 
 def main() -> None:

@@ -399,3 +399,43 @@ def test_finalize_steer_stage_refuses_missing_compose_rows(tmp_path):
     args.allow_missing = True
     prep.stage_finalize_steer(args)
     assert len(json.loads((tmp_path / "eval_steer_stop_template_entry.json").read_text())) == 2
+
+
+def _viz():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "visualize_steering", Path(__file__).resolve().parent.parent / "scripts" / "visualize_steering.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _pred(rid, sib, pred, gt, side):
+    return {"id": rid, "generated": json.dumps(pred), "parsed": {"path": pred}, "gt": {"path": gt},
+            "habitat_meta": {"sibling_id": sib, "instruction": f"go {side}",
+                             "desc_check": {"pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 3], "events": []},
+                             "steer": {"slice": "stop", "anchor": "x", "anchor_event": None, "side": None, "viewpoint": "v"}}}
+
+
+def test_metric_cells_reads_predictions_per_set_and_tag(tmp_path):
+    vz = _viz()
+    run = tmp_path / "eval_steer_stop_template_entry" / "d1"
+    run.mkdir(parents=True)
+    a = [[0.5, 1.0, 1], [0.3, 0.6, 1]]
+    b = [[0.5, 1.0, 1], [0.7, 0.6, 1]]
+    (run / "predictions.json").write_text(json.dumps([_pred("p_A", "p_B", a, a, "a"), _pred("p_B", "p_A", b, b, "b")]))
+    cells = vz.metric_cells(tmp_path, ["d1", "r4"])
+    assert len(cells) == 1
+    c = cells[0]
+    assert (c["slice"], c["text"], c["form"], c["tag"]) == ("stop", "template", "entry", "d1")
+    assert c["steering"]["pair_success"] == 1.0 and c["parse_rate"] == 1.0
+
+
+def test_pair_panel_size(tmp_path):
+    from PIL import Image
+    vz = _viz()
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64)).save(img)
+    a = _pred("p_A", "p_B", [[0.5, 1.0, 1], [0.3, 0.6, 1]], [[0.5, 1.0, 1], [0.35, 0.6, 1]], "a")
+    b = _pred("p_B", "p_A", [[0.5, 1.0, 1], [0.7, 0.6, 1]], [[0.5, 1.0, 1], [0.65, 0.6, 1]], "b")
+    assert vz.pair_panel(img, a, b, px=200).size == (400, 200 + vz.TEXT_H)
