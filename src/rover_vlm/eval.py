@@ -233,7 +233,8 @@ def aggregate_habitat_metrics(records):
     Records carrying habitat_meta.desc_check (route-description sets) also get a
     "description" block from aggregate_description_metrics: follow rate (every event and
     the stop), per-event-type rates, pair success, endpoint error next to the
-    constant-goal baseline."""
+    constant-goal baseline.
+    Steering sets (habitat_meta.steer) also get a "steering" block (aggregate_steering_metrics)."""
     n = len(records)
     parsed = [r for r in records if r.get("parsed") is not None]
     summary = {
@@ -260,6 +261,9 @@ def aggregate_habitat_metrics(records):
     desc = aggregate_description_metrics(records)
     if desc is not None:
         summary["description"] = desc
+    steer = aggregate_steering_metrics(records)
+    if steer is not None:
+        summary["steering"] = steer
     return summary
 
 
@@ -721,22 +725,29 @@ def _event_followed(floor, e):
     return int((a[0] != b[0] or tie) and max(a[1], b[1]) <= FOLLOW_NEAR_M)
 
 
-def description_follow(pred_path, check, gt_end_uv=None):
+def _floor_path(path, check):
+    """Floor xz of a predicted image path, consecutive duplicates removed (they give a zero
+    tangent in _pass_side)."""
+    floor = image_to_floor(path or [], check["pose_xz"], check["heading_xz"])
+    if len(floor):
+        keep = np.r_[True, np.linalg.norm(np.diff(floor, axis=0), axis=1) > 1e-9]
+        floor = floor[keep]
+    return floor
+
+
+def description_follow(pred_path, check, gt_end_uv=None, stop_tol_uv=STOP_TOL_UV):
     """Did a predicted path do what its description says? Per event and the stop.
 
     With `gt_end_uv` (the record's GT terminus, image [x, y]) the stop is the path's last
-    waypoint within STOP_TOL_UV of it; without it, the floor check against goal_xz."""
-    floor = image_to_floor(pred_path or [], check["pose_xz"], check["heading_xz"])
+    waypoint within stop_tol_uv of it; without it, the floor check against goal_xz."""
+    floor = _floor_path(pred_path, check)
     n = len(check["events"])
-    if len(floor):  # consecutive duplicate waypoints give a zero tangent in _pass_side
-        keep = np.r_[True, np.linalg.norm(np.diff(floor, axis=0), axis=1) > 1e-9]
-        floor = floor[keep]
     if len(floor) < 2:
         return {"follows": 0, "events": [0] * n, "stop": 0}
     res = [_event_followed(floor, e) for e in check["events"]]
     if gt_end_uv is not None:
         end = np.asarray(pred_path[-1][:2], float)
-        stop = int(np.linalg.norm(end - np.asarray(gt_end_uv[:2], float)) <= STOP_TOL_UV)
+        stop = int(np.linalg.norm(end - np.asarray(gt_end_uv[:2], float)) <= stop_tol_uv)
     else:
         stop = int(np.linalg.norm(floor[-1] - np.asarray(check["goal_xz"], float)) <= STOP_TOL_M)
     return {"follows": int(all(res) and stop), "events": res, "stop": stop}
@@ -788,4 +799,77 @@ def aggregate_description_metrics(records):
         # spans 0.545-0.629, so a text-blind endpoint is close — read endpoint error against this
         "constant_goal_endpoint_error_median": (float(np.median(np.linalg.norm(goals - goals.mean(0), axis=1)))
                                                 if len(goals) else None),
+    }
+
+
+# --- steering stop pairs (2026-10-08, spec docs/superpowers/specs/2026-10-07-steering-eval-design.md A2) ---
+def _xy(path):
+    return [p[:2] for p in path]
+
+
+def steer_scores(rec, sib):
+    """(own, swapped) hits of one steering record against its pair sibling: the prediction's end is
+    closer to this record's GT end than to the sibling's / the reverse (ties are neither).
+    Unparseable = (0, 0). A text-blind model gives one end for both texts: at most one hit a pair."""
+    path = (rec.get("parsed") or {}).get("path")
+    if not path:
+        return 0, 0
+    end = np.asarray(path[-1][:2], float)
+    d_own = float(np.linalg.norm(end - np.asarray(rec["gt"]["path"][-1][:2], float)))
+    d_sib = float(np.linalg.norm(end - np.asarray(sib["gt"]["path"][-1][:2], float)))
+    return int(d_own < d_sib), int(d_sib < d_own)
+
+
+def aggregate_steering_metrics(records):
+    """Steering summary for records carrying habitat_meta.steer, else None. Pairs are matched by
+    sibling_id; a record whose sibling is absent is skipped. Headline: pair success (both texts
+    steered their own way; text-blind = 0), with a 95% bootstrap interval over viewpoints. Also:
+    swap control, closer-to-own-GT rate, strict follow (all events + stop at 0.03 and 0.05), the
+    share of pairs whose two generations are identical, and the headline over pure pairs only
+    (steer.prefix_events True; absent = True) as pair_success_prefix_events / n_prefix_events."""
+    rows = [r for r in records if (r.get("habitat_meta") or {}).get("steer")]
+    by_id = {r["id"]: r for r in rows}
+    pairs, seen = [], set()
+    for r in rows:
+        sid = r["habitat_meta"].get("sibling_id")
+        if r["id"] in seen or sid not in by_id:
+            continue
+        pairs.append(tuple(sorted((r, by_id[sid]), key=lambda x: x["id"])))
+        seen |= {r["id"], sid}
+    if not pairs:
+        return None
+    succ, swap_pair, own_hits, swap_hits, closer, s03, s05, same, groups, pure = ([] for _ in range(10))
+    for a, b in pairs:
+        (oa, sa), (ob, sb) = steer_scores(a, b), steer_scores(b, a)
+        succ.append(int(oa and ob))
+        swap_pair.append(int(sa and sb))
+        own_hits += [oa, ob]
+        swap_hits += [sa, sb]
+        for x, y in ((a, b), (b, a)):
+            p = (x.get("parsed") or {}).get("path")
+            closer.append(int(bool(p) and trajectory_metrics(_xy(p), _xy(x["gt"]["path"]))["mean_point_error"]
+                              < trajectory_metrics(_xy(p), _xy(y["gt"]["path"]))["mean_point_error"]))
+        for tol, acc in ((STOP_TOL_UV, s03), (0.05, s05)):
+            acc.append(int(all((x.get("parsed") or {}).get("path") and description_follow(
+                x["parsed"]["path"], x["habitat_meta"]["desc_check"], _gt_end_uv(x), stop_tol_uv=tol)["follows"]
+                for x in (a, b))))
+        same.append(int(bool(a.get("generated")) and a.get("generated", "").strip() == b.get("generated", "").strip()))
+        groups.append(a["habitat_meta"]["steer"]["viewpoint"])
+        pure.append(bool(a["habitat_meta"]["steer"].get("prefix_events", True)))
+    lo, hi = clustered_bootstrap_ci(succ, groups)
+    pure_succ = [v for v, p in zip(succ, pure) if p]
+    return {
+        "slice": pairs[0][0]["habitat_meta"]["steer"]["slice"],
+        "n_pairs": len(pairs),
+        "pair_success": float(np.mean(succ)),
+        "pair_success_ci": [lo, hi],
+        "pair_success_prefix_events": float(np.mean(pure_succ)) if pure_succ else None,
+        "n_prefix_events": len(pure_succ),
+        "record_hit_rate": float(np.mean(own_hits)),
+        "swap_hit_rate": float(np.mean(swap_hits)),
+        "swap_pair_rate": float(np.mean(swap_pair)),
+        "closer_to_own_gt": float(np.mean(closer)),
+        "strict_pair_success_03": float(np.mean(s03)),
+        "strict_pair_success_05": float(np.mean(s05)),
+        "identical_prediction_pairs": float(np.mean(same)),
     }

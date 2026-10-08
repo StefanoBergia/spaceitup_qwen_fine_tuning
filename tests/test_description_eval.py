@@ -1,4 +1,6 @@
 """Description-followed metric: predicted image paths mapped back onto the frame's floor."""
+import json
+
 import numpy as np
 import pytest
 
@@ -208,3 +210,72 @@ def test_between_member_that_the_path_grazes_counts_on_either_side():
     far = check([{"type": "between", "side": None,
                   "obstacles": [[[0.3, 2.0]], [[0.6, 2.0]]], "gap_xz": None}])
     assert description_follow(straight, far)["events"] == [0]          # no graze: same side fails
+
+
+from rover_vlm.eval import aggregate_steering_metrics, steer_scores
+
+A_GT, B_GT = [(0.0, 0.8), (0.5, 2.0)], [(0.0, 0.8), (0.5, 2.0), (0.0, 3.5)]   # one route, two stops
+
+
+def _srec(rid, sib, pred_xz, gt_xz, vp="v1", prefix=None):
+    steer = {"slice": "stop", "anchor": None, "anchor_event": None, "side": None, "viewpoint": vp}
+    if prefix is not None:
+        steer["prefix_events"] = prefix
+    return {"id": rid, "generated": json.dumps(pred_xz) if pred_xz else "",
+            "parsed": {"path": to_image(pred_xz)} if pred_xz else None, "gt": {"path": to_image(gt_xz)},
+            "habitat_meta": {"pair_id": rid[:-2], "sibling_id": sib, "desc_check": check([]), "steer": steer}}
+
+
+def _pair(pa, pb, pid="p", prefix=None):
+    return [_srec(f"{pid}_A", f"{pid}_B", pa, A_GT, prefix=prefix),
+            _srec(f"{pid}_B", f"{pid}_A", pb, B_GT, prefix=prefix)]
+
+
+def test_stop_steering_perfect_blind_and_swapped():
+    m = aggregate_steering_metrics(_pair(A_GT, B_GT))
+    assert m["pair_success"] == 1.0 and m["swap_pair_rate"] == 0.0 and m["closer_to_own_gt"] == 1.0 and m["slice"] == "stop"
+    assert aggregate_steering_metrics(_pair(B_GT, B_GT))["pair_success"] == 0.0          # text-blind
+    m = aggregate_steering_metrics(_pair(B_GT, A_GT))
+    assert m["pair_success"] == 0.0 and m["swap_pair_rate"] == 1.0
+    ra, rb = _pair(B_GT, A_GT)
+    assert steer_scores(ra, rb) == (0, 1)
+
+
+def test_steering_unparseable_and_missing_sibling():
+    recs = _pair(None, B_GT)
+    m = aggregate_steering_metrics(recs)
+    assert m["n_pairs"] == 1 and m["pair_success"] == 0.0 and m["record_hit_rate"] == 0.5
+    assert aggregate_steering_metrics(recs[:1]) is None
+    assert aggregate_steering_metrics([{"id": "x", "habitat_meta": {}}]) is None
+
+
+def test_steering_block_in_habitat_summary_and_ci():
+    recs = _pair(A_GT, B_GT) + _pair(B_GT, B_GT, pid="q")
+    for r in recs:
+        r["metrics"] = {"mean_point_error": 0.0, "frechet": 0.0, "path_visibility_acc": 1.0, "goal_point_error": 0.0,
+                        "goal_visibility_correct": 1, "goal_copy_correct": 1, "start_point_error": 0.0,
+                        "start_copy_correct": 1}
+        r["gt"]["goal"] = r["gt"]["path"][-1]
+    s = aggregate_habitat_metrics(recs)["steering"]
+    assert s["n_pairs"] == 2 and s["pair_success"] == 0.5
+    lo, hi = s["pair_success_ci"]
+    assert 0.0 <= lo <= 0.5 <= hi <= 1.0
+    assert set(s) >= {"strict_pair_success_03", "strict_pair_success_05", "identical_prediction_pairs"}
+
+
+def test_description_follow_stop_tolerance_keyword():
+    c = check([])
+    path = to_image(LEFT_ROUTE)
+    end = [path[-1][0] + 0.04, path[-1][1]]
+    assert description_follow(path, c, end)["stop"] == 0
+    assert description_follow(path, c, end, stop_tol_uv=0.05)["stop"] == 1
+
+
+def test_steering_pair_purity_split():
+    recs = _pair(A_GT, B_GT, pid="p", prefix=True) + _pair(B_GT, B_GT, pid="q", prefix=False)
+    m = aggregate_steering_metrics(recs)
+    assert m["n_pairs"] == 2 and m["pair_success"] == 0.5
+    assert m["n_prefix_events"] == 1 and m["pair_success_prefix_events"] == 1.0
+    m = aggregate_steering_metrics(_pair(A_GT, B_GT, pid="q", prefix=False))
+    assert m["n_prefix_events"] == 0 and m["pair_success_prefix_events"] is None
+    assert aggregate_steering_metrics(_pair(A_GT, B_GT))["n_prefix_events"] == 1     # key absent = pure

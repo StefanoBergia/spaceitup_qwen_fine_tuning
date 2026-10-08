@@ -27,3 +27,10 @@ def test_label_descriptions_has_a_steer_stage():
     assert '"$STAGE" = "steer"' in text and "events_steer_eval.jsonl" in text
     assert "desc_steer_eval_d1.jsonl" in text and "names_primary_eval.jsonl" in text and "--fallback-names" in text
     assert "steer-propose" not in text
+
+
+def test_eval_descriptions_sets():
+    text = (SLURM / "eval_descriptions.sbatch").read_text()
+    assert 'SETS="${SETS:-desc}"' in text
+    for s in ("eval_steer_stop_template_entry", "eval_steer_stop_composed_goal"):
+        assert s in text

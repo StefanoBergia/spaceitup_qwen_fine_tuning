@@ -2,6 +2,8 @@
 # d1 eval cells, skipping finished ones (safe to re-submit):
 #     sbatch slurm/eval_descriptions.sbatch                         # adapter outputs/runs_desc/d1/adapter
 #     ADAPTER=<dir> TAG=<tag> sbatch slurm/eval_descriptions.sbatch
+#     SETS=steer sbatch slurm/eval_descriptions.sbatch              # the 4 steering stop-pair sets (d1)
+#     SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
 # metrics.json gains a "description" block. Then, on the login node:
 #     uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag d1
 #SBATCH --job-name=qwen-desc-eval
@@ -29,5 +31,13 @@ run() {  # run <set>
     $UV run scripts/evaluate.py --task habitat --tag "$TAG" --eval-file "$D/$set.json" \
         --out-dir "$OUT/$set" --adapter "$ADAPTER"
 }
-for s in eval_desc_entry eval_desc_goal eval_desc_pairs eval_desc_shuffled; do run "$s"; done
-echo "all cells done: uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag $TAG"
+SETS="${SETS:-desc}"
+STEER_GOAL="eval_steer_stop_template_goal eval_steer_stop_composed_goal"
+case "$SETS" in
+    desc)       LIST="eval_desc_entry eval_desc_goal eval_desc_pairs eval_desc_shuffled" ;;
+    steer)      LIST="eval_steer_stop_template_entry eval_steer_stop_composed_entry $STEER_GOAL" ;;
+    steer_goal) LIST="$STEER_GOAL" ;;
+    *) echo "SETS must be desc, steer or steer_goal, got '$SETS'"; exit 1 ;;
+esac
+for s in $LIST; do run "$s"; done
+echo "all cells done: uv run scripts/render_desc_videos.py --set <set> --tag $TAG; uv run scripts/visualize_steering.py"
