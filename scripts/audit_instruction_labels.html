@@ -147,6 +147,15 @@ if (DATA.mode === "d1") {
   $("altleg").hidden = true;
   document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1–${DATA.verdicts.length} mark and advance, ← → move.`;
 }
+if (DATA.mode === "steer") {
+  document.title = "Steering Pair Audit";
+  $("h1").textContent = "Steering pair audit";
+  $("sub").textContent = "Each frame shows one route cut at two stop points: magenta follows the first text, cyan the second; yellow outlines are the stop objects. Is each text true of its own route (steps and stop), and are the two stops clearly apart?";
+  $("tgtleg").hidden = false;
+  $("tgtleg").innerHTML = '<i style="background:#ff00c8"></i>magenta = first text &nbsp; <i style="background:#00c8ff"></i>cyan = second text &nbsp; <i style="background:#ffe600"></i>yellow = stop object';
+  $("altleg").hidden = true;
+  document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1\u2013${DATA.verdicts.length} mark and advance, \u2190 \u2192 move.`;
+}
 VERDICTS.forEach((d, i) => {
   const b = document.createElement("button");
   b.dataset.v = d.v; b.dataset.tone = tone(d.v); b.setAttribute("aria-pressed", "false");
@@ -189,11 +198,12 @@ function render() {
   $("instr").textContent = it.instruction ? `“${it.instruction}”`
     : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})`
     : `“Go ${it.side} around the outlined object.”`;
-  $("tgtleg").hidden = (DATA.mode === "events" || DATA.mode === "d1") ? false : (!it.target || it.target === "none");
+  $("tgtleg").hidden = (DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "steer") ? false : (!it.target || it.target === "none");
   $("side").textContent = `bows ${it.side} of the line`;
   $("kind").textContent = it.kind === "opposite" ? "other side of a two-route pair" : (it.has_alt ? "one side of a two-route pair" : "single-route frame");
-  $("altleg").hidden = DATA.mode === "events" || DATA.mode === "d1" || !it.has_alt;
+  $("altleg").hidden = DATA.mode === "steer" || DATA.mode === "events" || DATA.mode === "d1" || !it.has_alt;
   if (DATA.mode === "d1") $("kind").textContent = `description source: ${it.source}` + (it.source === "template" ? " (fallback sentence)" : "");
+  if (DATA.mode === "steer") { $("side").textContent = `${it.slice} pair`; $("kind").textContent = it.pure ? "one route, two stops" : "one route, two stops \u2014 the texts also differ in a step"; }
   document.querySelectorAll("#verdicts button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === m.verdict)));
   if (document.activeElement !== $("note")) $("note").value = m.note || "";
   $("prev").disabled = idx === 0; $("next").disabled = idx === items.length - 1;

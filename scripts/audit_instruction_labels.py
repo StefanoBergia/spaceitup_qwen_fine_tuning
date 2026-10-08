@@ -35,6 +35,12 @@ objects. Gate >= 90% correct.
         --objects data/prepared_habitat_instr_v2/objects_eval.jsonl \
         --desc outputs/instr_labels_v3/desc_gate_d1.jsonl
 
+--mode steer (steering Gate 1, 2026-10-08): stop pairs from steer/events_steer_eval.jsonl; both cuts of the
+route on the frame (magenta = first text, cyan = second), the stop objects outlined yellow, both template
+texts. Is each text true of its own route (steps and stop), and are the two stops clearly apart?
+Gate >= 90% of pairs true.
+    uv run scripts/audit_instruction_labels.py --mode steer --n 50     # -> outputs/steer_audit.html
+
 Run (CPU, login node is fine):
     uv run scripts/audit_instruction_labels.py            # -> outputs/instr_label_audit.html
     uv run scripts/audit_instruction_labels.py --n 150 --seed 1
@@ -61,6 +67,7 @@ from rover_vlm.descriptions import template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
+from rover_vlm.overlay import draw_polyline
 from rover_vlm.route_events import check_events_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -68,9 +75,19 @@ V2 = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
 DATA = V2 / "train_general.json"
 OUT = REPO_ROOT / "outputs" / "instr_label_audit.html"
 TEMPLATE = Path(__file__).with_name("audit_instruction_labels.html")
+V3 = REPO_ROOT / "data" / "prepared_habitat_instr_v3"
+STEER_A, STEER_B, ANCHOR_COLOR = (255, 0, 200), (0, 200, 255), (255, 230, 0)
 IMG_PX = 640
 TARGET_OUTLINE = (0, 230, 255)
 VERDICTS = {
+    "steer": [
+        {"v": "ok", "label": "True pair", "help": "Both texts are true of their own route, and the two stops are clearly apart"},
+        {"v": "stop", "label": "Wrong stop", "help": "A stop phrase does not match where its route ends"},
+        {"v": "event", "label": "Wrong step", "help": "A step (pass / between / through / keep on your side) is not true of its route"},
+        {"v": "object", "label": "Wrong object", "help": "A name does not fit the thing it refers to"},
+        {"v": "same", "label": "Not visibly different", "help": "The two stops are too close to tell apart in the image"},
+        {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+    ],
     "labels": [
         {"v": "ok", "label": "Correct", "help": "Landmark is there and the route goes that side of it"},
         {"v": "landmark", "label": "Wrong landmark", "help": "Object not in the frame, misnamed, or not what the route bends around"},
@@ -303,6 +320,41 @@ def select_d1_rows(ok, ids, n, seed):
     return rows, len(ids) - len(rows)
 
 
+def sample_steer(rows, n, seed):
+    """Up to n pairs (both rows, id order), shuffled; and the number of pairs available."""
+    by = {}
+    for r in rows:
+        by.setdefault(r["pair_id"], []).append(r)
+    pairs = sorted((sorted(v, key=lambda r: r["id"]) for v in by.values() if len(v) == 2), key=lambda p: p[0]["pair_id"])
+    rng = random.Random(seed)
+    picked = rng.sample(pairs, min(n, len(pairs)))
+    rng.shuffle(picked)
+    return picked, len(pairs)
+
+
+def steer_item(a, b):
+    """One audit item: the frame with both routes and the stop objects outlined, both texts."""
+    img = Image.open(a["image"]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
+    draw = ImageDraw.Draw(img)
+    font = _font(max(16, IMG_PX // 30))
+    for k, oid in enumerate(o for o in dict.fromkeys([a["anchor"], b["anchor"]]) if o):
+        poly = a["outlines"].get(oid) or b["outlines"].get(oid) or []
+        pts = [(u * IMG_PX, v * IMG_PX) for u, v in poly]
+        if len(pts) >= 3:
+            draw.polygon(pts, outline=ANCHOR_COLOR, width=4)
+            _draw_badge(draw, (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)),
+                        str(k + 1), ANCHOR_COLOR, font, 14)
+    for row, colour in ((a, STEER_A), (b, STEER_B)):
+        draw_polyline(draw, [(p[0], p[1]) for p in row["path"]], colour, IMG_PX, IMG_PX, width=6)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    return {"id": a["pair_id"], "instruction": f"MAGENTA: {a['template']}   \u00b7   CYAN: {b['template']}",
+            "slice": a["slice"], "side": a["slice"], "kind": "steer", "has_alt": False, "scene": a["scene_id"],
+            "target": "object", "reason": None,
+            "pure": bool(a.get("prefix_events", True) and b.get("prefix_events", True)),
+            "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
+
+
 def d1_title(desc):
     """Page title for --mode d1: names the desc file unless it is the default gate file."""
     stem = Path(desc).stem
@@ -315,7 +367,7 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer"], default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -332,6 +384,20 @@ def main() -> None:
     args = ap.parse_args()
 
     landmarks = load_landmarks_rows(args.landmarks)
+    if args.mode == "steer":
+        events = args.events or V3 / "steer" / "events_steer_eval.jsonl"
+        check_events_schema(events)
+        picked, pop = sample_steer(jsonl(events), args.n, args.seed)
+        items = [steer_item(a, b) for a, b in picked]
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "steer",
+                   "verdicts": VERDICTS["steer"], "source": str(events)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Steering Pair Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "steer_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} pairs (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     if args.mode == "events":
         if not (args.events and args.objects):
             raise SystemExit("--mode events needs --events events_train.jsonl --objects objects_train.jsonl")

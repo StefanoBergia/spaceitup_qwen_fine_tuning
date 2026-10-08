@@ -303,3 +303,35 @@ def test_pair_rows_carry_the_d1_schema_and_steering_fields(tmp_path):
         assert {"events", "stop", "template", "path", "outlines", "desc_check"} <= set(r)
         assert r["prefix_events"] is pair["prefix_events"]
     json.dumps([a, b])
+
+
+def _audit():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "audit_instruction_labels", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _arow(pid, tag, img, anchor):
+    return {"id": f"{pid}_{tag}", "pair_id": pid, "slice": "stop", "image": str(img), "scene_id": "sc",
+            "anchor": anchor, "template": f"Go ... stop ({tag})", "path": [[0.5, 1.0, 1], [0.3, 0.6, 1]],
+            "prefix_events": True,
+            "outlines": {"f:b1": [[0.4, 0.5], [0.6, 0.5], [0.6, 0.6]], "f:b2": [[0.1, 0.5], [0.2, 0.5], [0.2, 0.6]]}}
+
+
+def test_audit_samples_pairs_and_draws_both_routes(tmp_path):
+    from PIL import Image
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64), (90, 90, 90)).save(img)
+    rows = [r for i in range(4) for r in (_arow(f"p{i}", "A", img, "f:b1"), _arow(f"p{i}", "B", img, None if i % 2 else "f:b2"))]
+    au = _audit()
+    picked, pop = au.sample_steer(rows, 3, seed=0)
+    assert pop == 4 and len(picked) == 3
+    assert all(a["pair_id"] == b["pair_id"] and a["id"] < b["id"] for a, b in picked)
+    item = au.steer_item(*picked[0])
+    assert item["id"] == picked[0][0]["pair_id"] and item["img"].startswith("data:image/jpeg;base64,")
+    assert picked[0][0]["template"] in item["instruction"] and picked[0][1]["template"] in item["instruction"]
+    assert [v["v"] for v in au.VERDICTS["steer"]] == ["ok", "stop", "event", "object", "same", "unsure"]
+    assert item["pure"] is True
