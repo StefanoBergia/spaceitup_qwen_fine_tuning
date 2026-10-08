@@ -159,6 +159,7 @@ if [ "$STAGE" = "steer" ]; then
     for f in events_steer_eval.jsonl names_primary_eval.jsonl; do
         [ -f "$SD/$f" ] || { echo "missing $SD/$f — run prepare_habitat_instr.py steer + steer-select"; exit 1; }
     done
+    [ -f "$OUT/names_eval_d1.jsonl" ] || { echo "missing $OUT/names_eval_d1.jsonl (compose fallback names)"; exit 1; }
     serve "$COSMOS_MODEL"
     steer_args=(--stage compose --events "$SD/events_steer_eval.jsonl" --names "$SD/names_primary_eval.jsonl"
                 --fallback-names "$OUT/names_eval_d1.jsonl" --out "$OUT/desc_steer_eval_d1.jsonl"

@@ -344,8 +344,12 @@ def steer_item(a, b):
             draw.polygon(pts, outline=ANCHOR_COLOR, width=4)
             _draw_badge(draw, (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)),
                         str(k + 1), ANCHOR_COLOR, font, 14)
-    for row, colour in ((a, STEER_A), (b, STEER_B)):
+    # A is a prefix of B: draw B first so A stays visible on top, and mark each route's end
+    for row, colour in ((b, STEER_B), (a, STEER_A)):
         draw_polyline(draw, [(p[0], p[1]) for p in row["path"]], colour, IMG_PX, IMG_PX, width=6)
+    for row, colour in ((b, STEER_B), (a, STEER_A)):
+        x, y = row["path"][-1][0] * IMG_PX, row["path"][-1][1] * IMG_PX
+        draw.ellipse([x - 8, y - 8, x + 8, y + 8], fill=colour, outline=(255, 255, 255), width=2)
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=80)
     return {"id": a["pair_id"], "instruction": f"MAGENTA: {a['template']}   \u00b7   CYAN: {b['template']}",

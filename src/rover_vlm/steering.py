@@ -63,7 +63,9 @@ def separation(path_a, path_b):
 
 def exclusive(ra, rb):
     """Each route follows its own description and fails the other's (eval.description_follow,
-    stop judged against each description's own route end)."""
+    stop judged against each description's own route end). With MIN_SEP_UV (0.1) > STOP_TOL_UV (0.03)
+    the cross-check (each route fails the other's text) is automatic for stop pairs, so this mostly
+    re-checks that each cut follows its own text."""
     ca, cb = desc_check(ra["desc"], ra["desc"]["objects"]), desc_check(rb["desc"], rb["desc"]["objects"])
     ea, eb = ra["path"][-1], rb["path"][-1]
     return (description_follow(ra["path"], ca, ea)["follows"] == 1
@@ -111,7 +113,8 @@ def in_view(cam, route_xz):
     pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
     _, fwd = cam.uv(pts)
     ok = fwd >= CAM_HEIGHT_M
-    return pts[int(np.argmax(ok)):] if ok.any() else pts[:0]
+    # keep the last point before the edge so clip_polyline_unit puts the entry exactly on the edge
+    return pts[max(0, int(np.argmax(ok)) - 1):] if ok.any() else pts[:0]
 
 
 def cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M):
@@ -190,6 +193,8 @@ def name_pair(pair, names, fallback, kinds):
             return "name_clash"
         r.update(namer=namer, names={o: chosen[o] for o in route_objects(row)},
                  template=template_description(row["events"], row["stop"], chosen, kinds))
+    if pair["routes"][0]["namer"] != pair["routes"][1]["namer"]:
+        return "mixed_namer"        # one object could be named differently in the two texts
     if pair["routes"][0]["template"] == pair["routes"][1]["template"]:
         return "same_text"
     return None

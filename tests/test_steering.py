@@ -4,6 +4,7 @@ Synthetic maps are 5 m x 5 m at 5 cm; the camera sits at (2.5, 0.2) facing +z, s
 camera's right is -x and image-left is +x (as in test_route_events.py). The image's bottom
 edge is 0.8 m ahead of the camera (z = 1.0).
 """
+import base64
 import json
 from pathlib import Path
 
@@ -198,6 +199,23 @@ def test_in_view_starts_at_the_bottom_edge():
     assert len(st.in_view(CAM, [(2.5, 0.2), (2.5, 0.6)])) == 0          # never reaches the image
 
 
+def test_in_view_keeps_the_last_point_before_the_edge():
+    v = st.in_view(CAM, [(2.5, 0.2), (2.5, 3.0)])
+    _, fwd = CAM.uv(v)
+    assert fwd[0] < st.CAM_HEIGHT_M <= fwd[1]            # clip_polyline_unit then puts the entry on the edge
+
+
+def test_stop_pair_answers_enter_on_an_image_edge(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    pairs, _ = st.stop_pairs(frame, meta, STOP_ROUTE)
+    assert pairs
+    for p in pairs:
+        for r in p["routes"]:
+            x, y = r["path"][0][0], r["path"][0][1]
+            assert min(x, 1 - x) < 1e-6 or abs(y - 1) < 1e-6, r["path"][0]
+
+
 def test_cuts_keep_at_least_min_route_m():
     fr = [f for f, _ in st.cuts(STOP_ROUTE)]
     assert fr == [0.5, 0.65, 0.8, 1.0]                                   # 0.35 x 3.26 m < 1.5 m
@@ -248,6 +266,14 @@ def test_name_pair_clash_with_an_object_named_only_in_the_fallback():
     two["routes"][1]["desc"] = {"events": [], "stop": {**stop, "relation": "just past", "type": "after_last"}}
     assert st.name_pair(two, {"f:b1": "sofa"}, {}, {}) is None                    # two different stops
     assert st.name_pair(pair(), {"f:b1": "sofa"}, {"f:b999": "leather sofa"}, {}) == "name_clash"
+
+
+def test_name_pair_refuses_two_namers_in_one_pair():
+    stop = {"type": "near", "relation": "in front of", "amount": None, "distance_m": None}
+    r = lambda o, f: {"desc": {"events": [], "stop": {**stop, "object": o}}, "target": o, "fraction": f}  # noqa: E731
+    pair = {"slice": "stop", "anchor": None, "routes": [r("f:b1", 0.5), r("f:b2", 1.0)]}
+    assert st.name_pair(pair, {"f:b1": "sofa"}, {"f:b2": "table"}, {}) == "mixed_namer"
+    assert st.name_pair(pair, {"f:b1": "sofa", "f:b2": "table"}, {}, {}) is None
 
 
 def test_stop_pairs_count_frame_level_reasons(tmp_path):
@@ -335,6 +361,21 @@ def test_audit_samples_pairs_and_draws_both_routes(tmp_path):
     assert picked[0][0]["template"] in item["instruction"] and picked[0][1]["template"] in item["instruction"]
     assert [v["v"] for v in au.VERDICTS["steer"]] == ["ok", "stop", "event", "object", "same", "unsure"]
     assert item["pure"] is True
+
+
+def test_audit_shows_both_routes_when_a_is_a_prefix_of_b(tmp_path):
+    import io
+    from PIL import Image
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64), (90, 90, 90)).save(img)
+    a, b = _arow("p", "A", img, "f:b1"), _arow("p", "B", img, "f:b2")
+    b["path"] = [[0.5, 1.0, 1], [0.3, 0.6, 1], [0.3, 0.3, 1]]       # A is a prefix of B
+    au = _audit()
+    item = au.steer_item(a, b)
+    im = Image.open(io.BytesIO(base64.b64decode(item["img"].split(",", 1)[1]))).convert("RGB")
+    px = np.asarray(im, int).reshape(-1, 3)
+    near = lambda c: int((np.abs(px - np.array(c)).max(axis=1) < 60).sum())  # noqa: E731
+    assert near(au.STEER_A) > 50 and near(au.STEER_B) > 50
 
 
 def _base(sid):

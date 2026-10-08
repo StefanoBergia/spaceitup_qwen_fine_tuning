@@ -1539,7 +1539,7 @@ on these frames — see the spec's Addenda A1/A2: `docs/superpowers/specs/2026-1
     uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150)
     uv run scripts/audit_instruction_labels.py --mode steer --n 50      # Gate 1 audit page (>= 90% true)
     STAGE=steer sbatch slurm/label_descriptions.sbatch                  # composed text (GPU, < 1 h)
-    uv run scripts/prepare_habitat_instr.py finalize-steer              # 8 files; Gate 2 (>= 85% composed)
+    uv run scripts/prepare_habitat_instr.py finalize-steer              # 4 files; Gate 2 (>= 85% composed)
     SETS=steer sbatch slurm/eval_descriptions.sbatch                    # d1 on the 4 sets
     SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
     uv run scripts/visualize_steering.py                                # outputs/steering_report.html
@@ -1547,7 +1547,7 @@ on these frames — see the spec's Addenda A1/A2: `docs/superpowers/specs/2026-1
 
 Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, candidates, rows, meta),
 `data/prepared_habitat_instr_v3/eval_steer_stop_{template,composed}_{entry,goal}.json`,
-`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success (text-blind = 0%).
+`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success, entry form (text-blind = 0%; goal-form rows give each text its own stop, so they measure goal-following, a ceiling, not steering).
 
 ## Visualizations — where each one lives
 

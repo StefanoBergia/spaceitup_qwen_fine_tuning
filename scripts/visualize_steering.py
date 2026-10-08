@@ -88,7 +88,8 @@ th:nth-child(-n+4),td:nth-child(-n+4){text-align:left}.muted{color:var(--muted)}
 </style></head><body>
 <h1>Steering eval</h1>
 <p class="muted">Pair success = both texts of a pair steered their own way: each prediction ends closer to its own
-stop than to the other text's stop. A text-blind model scores 0. Swap = both predictions followed the
+stop than to the other text's stop. In the entry form a text-blind model scores 0; goal-form rows hand each text its own stop, so they measure
+goal-following (a ceiling), not steering. Swap = both predictions followed the
 <em>other</em> text. Strict = every event and the stop (0.03 / 0.05).</p>
 <div class="wrap"><table><thead><tr><th>slice</th><th>text</th><th>form</th><th>model</th><th>pairs</th>
 <th>pair success [95% CI]</th><th>pure stop pairs</th><th>swap</th><th>closer to own GT</th><th>strict .03</th><th>strict .05</th><th>parse</th></tr></thead>
