@@ -446,6 +446,23 @@ def stage_steer(args):
     print(json.dumps(meta, indent=2))
 
 
+def stage_steer_select(args):
+    d = args.out_dir
+    cands = _jsonl(d / "candidates_eval.jsonl")
+    kept = steering.select_pairs(cands)
+    rows = [row for p in kept for row in steering.pair_rows(p)]
+    (d / "events_steer_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    per = Counter(p["slice"] for p in kept)
+    meta = {"schema": EVENTS_SCHEMA, "candidates": len(cands), "pairs": dict(per), "routes": len(rows),
+            "originals": dict(Counter(p["slice"] for p in kept if not p["is_aug"])),
+            "prefix_events": sum(bool(p["prefix_events"]) for p in kept)}
+    (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+    n = per.get("stop", 0)
+    print(f"GATE 0 stop: {n} pairs -> {'PASS' if n >= steering.GATE0_MIN_PAIRS else 'FAIL'} "
+          f"(need >= {steering.GATE0_MIN_PAIRS})")
+
+
 def desc_path(labels: Path, split: str, suffix: str = "") -> Path:
     """Composed-description file of one split: desc_<split><suffix>_d1.jsonl (suffix "_mix" = NAMER=mix)."""
     return labels / f"desc_{split}{suffix}_d1.jsonl"
@@ -518,14 +535,15 @@ def main() -> None:
     k.add_argument("--desc-suffix", default="",
                    help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
-    for nm, hp in (("steer", "steering: stop pairs per d1 eval frame (CPU)"),):
-        m = sub.add_parser(nm, help=hp)
-        m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
-        m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
-        m.add_argument("--steer-names", type=Path, default=D1_LABELS / "names_steer_gemma_d1.jsonl")
-        m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
-        m.add_argument("--out-dir", type=Path, default=STEER_DIR)
-        m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
+    m = sub.add_parser("steer", help="steering: stop pairs per d1 eval frame (CPU)")
+    m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
+    m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
+    m.add_argument("--steer-names", type=Path, default=D1_LABELS / "names_steer_gemma_d1.jsonl")
+    m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
+    m.add_argument("--out-dir", type=Path, default=STEER_DIR)
+    m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
+    sel = sub.add_parser("steer-select", help="steering: one stop pair per viewpoint -> events_steer_eval.jsonl (CPU)")
+    sel.add_argument("--out-dir", type=Path, default=STEER_DIR)
     o = sub.add_parser("steer-objects", help="steering: naming rows for every visible non-wall eval object (CPU)")
     o.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
     o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
@@ -535,6 +553,7 @@ def main() -> None:
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
+     "steer-select": stage_steer_select,
      "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 

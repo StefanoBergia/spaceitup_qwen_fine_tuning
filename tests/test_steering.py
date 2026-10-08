@@ -1,4 +1,4 @@
-"""Steering eval pairs: planner, pair builders, naming, selection, finalize (synthetic maps).
+"""Steering eval stop pairs: cuts, answer paths, pair building, naming, selection (synthetic maps).
 
 Synthetic maps are 5 m x 5 m at 5 cm; the camera sits at (2.5, 0.2) facing +z, so the
 camera's right is -x and image-left is +x (as in test_route_events.py). The image's bottom
@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from rover_vlm import steering as st
-from rover_vlm.landmarks import FREE, OCC, UNKNOWN, Camera, Grid
+from rover_vlm.landmarks import FREE, OCC, Camera
 from rover_vlm.route_events import load_frame
 
 CAM = Camera([2.5, 0.2], [0.0, 1.0])
@@ -102,7 +102,7 @@ def test_steer_frames_one_item_per_frame_gt_record_first():
     items = st.steer_frames([rec("a_R", "a", "opposite", start=(0.4, 1.0)), rec("a_L", "a", "instructed"),
                              rec("b_y0_L", "b_y0", "instructed", "augmented", "b")])
     assert [i["sample_id"] for i in items] == ["a", "b_y0"]
-    assert items[0]["start_uv"] == [0.5, 1.0] and items[0]["viewpoint"] == "a" and not items[0]["is_aug"]
+    assert "start_uv" not in items[0] and items[0]["viewpoint"] == "a" and not items[0]["is_aug"]
     assert items[0]["candidate_index"] == 3 and items[1]["candidate_index"] == 3
     assert items[1]["viewpoint"] == "b" and items[1]["is_aug"] and items[1]["sample_dir"] == "/d/b_y0"
 
@@ -243,5 +243,63 @@ def test_name_pair_clash_with_an_object_named_only_in_the_fallback():
     def pair():
         r = lambda f: {"desc": {"events": [], "stop": stop}, "target": "f:b1", "fraction": f}  # noqa: E731
         return {"slice": "stop", "anchor": None, "routes": [r(0.5), r(1.0)]}
-    assert st.name_pair(pair(), {"f:b1": "sofa"}, {}, {}) != "name_clash"
+    assert st.name_pair(pair(), {"f:b1": "sofa"}, {}, {}) == "same_text"          # one stop twice: identical sentences
+    two = pair()
+    two["routes"][1]["desc"] = {"events": [], "stop": {**stop, "relation": "just past", "type": "after_last"}}
+    assert st.name_pair(two, {"f:b1": "sofa"}, {}, {}) is None                    # two different stops
     assert st.name_pair(pair(), {"f:b1": "sofa"}, {"f:b999": "leather sofa"}, {}) == "name_clash"
+
+
+def test_stop_pairs_count_frame_level_reasons(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene())
+    meta, frame = load_frame(sd)
+    pairs, reasons = st.stop_pairs(frame, meta, [(2.5, 0.2), (2.5, 1.0)])         # 0.8 m: no cut keeps 1.5 m
+    assert pairs == [] and reasons["route_too_short"] == 1 and not reasons.get("lt2_cuts")
+    pairs, reasons = st.stop_pairs(frame, meta, [(2.5, 0.2), (2.5, 1.8)])         # 1.6 m: only the full cut
+    assert pairs == [] and reasons["lt2_cuts"] == 1 and not reasons.get("route_too_short")
+
+
+def test_frame_pairs_prefixes_the_frame_reasons(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [[(2.5, 0.2), (2.5, 1.0)]])
+    assert st.frame_pairs(sd, 0, {}, None, {})[1] == {"stop:route_too_short": 1}
+
+
+def test_prefix_events_marks_a_pure_stop_pair(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    pairs, _ = st.stop_pairs(frame, meta, STOP_ROUTE)
+    assert pairs and all(isinstance(p["prefix_events"], bool) for p in pairs)
+    assert any(p["prefix_events"] for p in pairs)
+    for p in pairs:
+        ea, eb = (r["desc"]["events"] for r in p["routes"])
+        key = lambda e: (e["type"], e["side"], tuple(e["objects"]))  # noqa: E731
+        assert p["prefix_events"] == ([key(e) for e in ea] == [key(e) for e in eb[: len(ea)]])
+
+
+def _cand(pid, vp, aug, sep):
+    return {"pair_id": pid, "slice": "stop", "viewpoint": vp, "is_aug": aug, "separation": sep,
+            "routes": [{"tag": "A"}, {"tag": "B"}]}
+
+
+def test_select_pairs_one_per_viewpoint_original_first_then_separation():
+    cands = [_cand("a1", "v1", True, 0.5), _cand("a2", "v1", False, 0.2),
+             _cand("b1", "v2", False, 0.2), _cand("b2", "v2", False, 0.3), _cand("c1", "v3", True, 0.4)]
+    assert [p["pair_id"] for p in st.select_pairs(cands)] == ["a2", "b2", "c1"]
+
+
+def test_pair_rows_carry_the_d1_schema_and_steering_fields(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    _, frame = load_frame(sd)
+    box, cab = int(frame.lab[25, 55]), int(frame.lab[75, 48])
+    pairs, _ = st.frame_pairs(sd, 0, {f"f:b{box}": "armchair", f"f:b{cab}": "cabinet"}, None, {})
+    pair = pairs[0]
+    pair.update(sample_id="f", viewpoint="f", is_aug=False, scene_id="sc", image="/x.png", sample_dir=str(sd))
+    a, b = st.pair_rows(pair)
+    pid = pair["pair_id"]
+    assert (a["id"], a["sibling_id"], b["id"], b["sibling_id"]) == (f"{pid}_A", f"{pid}_B", f"{pid}_B", f"{pid}_A")
+    for r, route in zip((a, b), pair["routes"]):
+        assert r["reason"] is None and r["kind"] == "steer" and r["style_key"] == pid and r["slice"] == "stop"
+        assert r["anchor"] == route["target"] and r["anchor_event"] is None and r["side"] is None
+        assert {"events", "stop", "template", "path", "outlines", "desc_check"} <= set(r)
+        assert r["prefix_events"] is pair["prefix_events"]
+    json.dumps([a, b])

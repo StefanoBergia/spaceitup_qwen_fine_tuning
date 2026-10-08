@@ -125,12 +125,21 @@ def cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M):
     return out
 
 
+def _event_keys(events):
+    return [(e["type"], e["side"], tuple(e["objects"])) for e in events]
+
+
 def stop_pairs(frame, meta, route_xz):
     """(pairs, reasons): every two cuts of one route whose stop phrases differ, whose answer ends lie
     at least MIN_SEP_UV apart, and whose answers each fail the other's description. Tags A (the
-    earlier stop) / B."""
+    earlier stop) / B. prefix_events: A's events are the first ones of B's (a pure stop pair; False when
+    the texts also differ in a step). Frame-level reasons: route_too_short (no cut keeps MIN_ROUTE_M),
+    lt2_cuts (fewer than two cuts survive)."""
     reasons, routes = Counter(), []
-    for f, cut in cuts(route_xz):
+    made = cuts(route_xz)
+    if not made:
+        reasons["route_too_short"] += 1
+    for f, cut in made:
         desc = describe_xz(meta, frame, cut)
         if desc["reason"]:
             reasons[f"cut:{desc['reason']}"] += 1
@@ -142,6 +151,8 @@ def stop_pairs(frame, meta, route_xz):
             continue
         routes.append({"tag": None, "side": None, "route_xz": _rounded(cut), "path": path, "desc": desc,
                        "anchor_event": None, "target": desc["stop"]["object"], "fraction": f})
+    if made and len(routes) < 2:
+        reasons["lt2_cuts"] += 1
     pairs = []
     for a, b in itertools.combinations(routes, 2):
         if stop_key(a["desc"]["stop"]) == stop_key(b["desc"]["stop"]):
@@ -155,8 +166,10 @@ def stop_pairs(frame, meta, route_xz):
         if not exclusive(ra, rb):
             reasons["not_exclusive"] += 1
             continue
+        ea, eb = (r["desc"]["events"] for r in (ra, rb))
         pairs.append({"slice": "stop", "anchor": None, "targets": [ra["target"], rb["target"]],
-                      "separation": round(sep, 4), "routes": [ra, rb]})
+                      "separation": round(sep, 4), "prefix_events": _event_keys(ea) == _event_keys(eb[: len(ea)]),
+                      "routes": [ra, rb]})
     return pairs, reasons
 
 
@@ -210,7 +223,7 @@ def frame_pairs(sample_dir, candidate_index, names, fallback, kinds):
 
 def steer_frames(records):
     """One item per eval frame (sample_id) from the d1 entry records; the frame's GT-route
-    record ("instructed") gives the entry point when present."""
+    record ("instructed") supplies the candidate_index (the route) when present."""
     by = {}
     for r in records:
         hm = r["habitat_meta"]
@@ -218,7 +231,7 @@ def steer_frames(records):
         if cur is None or (hm.get("kind") == "instructed" and cur["habitat_meta"].get("kind") != "instructed"):
             by[hm["sample_id"]] = r
     return [{"sample_id": s, "sample_dir": str(Path(r["image"][0]).parent), "image": r["image"][0],
-             "start_uv": list(r["habitat_meta"]["start_uv_norm"]), "scene_id": r["habitat_meta"]["scene_id"],
+             "scene_id": r["habitat_meta"]["scene_id"],
              "viewpoint": r["habitat_meta"].get("parent_sample_id") or s,
              "is_aug": r["habitat_meta"].get("source") == "augmented",
              "candidate_index": r["habitat_meta"]["candidate_index"]} for s, r in sorted(by.items())]
@@ -246,3 +259,38 @@ def object_rows(sample_dir, image, skip_ids=()):
         out.append({"object_id": oid, "kind_hint": "object", "image": image,
                     **{k: o[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")}})
     return out
+
+
+GATE0_MIN_PAIRS = 150
+
+
+def select_pairs(candidates):
+    """One pair per (slice, viewpoint): the original frame before its yaw variants, then the
+    largest end separation (pair_id breaks ties). Sorted by pair_id."""
+    best = {}
+    for p in candidates:
+        key, rank = (p["slice"], p["viewpoint"]), (bool(p["is_aug"]), -p["separation"], p["pair_id"])
+        if key not in best or rank < best[key][0]:
+            best[key] = (rank, p)
+    return sorted((v[1] for v in best.values()), key=lambda p: p["pair_id"])
+
+
+def pair_rows(pair):
+    """The two route rows of a selected pair, in the d1 events-row schema (so compose,
+    desc_check and the audit take them) plus the steering fields."""
+    ids = [f"{pair['pair_id']}_{r['tag']}" for r in pair["routes"]]
+    rows = []
+    for k, r in enumerate(pair["routes"]):
+        d = r["desc"]
+        rows.append({
+            "id": ids[k], "pair_id": pair["pair_id"], "sibling_id": ids[1 - k], "slice": pair["slice"],
+            "kind": "steer", "reason": None,
+            **{f: pair[f] for f in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
+            **{f: d[f] for f in ("events", "stop", "goal_xz", "pose_xz", "heading_xz", "route_len_m")},
+            "route_xz": r["route_xz"], "path": r["path"], "desc_check": desc_check(d, d["objects"]),
+            "anchor": pair["anchor"] or r["target"], "anchor_event": r["anchor_event"], "side": r["side"],
+            "template": r["template"], "namer": r["namer"], "names": r["names"],
+            "style_key": pair["pair_id"], "separation": pair["separation"], "prefix_events": pair["prefix_events"],
+            "outlines": {oid: o["polygon"] for oid, o in d["objects"].items()},
+        })
+    return rows
