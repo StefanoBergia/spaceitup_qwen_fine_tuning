@@ -8,7 +8,9 @@
 
 **Tech Stack:** Python 3.12 (uv `.venv`: numpy, PIL — no scipy), pytest; `habitat` conda env (Python 3.9, habitat_sim 0.3.3) for navmesh planning only (`scripts/navmesh_plan.py`), importing `roverbench` from `../spaceitup-habitat/src`; SLURM sbatch for the Cosmos compose and the Qwen eval.
 
-**Spec:** `docs/superpowers/specs/2026-10-07-steering-eval-design.md` (commit 2d578e3) **and its Addendum A1 (commit 0ea0364), which overrides it**. Read both first.
+**Spec:** `docs/superpowers/specs/2026-10-07-steering-eval-design.md` (commit 2d578e3) **and its Addenda A1 (0ea0364) and A2 (7ed516a), which override it (A2 last)**. Read both first.
+
+**Revision R2 (2026-10-08, after Addendum A2):** the set is one slice of **stop pairs** (one ground-truth route cut at two stop points); side/destination builders, the planners and `navmesh_plan.py` are removed in Task 9. Tasks 9–15 below replace R1's Tasks 9–14. Tasks 1–8 stay as built history.
 
 **Revision R1 (2026-10-08):** Tasks 1–5 were built as first planned (frame-map planning) and kept 0 pairs on real frames; Addendum A1 moves planning to the scene navmesh at 0.30 m and names every visible object. Tasks 6–9 are new (they replace the first plan's navmesh-check and selection tasks); the first plan's Tasks 8–12 are now Tasks 10–14.
 
@@ -17,6 +19,7 @@
 - Thresholds, verbatim from the spec: `CLEAR_M = 0.30` (Addendum A1; was 0.45), `MIN_ROUTE_M = 1.5`, `MIN_SEP_UV = 0.1`, `MIN_DEST_DU = 0.15`, side stop 0.5–1.5 m beyond O's far edge, via at `CLEAR_M + 0.1` m beside O. Eval tolerances unchanged: `STOP_TOL_UV = 0.03` (also report 0.05), `PASS_TIE_M = 0.15`, `FOLLOW_NEAR_M = 2.0`.
 - Additions decided while planning (consistent with the spec): `DEST_GAP_M = 0.8` — a destination stop sits 0.8 m before its object, beyond `route_events.PASS_M` (0.7) so the target is not also a "pass" event, inside `STOP_NEAR_M` (1.0) so `stop_phrase` says "in front of"; `SNAP_M = 0.3`; `MIN_AHEAD_M = 1.0`; `INSIDE_FRAC = 0.9`. Extra drop reasons beyond the spec's list: `no_state`, `no_start`, `too_near`, `too_short`, `no_stop`, `anchor_missing`, `unnamed_object`, `target_passed`, `behind_camera`, `error` (`no_free_side` is gone after Task 6: the planner decides). After A1 routes may leave the view and are clipped like d1's; a route passing < 0.3 m in front of the camera is dropped (`behind_camera`).
 - Three refinements of the spec's wording, same intent: (1) superseded by Addendum A1: routes are planned on a navmesh baked at agent radius `CLEAR_M` with the generator's own `recompute_navmesh` (CPU, ~1 s per scene), so there is no separate navmesh check; (2) the spec's `steer_anchor` field is the dict `habitat_meta.steer = {slice, anchor, anchor_event, side, viewpoint}`; (3) the side headline ignores a graze (< `PASS_TIE_M`): the d1 checker counts a graze as either side, which would let a text-blind route through the object score both texts.
+- **After Addendum A2 (from Task 9 on):** the clearance / via / navmesh constraints above no longer apply (that code is removed). Stop pairs use `MIN_ROUTE_M = 1.5` (a cut keeps at least this much route), `MIN_SEP_UV = 0.1` (answer ends at least this far apart), `CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)`; one slice, `"stop"`; 4 eval files `eval_steer_stop_{template,composed}_{entry,goal}.json`; Gate 0 ≥ 150 pairs.
 - Shared box: before any CPU-heavy run, `export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4` (pool workers: 1 thread each, 4 workers). Never load Qwen / Cosmos / Gemma on the login node.
 - `.venv` has no scipy: numpy + PIL only in `src/`.
 - `scripts/navmesh_plan.py` must run under Python 3.9 (`from __future__ import annotations`; no `match`); it must import `habitat_sim` / `roverbench` only inside `main()` so the uv test suite can import it. Run it with `~/miniforge3/envs/habitat/bin/python`, never `conda run -n habitat python` (inside this repo `conda run` resolves the repo's `.python-version` to pyenv's missing 3.12).
@@ -30,9 +33,9 @@
 
 1. **An entry point that back-projects to no floor point** (v ≤ 0.5): the frame counts `no_start` and the stage goes on — pinned in Task 5 (`test_frame_pairs_counts_no_start`).
 2. **A frame that raises inside a pool worker** (corrupt `state.npz`, odd meta): counted as `error` with the message kept, never a dead stage — pinned in Task 5 (`test_steer_frame_turns_an_exception_into_a_reason`).
-3. **A navmesh `snap_point` returning NaN or a missing scene `.glb`**: the request fails with a reason, no exception — pinned in Task 8 (`tests/test_navmesh_plan.py`).
-4. **An eval set cut short** (a record's sibling missing from predictions, or an unparseable prediction): unparseable counts as a miss and stays in the denominator; a pair without both records is skipped — pinned in Task 13.
-5. **`finalize-steer` run before the compose job finished**: refuses when > 1% of pairs have no compose row, unless `--allow-missing` — pinned in Task 12.
+3. **A frame whose ground-truth candidate is missing or degenerate**: counted `bad_candidate`, never a crash — pinned in Task 9 (`test_frame_pairs_names_and_reasons`). (R1's navmesh item is gone with the navmesh code.)
+4. **An eval set cut short** (a record's sibling missing from predictions, or an unparseable prediction): unparseable counts as a miss and stays in the denominator; a pair without both records is skipped — pinned in Task 14.
+5. **`finalize-steer` run before the compose job finished**: refuses when > 1% of pairs have no compose row, unless `--allow-missing` — pinned in Task 13.
 
 ---
 
@@ -1989,7 +1992,303 @@ Co-Authored-By: <your model's trailer>"
 
 ---
 
-### Task 9: Selection — one pair per viewpoint per slice (`steer-select`)
+### Task 9: Stop pairs replace the side / destination builders (Addendum A2)
+
+**Files:**
+- Modify: `src/rover_vlm/steering.py` (remove the planners and the side / destination builders; add the stop-pair builders; rewrite `frame_pairs`, `name_pair`, `steer_frames`)
+- Modify: `scripts/prepare_habitat_instr.py` (`steer` stage without routes; remove `steer-propose`)
+- Delete: `scripts/navmesh_plan.py`, `tests/test_navmesh_plan.py`
+- Test: `tests/test_steering.py`
+
+**Interfaces:**
+- Consumes: `route_events.{describe_xz, load_frame, first_blocker, ROUTE_STEP_M}`, `landmarks.{CAM_HEIGHT_M, MIN_FWD_M, densify}`, and from earlier steering tasks `answer_path`, `separation`, `exclusive`, `_rounded`, `stop_key`, `load_names`, `frame_clash`, `object_rows`, `route_length`.
+- Produces (Tasks 10–15 rely on these exact names):
+  - constants `MIN_ROUTE_M = 1.5`, `MIN_SEP_UV = 0.1`, `CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)`
+  - `in_view(cam, route_xz) -> np.ndarray` — the route from where it reaches the image's bottom edge
+  - `cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M) -> list[(fraction, prefix_xz)]`
+  - `stop_pairs(frame, meta, route_xz) -> (list[pair], Counter)`
+  - **route dict**: `{"tag": "A"|"B", "side": None, "route_xz": [[x, z], ...] (from the rover), "path": [[x, y, v], ...] (in view), "desc": <describe_xz dict>, "anchor_event": None, "target": <stop object id or None>, "fraction": float}`
+  - **pair dict**: `{"slice": "stop", "anchor": None, "targets": [idA, idB], "separation": float (answer-end distance), "routes": [A, B], "pair_id": "steer_stop_<sample_id>_<fA>_<fB>"}` (fractions as 3-digit percents, e.g. `_050_100`)
+  - `name_pair(pair, names, fallback, kinds) -> str | None` (stop objects may be None; adds namer / names / template)
+  - `frame_pairs(sample_dir, candidate_index, names, fallback, kinds) -> (pairs, Counter)` — reasons `no_state`, `bad_candidate`, `stop:<reason>`, `stop:kept`
+  - `steer_frames(records)` items gain `candidate_index`
+  - stage: `_steer_init(names, fallback, kinds)`, `steer_frame(item) -> (pairs, reasons, error)`, `prepare_habitat_instr.py steer` (no `--routes`)
+
+Why (spec Addendum A2): on the real eval frames neither the frame map nor the navmesh gives side or destination pairs; cutting the ground-truth route at two stop points gives pairs on ~55% of frames.
+
+- [ ] **Step 1: Remove the dead tests, then write the failing new ones**
+
+In `tests/test_steering.py` delete every test of removed code: `test_traversable_*`, `test_astar_*`, `test_string_pull_*`, `test_plan_route_*`, `test_entry_floor_*`, `test_side_pair_*`, `test_two_routes_*`, `test_anchor_too_close_*`, `test_side_difference`, `test_dest_*`, `test_anchor_blobs_*`, `test_frame_pairs_*`, `test_floor_height`, `test_planners_*`, `test_lookup_planner_*`, `test_steer_frame_records_then_looks_up`, and the helpers only they use (`_grid`, `cell`, `_ev`, `_dest_state`, `BOX`, `START`, `_frame`'s mask, `L_XZ`/`R_XZ` stay for the separation/exclusive tests). Keep `test_route_length`, both `test_answer_path_*` (rewrite `test_answer_path_marks_floor_behind_an_obstacle_hidden` to build the frame with `load_frame(_sample(...))` if it used `_frame`), `test_separation`, `test_exclusive_*`, `test_frame_clash_*`, `test_load_names_*`, `test_object_rows_*`, `test_label_descriptions_all_objects_*`, `test_steer_frames_*` (update below). Rewrite `test_name_pair_clash_with_an_object_named_only_in_the_fallback` on a hand-made stop pair (two route dicts with `desc = {"events": [], "stop": {"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:b1"}}` and `target = "f:b1"`).
+
+`_sample` gains an optional `routes` argument that writes them as meta candidates:
+
+```python
+def _sample(d, state, routes=()):
+    """A synthetic sample dir: state.npz (with floor_height) and meta.json (one candidate per route)."""
+    d = Path(d)
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez(d / "state.npz", state=state, mpp=0.05, x_min=0.0, z_min=0.0, floor_height=0.1)
+    cands = [{"label": "left", "polyline_xz": [list(map(float, p)) for p in r]} for r in routes]
+    (d / "meta.json").write_text(json.dumps({"pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0],
+                                             "flavor": "detour", "chord": {"crossing_xz": None},
+                                             "candidates": cands}))
+    return d
+```
+
+Append:
+
+```python
+def _stop_scene():
+    s = _state()
+    s[20:30, 52:58] = OCC          # box A: x 2.6..2.9, z 1.0..1.5 (passed on the left)
+    s[70:80, 36:60] = OCC          # cabinet: x 1.8..3.0, z 3.5..4.0
+    return s
+
+
+STOP_ROUTE = [(2.5, 0.2), (3.3, 1.0), (3.3, 1.6), (2.5, 2.9)]    # ends 0.6 m before the cabinet (route_events tests)
+
+
+def test_in_view_starts_at_the_bottom_edge():
+    v = st.in_view(CAM, [(2.5, 0.2), (2.5, 3.0)])
+    assert v[0][1] == pytest.approx(1.0, abs=0.06) and v[-1][1] == pytest.approx(3.0)
+    assert len(st.in_view(CAM, [(2.5, 0.2), (2.5, 0.6)])) == 0          # never reaches the image
+
+
+def test_cuts_keep_at_least_min_route_m():
+    fr = [f for f, _ in st.cuts(STOP_ROUTE)]
+    assert fr == [0.5, 0.65, 0.8, 1.0]                                   # 0.35 x 3.26 m < 1.5 m
+    f, pts = st.cuts(STOP_ROUTE)[-1]
+    assert st.route_length(pts) == pytest.approx(st.route_length(STOP_ROUTE), abs=0.06)
+
+
+def test_stop_pairs_on_a_route_past_a_box_to_a_cabinet(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    pairs, reasons = st.stop_pairs(frame, meta, STOP_ROUTE)
+    assert pairs, dict(reasons)
+    for p in pairs:
+        a, b = p["routes"]
+        assert (p["slice"], a["tag"], b["tag"]) == ("stop", "A", "B") and a["fraction"] < b["fraction"]
+        assert st.stop_key(a["desc"]["stop"]) != st.stop_key(b["desc"]["stop"])
+        assert a["path"][0] == b["path"][0]                                # one entry
+        assert p["separation"] >= st.MIN_SEP_UV and st.exclusive(a, b)
+    full = [p for p in pairs if p["routes"][1]["fraction"] == 1.0][0]["routes"][1]
+    assert (full["desc"]["stop"]["type"], full["desc"]["stop"]["relation"]) == ("near", "in front of")
+
+
+def test_frame_pairs_names_and_reasons(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    _, frame = load_frame(sd)
+    box, cab = int(frame.lab[25, 55]), int(frame.lab[75, 48])
+    names = {f"f:b{box}": "armchair", f"f:b{cab}": "cabinet"}
+    pairs, reasons = st.frame_pairs(sd, 0, names, None, {})
+    assert pairs and all(p["pair_id"].startswith("steer_stop_f_") for p in pairs) and reasons["stop:kept"] == len(pairs)
+    for p in pairs:
+        assert all(r["template"] and r["namer"] == "primary" for r in p["routes"])
+        assert p["routes"][0]["template"] != p["routes"][1]["template"]
+    _, reasons = st.frame_pairs(sd, 0, {}, None, {})
+    assert reasons.get("stop:unnamed_object", 0) > 0 and not reasons.get("stop:kept")
+    assert st.frame_pairs(sd, 5, names, None, {})[1] == {"bad_candidate": 1}
+    assert st.frame_pairs(tmp_path / "missing", 0, names, None, {})[1] == {"no_state": 1}
+    json.dumps(pairs)
+```
+
+Update `test_steer_frames_one_item_per_frame_gt_record_first`: give each fake record `"candidate_index"` in `habitat_meta` and assert `items[0]["candidate_index"]` is the GT record's. Update `test_steer_frame_turns_an_exception_into_a_reason`: `prep._steer_init({}, None, {})` and a 3-tuple `(pairs, reasons, err)`; add `"candidate_index": 0` to the item.
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `uv run pytest tests/test_steering.py -q`
+Expected: FAIL — `in_view` / `cuts` / `stop_pairs` missing; `frame_pairs` has the old signature.
+
+- [ ] **Step 3: Implement in `src/rover_vlm/steering.py`**
+
+Delete: `traversable`, `astar`, `line_clear`, `string_pull`, `snap`, `plan_route`, `entry_floor`, `map_planner`, `request_key`, `recording_planner`, `lookup_planner`, `enclosed_blobs`, `two_sided`, `_event_key`, `side_difference`, `side_routes`, `side_pair`, `dest_route`, `dest_pairs`, `anchor_blobs`, `floor_height`, and the constants `CLEAR_M`, `SNAP_M`, `VIA_EXTRA_M`, `STOP_BEYOND_M`, `MIN_AHEAD_M`, `INSIDE_FRAC`, `MIN_DEST_DU`, `DEST_GAP_M`, `_NEIGH`, `_CHUNK`; drop imports that become unused (`heapq`, `math`, PIL, `FREE`, `OCC`, `Camera`, `image_to_floor`, ...). Module docstring:
+
+```python
+"""Steering eval pairs (stop slice, spec Addendum A2): one ground-truth route cut at two points.
+
+The d1 eval pairs could not test steering (2026-10-07): both routes of a pair end at the frame's
+goal and diverge behind obstacles. Side pairs (one object passed on either side) and destination
+pairs (two objects to stop in front of) proved not viable on these frames (A1/A2: no room beside
+objects, nothing nameable far enough from the entry). A stop pair keeps the frame's d1
+ground-truth route (planned by the generator on the navmesh) and cuts it at two points whose stop
+phrases differ: same image, same entry, same route, two texts, two different ends. Each cut is
+described from the rover's pose, as d1's routes; its answer starts where the route reaches the
+image (hidden stretches v = 0). A pair is kept only when each cut fails the other's description
+under the eval's own checker. Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
+"""
+```
+
+New code (constants next to `MIN_ROUTE_M` / `MIN_SEP_UV`; add `CAM_HEIGHT_M` to the `.landmarks` import):
+
+```python
+CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)   # where a route is cut, as shares of its length
+
+
+def in_view(cam, route_xz):
+    """The route from where it reaches the image's bottom edge (CAM_HEIGHT_M ahead of the camera):
+    the generator's routes start at the rover, below the frame. Empty when it never gets there."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    _, fwd = cam.uv(pts)
+    ok = fwd >= CAM_HEIGHT_M
+    return pts[int(np.argmax(ok)):] if ok.any() else pts[:0]
+
+
+def cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M):
+    """(fraction, prefix) of the route at each share of its length that keeps at least min_m."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    out = []
+    for f in fractions:
+        s = f * arc[-1]
+        if s < min_m:
+            continue
+        out.append((f, pts[: max(2, int(np.searchsorted(arc, s - 1e-9)) + 1)]))
+    return out
+
+
+def stop_pairs(frame, meta, route_xz):
+    """(pairs, reasons): every two cuts of one route whose stop phrases differ, whose answer ends lie
+    at least MIN_SEP_UV apart, and whose answers each fail the other's description. Tags A (the
+    earlier stop) / B."""
+    reasons, routes = Counter(), []
+    for f, cut in cuts(route_xz):
+        desc = describe_xz(meta, frame, cut)
+        if desc["reason"]:
+            reasons[f"cut:{desc['reason']}"] += 1
+            continue
+        view = in_view(frame.cam, cut)
+        path = answer_path(frame.cam, view, frame) if len(view) >= 2 else None
+        if path is None or len(path) < 2:
+            reasons["cut:out_of_view"] += 1
+            continue
+        routes.append({"tag": None, "side": None, "route_xz": _rounded(cut), "path": path, "desc": desc,
+                       "anchor_event": None, "target": desc["stop"]["object"], "fraction": f})
+    pairs = []
+    for a, b in itertools.combinations(routes, 2):
+        if stop_key(a["desc"]["stop"]) == stop_key(b["desc"]["stop"]):
+            reasons["same_stop"] += 1
+            continue
+        sep = float(np.linalg.norm(np.subtract(a["path"][-1][:2], b["path"][-1][:2])))
+        if sep < MIN_SEP_UV:
+            reasons["too_close"] += 1
+            continue
+        ra, rb = {**a, "tag": "A"}, {**b, "tag": "B"}
+        if not exclusive(ra, rb):
+            reasons["not_exclusive"] += 1
+            continue
+        pairs.append({"slice": "stop", "anchor": None, "targets": [ra["target"], rb["target"]],
+                      "separation": round(sep, 4), "routes": [ra, rb]})
+    return pairs, reasons
+```
+
+`name_pair` (replace the destination head-noun rule; stop objects can be None):
+
+```python
+def name_pair(pair, names, fallback, kinds):
+    """Pick each route's names (A5 rule), refuse a stop object whose name is ambiguous in the frame,
+    and write each route's template sentence. Returns the drop reason, or None after adding namer /
+    names / template to both route dicts. Two stops at one object ("just past" / "well past the
+    chair") are fine; two identical sentences are not."""
+    for r in pair["routes"]:
+        row = {"events": r["desc"]["events"], "stop": r["desc"]["stop"]}
+        chosen, namer, reject = choose_names(row, names, fallback)
+        if chosen is None:
+            return "unnamed_object" if reject == "unnamed_object" else "name_clash"
+        anchor = pair["anchor"] or r["target"]
+        if anchor and frame_clash(anchor, chosen, names, fallback):
+            return "name_clash"
+        r.update(namer=namer, names={o: chosen[o] for o in route_objects(row)},
+                 template=template_description(row["events"], row["stop"], chosen, kinds))
+    if pair["routes"][0]["template"] == pair["routes"][1]["template"]:
+        return "same_text"
+    return None
+```
+
+`frame_pairs`:
+
+```python
+def frame_pairs(sample_dir, candidate_index, names, fallback, kinds):
+    """The stop pairs of one frame's ground-truth route, named, with drop reasons ("no_state",
+    "bad_candidate", "stop:<reason>", "stop:kept")."""
+    sd = Path(sample_dir)
+    reasons = Counter()
+    if not (sd / "state.npz").exists():
+        reasons["no_state"] += 1
+        return [], reasons
+    meta, frame = load_frame(sd)
+    cm = meta.get("candidates", [])
+    if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
+        reasons["bad_candidate"] += 1
+        return [], reasons
+    pre = f"{frame.name}:"      # naming only needs this frame's objects
+    names = {o: n for o, n in names.items() if o.startswith(pre)}
+    fallback = {o: n for o, n in (fallback or {}).items() if o.startswith(pre)}
+    pairs, why = stop_pairs(frame, meta, cm[candidate_index]["polyline_xz"])
+    reasons.update({f"stop:{k}": v for k, v in why.items()})
+    kept = []
+    for p in pairs:
+        p["pair_id"] = f"steer_stop_{frame.name}_" + "_".join(f"{round(r['fraction'] * 100):03d}" for r in p["routes"])
+        w = name_pair(p, names, fallback, kinds)
+        reasons[f"stop:{w or 'kept'}"] += 1
+        if w is None:
+            kept.append(p)
+    return kept, reasons
+```
+
+`steer_frames`: add `"candidate_index": r["habitat_meta"]["candidate_index"]` to each item.
+
+- [ ] **Step 4: Rewire the stage in `scripts/prepare_habitat_instr.py`**
+
+Delete `stage_steer_propose`, its subparser and dispatch entry, `steering.floor_height` uses, the `--routes` argument and the routes loading. Then:
+
+```python
+def _steer_init(names, fallback, kinds):
+    _STEER.update(names=names, fallback=fallback, kinds=kinds)
+
+
+def steer_frame(item):
+    """(candidate pairs, reason counts, error or None) for one eval frame (pool worker)."""
+    try:
+        pairs, reasons = frame_pairs(item["sample_dir"], item["candidate_index"], _STEER["names"],
+                                     _STEER["fallback"], _STEER["kinds"])
+        for p in pairs:
+            p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")})
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
+        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
+    return pairs, dict(reasons), None
+```
+
+`_run_steer_pool(args)` (no routes; `initargs=(names, fallback, kinds)`); `stage_steer` keeps writing `candidates_eval.jsonl`, `names_primary_eval.jsonl` and `steer_meta.json` (`viewpoints_with_candidates` keyed by slice — now only `"stop"`), unpacking 3-tuples. The `steer` subparser: `--frames`, `--names`, `--steer-names`, `--fallback-names`, `--out-dir`, `--limit` (help: "steering: stop pairs per d1 eval frame (CPU)"). Docstring steering block — the A2 run order:
+
+```
+    uv run scripts/prepare_habitat_instr.py steer-objects
+    STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # GPU, Gemma
+    uv run scripts/prepare_habitat_instr.py steer
+    uv run scripts/prepare_habitat_instr.py steer-select
+    # after STAGE=steer sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-steer
+```
+
+`git rm scripts/navmesh_plan.py tests/test_navmesh_plan.py`.
+
+- [ ] **Step 5: Run the tests, then the stage on real frames**
+
+Run: `uv run pytest tests/test_steering.py -q && uv run pytest -q` (all pass; the count drops by the deleted tests). Then (CPU, OMP 1, 4 workers) `uv run scripts/prepare_habitat_instr.py steer --limit 300 --out-dir <scratchpad>/steer-stop` and paste `steer_meta.json`. Expected: no errors; `viewpoints_with_candidates.stop` well above 0 (a probe with names for every object gave pairs on ~55% of original frames; with d1's names only it is lower — the GPU naming job comes later).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/rover_vlm/steering.py scripts/prepare_habitat_instr.py tests/test_steering.py
+git rm scripts/navmesh_plan.py tests/test_navmesh_plan.py
+git commit -m "feat: stop pairs (one GT route cut at two stop points) replace side/destination pairs; drop navmesh planning
+
+Co-Authored-By: <your model's trailer>"
+```
+
+---
+
+### Task 10: Selection — one pair per viewpoint (`steer-select`, Gate 0)
 
 **Files:**
 - Modify: `src/rover_vlm/steering.py`
@@ -1997,56 +2296,47 @@ Co-Authored-By: <your model's trailer>"
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: candidate pair rows (Task 8); `route_events.EVENTS_SCHEMA`; `descriptions.desc_check`.
+- Consumes: candidate pair rows (Task 9); `route_events.EVENTS_SCHEMA`; `descriptions.desc_check`.
 - Produces:
   - `select_pairs(candidates) -> list[pair]` (sorted by `pair_id`)
-  - `pair_rows(pair) -> [row, row]` — d1 events-row schema plus steering fields:
-    `id, pair_id, sibling_id, slice, kind="steer", reason=None, sample_id, viewpoint, is_aug, scene_id, image, sample_dir, events, stop, goal_xz, pose_xz, heading_xz, route_len_m, route_xz, path, desc_check, anchor, anchor_event, side, template, namer, names, style_key, separation, outlines`
-  - Files `steer/events_steer_eval.jsonl` and `steer/events_meta.json` (`{"schema": EVENTS_SCHEMA, ...}` so `check_events_schema` accepts it)
+  - `pair_rows(pair) -> [row, row]` — d1 events-row schema plus steering fields: `id, pair_id, sibling_id, slice, kind="steer", reason=None, sample_id, viewpoint, is_aug, scene_id, image, sample_dir, events, stop, goal_xz, pose_xz, heading_xz, route_len_m, route_xz, path, desc_check, anchor, anchor_event, side, template, namer, names, style_key, separation, outlines`
+  - files `steer/events_steer_eval.jsonl`, `steer/events_meta.json` (`{"schema": EVENTS_SCHEMA, ...}`)
   - constant `GATE0_MIN_PAIRS = 150`
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_steering.py`:
-
 ```python
-def _cand(pid, sl, vp, aug, sep, tags=("L", "R")):
-    return {"pair_id": pid, "slice": sl, "viewpoint": vp, "is_aug": aug, "separation": sep,
-            "routes": [{"tag": t} for t in tags]}
+def _cand(pid, vp, aug, sep):
+    return {"pair_id": pid, "slice": "stop", "viewpoint": vp, "is_aug": aug, "separation": sep,
+            "routes": [{"tag": "A"}, {"tag": "B"}]}
 
 
 def test_select_pairs_one_per_viewpoint_original_first_then_separation():
-    cands = [_cand("a1", "side", "v1", True, 0.5), _cand("a2", "side", "v1", False, 0.2),
-             _cand("b1", "side", "v2", False, 0.2), _cand("b2", "side", "v2", False, 0.3),
-             _cand("c1", "dest", "v1", False, 0.4, ("A", "B"))]
+    cands = [_cand("a1", "v1", True, 0.5), _cand("a2", "v1", False, 0.2),
+             _cand("b1", "v2", False, 0.2), _cand("b2", "v2", False, 0.3), _cand("c1", "v3", True, 0.4)]
     assert [p["pair_id"] for p in st.select_pairs(cands)] == ["a2", "b2", "c1"]
 
 
 def test_pair_rows_carry_the_d1_schema_and_steering_fields(tmp_path):
-    meta, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
-    blob = int(frame.lab[54, 50])
-    pair, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
-    st.name_pair(pair, {f"f:b{blob}": "armchair"}, None, {})
-    pair.update(pair_id="steer_side_f_b1", sample_id="f", viewpoint="f", is_aug=False, scene_id="sc",
-                image="/x.png", sample_dir=str(tmp_path / "f"), floor_y=0.1)
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    _, frame = load_frame(sd)
+    box, cab = int(frame.lab[25, 55]), int(frame.lab[75, 48])
+    pairs, _ = st.frame_pairs(sd, 0, {f"f:b{box}": "armchair", f"f:b{cab}": "cabinet"}, None, {})
+    pair = pairs[0]
+    pair.update(sample_id="f", viewpoint="f", is_aug=False, scene_id="sc", image="/x.png", sample_dir=str(sd))
     a, b = st.pair_rows(pair)
-    assert (a["id"], a["sibling_id"], b["id"], b["sibling_id"]) == (
-        "steer_side_f_b1_L", "steer_side_f_b1_R", "steer_side_f_b1_R", "steer_side_f_b1_L")
-    for r in (a, b):
-        assert r["reason"] is None and r["kind"] == "steer" and r["style_key"] == "steer_side_f_b1"
-        assert r["desc_check"]["events"] and r["anchor"] == f"f:b{blob}" and r["anchor_event"] is not None
-        assert {"events", "stop", "template", "path", "outlines"} <= set(r)
+    pid = pair["pair_id"]
+    assert (a["id"], a["sibling_id"], b["id"], b["sibling_id"]) == (f"{pid}_A", f"{pid}_B", f"{pid}_B", f"{pid}_A")
+    for r, route in zip((a, b), pair["routes"]):
+        assert r["reason"] is None and r["kind"] == "steer" and r["style_key"] == pid and r["slice"] == "stop"
+        assert r["anchor"] == route["target"] and r["anchor_event"] is None and r["side"] is None
+        assert {"events", "stop", "template", "path", "outlines", "desc_check"} <= set(r)
     json.dumps([a, b])
 ```
 
-- [ ] **Step 2: Run them to see them fail**
-
-Run: `uv run pytest tests/test_steering.py -q`
-Expected: FAIL — no attribute `select_pairs`.
+- [ ] **Step 2: Run them to see them fail** — `uv run pytest tests/test_steering.py -q` → FAIL (`select_pairs` missing).
 
 - [ ] **Step 3: Implement**
-
-Append to `src/rover_vlm/steering.py`:
 
 ```python
 GATE0_MIN_PAIRS = 150
@@ -2054,8 +2344,7 @@ GATE0_MIN_PAIRS = 150
 
 def select_pairs(candidates):
     """One pair per (slice, viewpoint): the original frame before its yaw variants, then the
-    largest visible separation (pair_id breaks ties). Sorted by pair_id. (Routes come from the
-    navmesh, so every candidate is navigable — Addendum A1.)"""
+    largest end separation (pair_id breaks ties). Sorted by pair_id."""
     best = {}
     for p in candidates:
         key, rank = (p["slice"], p["viewpoint"]), (bool(p["is_aug"]), -p["separation"], p["pair_id"])
@@ -2099,49 +2388,37 @@ def stage_steer_select(args):
             "originals": dict(Counter(p["slice"] for p in kept if not p["is_aug"]))}
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
-    for sl in ("side", "dest"):
-        n = per.get(sl, 0)
-        print(f"GATE 0 {sl}: {n} pairs -> {'PASS' if n >= steering.GATE0_MIN_PAIRS else 'FAIL'} "
-              f"(need >= {steering.GATE0_MIN_PAIRS})")
+    n = per.get("stop", 0)
+    print(f"GATE 0 stop: {n} pairs -> {'PASS' if n >= steering.GATE0_MIN_PAIRS else 'FAIL'} "
+          f"(need >= {steering.GATE0_MIN_PAIRS})")
 ```
 
-```python
-    n = sub.add_parser("steer-select", help="steering: one pair per viewpoint per slice; Gate 0")
-    n.add_argument("--out-dir", type=Path, default=STEER_DIR)
-```
+subparser `steer-select` (`--out-dir`, default `STEER_DIR`) and its dispatch entry.
 
-and `"steer-select": stage_steer_select` in the dispatch dict.
-
-- [ ] **Step 4: Run the tests**
-
-Run: `uv run pytest tests/test_steering.py -q && uv run pytest -q`
-Expected: all pass. Then `uv run scripts/prepare_habitat_instr.py steer-select --out-dir <scratchpad>/steer-smoke` on Task 8's smoke output: prints the meta and two GATE 0 lines (FAIL is expected on 40 frames).
+- [ ] **Step 4: Run the tests and the stage** — `uv run pytest tests/test_steering.py -q && uv run pytest -q`; then `uv run scripts/prepare_habitat_instr.py steer-select --out-dir <scratchpad>/steer-stop` on Task 9's output; paste the meta and the GATE 0 line.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/rover_vlm/steering.py scripts/prepare_habitat_instr.py tests/test_steering.py
-git commit -m "feat: steer-select — one pair per viewpoint, d1-schema rows, Gate 0
+git commit -m "feat: steer-select — one stop pair per viewpoint, d1-schema rows, Gate 0
 
 Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 10: Geometry audit page (`--mode steer`)
+### Task 11: Geometry audit page (`--mode steer`, Gate 1)
 
 **Files:**
-- Modify: `scripts/audit_instruction_labels.py`
-- Modify: `scripts/audit_instruction_labels.html`
+- Modify: `scripts/audit_instruction_labels.py`, `scripts/audit_instruction_labels.html`
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: `steer/events_steer_eval.jsonl` rows (Task 9); `overlay.draw_polyline`; existing `_draw_badge`, `_font`, `TEMPLATE`, `jsonl`, `check_events_schema`.
-- Produces: `sample_steer(rows, n_per_slice, seed) -> (list[[row, row]], {"side": n, "dest": n})`, `steer_item(a, b) -> dict`, `VERDICTS["steer"]`; page `outputs/steer_audit.html` titled "Steering Pair Audit".
+- Consumes: `steer/events_steer_eval.jsonl` rows (Task 10): `pair_id, id, slice, image, scene_id, anchor (stop object or None), template, path, outlines`; `overlay.draw_polyline`; the script's `_draw_badge`, `_font`, `TEMPLATE`, `jsonl`, `check_events_schema`.
+- Produces: `sample_steer(rows, n, seed) -> (list[[row, row]], population: int)`, `steer_item(a, b) -> dict`, `VERDICTS["steer"]`; page `outputs/steer_audit.html` titled "Steering Pair Audit".
 
-- [ ] **Step 1: Write the failing tests**
-
-Append to `tests/test_steering.py`:
+- [ ] **Step 1: Write the failing test**
 
 ```python
 def _audit():
@@ -2153,94 +2430,77 @@ def _audit():
     return mod
 
 
-def _row(pid, tag, sl, img, side=None):
-    return {"id": f"{pid}_{tag}", "pair_id": pid, "slice": sl, "image": str(img), "scene_id": "sc",
-            "anchor": "f:b1" if sl == "side" else f"f:b{tag}", "side": side,
-            "template": f"Go {side or 'straight'} ... ({tag})", "path": [[0.5, 1.0, 1], [0.3, 0.6, 1]],
-            "outlines": {"f:b1": [[0.4, 0.5], [0.6, 0.5], [0.6, 0.6]], "f:bA": [[0.1, 0.5], [0.2, 0.5], [0.2, 0.6]],
-                         "f:bB": [[0.7, 0.5], [0.8, 0.5], [0.8, 0.6]]}}
+def _arow(pid, tag, img, anchor):
+    return {"id": f"{pid}_{tag}", "pair_id": pid, "slice": "stop", "image": str(img), "scene_id": "sc",
+            "anchor": anchor, "template": f"Go ... stop ({tag})", "path": [[0.5, 1.0, 1], [0.3, 0.6, 1]],
+            "outlines": {"f:b1": [[0.4, 0.5], [0.6, 0.5], [0.6, 0.6]], "f:b2": [[0.1, 0.5], [0.2, 0.5], [0.2, 0.6]]}}
 
 
-def test_audit_samples_per_slice_and_draws_both_routes(tmp_path):
+def test_audit_samples_pairs_and_draws_both_routes(tmp_path):
     from PIL import Image
     img = tmp_path / "f.png"
     Image.new("RGB", (64, 64), (90, 90, 90)).save(img)
-    rows = [r for i in range(4) for r in (_row(f"s{i}", "L", "side", img, "left"), _row(f"s{i}", "R", "side", img, "right"))]
-    rows += [r for i in range(2) for r in (_row(f"d{i}", "A", "dest", img), _row(f"d{i}", "B", "dest", img))]
+    rows = [r for i in range(4) for r in (_arow(f"p{i}", "A", img, "f:b1"), _arow(f"p{i}", "B", img, None if i % 2 else "f:b2"))]
     au = _audit()
     picked, pop = au.sample_steer(rows, 3, seed=0)
-    assert pop == {"side": 4, "dest": 2} and len(picked) == 5
+    assert pop == 4 and len(picked) == 3
     assert all(a["pair_id"] == b["pair_id"] and a["id"] < b["id"] for a, b in picked)
     item = au.steer_item(*picked[0])
     assert item["id"] == picked[0][0]["pair_id"] and item["img"].startswith("data:image/jpeg;base64,")
     assert picked[0][0]["template"] in item["instruction"] and picked[0][1]["template"] in item["instruction"]
-    assert [v["v"] for v in au.VERDICTS["steer"]] == ["ok", "side", "same", "undrivable", "object", "unsure"]
+    assert [v["v"] for v in au.VERDICTS["steer"]] == ["ok", "stop", "event", "object", "same", "unsure"]
 ```
 
-- [ ] **Step 2: Run the test to see it fail**
+- [ ] **Step 2: Run it to see it fail** — `uv run pytest tests/test_steering.py::test_audit_samples_pairs_and_draws_both_routes -q`.
 
-Run: `uv run pytest tests/test_steering.py::test_audit_samples_per_slice_and_draws_both_routes -q`
-Expected: FAIL — no attribute `sample_steer`.
+- [ ] **Step 3: Implement** in `scripts/audit_instruction_labels.py`:
 
-- [ ] **Step 3: Write the implementation**
-
-In `scripts/audit_instruction_labels.py`:
-
-1. Docstring — add:
-
+1. Docstring:
 ```
---mode steer (steering Gate 1, 2026-10-07): pairs from steer/events_steer_eval.jsonl, half per
-slice; both routes on the frame (magenta = first text, cyan = second), anchors outlined yellow,
-both template texts. Is each text true of its own route, and do the routes clearly differ?
+--mode steer (steering Gate 1, 2026-10-08): stop pairs from steer/events_steer_eval.jsonl; both cuts of the
+route on the frame (magenta = first text, cyan = second), the stop objects outlined yellow, both template
+texts. Is each text true of its own route (steps and stop), and are the two stops clearly apart?
 Gate >= 90% of pairs true.
     uv run scripts/audit_instruction_labels.py --mode steer --n 50     # -> outputs/steer_audit.html
 ```
-
-2. Imports: `from rover_vlm.overlay import draw_polyline`. Constants: `V3 = REPO_ROOT / "data" / "prepared_habitat_instr_v3"`, `STEER_A, STEER_B, ANCHOR_COLOR = (255, 0, 200), (0, 200, 255), (255, 230, 0)`.
-
+2. Imports/constants: `from rover_vlm.overlay import draw_polyline`; `V3 = REPO_ROOT / "data" / "prepared_habitat_instr_v3"`; `STEER_A, STEER_B, ANCHOR_COLOR = (255, 0, 200), (0, 200, 255), (255, 230, 0)`.
 3. `VERDICTS["steer"]`:
-
 ```python
     "steer": [
-        {"v": "ok", "label": "True pair", "help": "Both texts are true of their own route, and the routes clearly differ where you can see the floor"},
-        {"v": "side", "label": "Wrong side", "help": "A side word does not match how its route passes the outlined object"},
-        {"v": "same", "label": "Not visibly different", "help": "The two routes are too alike to tell apart in the image"},
-        {"v": "undrivable", "label": "Looks undrivable", "help": "A route crosses something solid or leaves the floor"},
-        {"v": "object", "label": "Wrong object", "help": "A name does not fit its outlined thing, or the stop is not at it"},
+        {"v": "ok", "label": "True pair", "help": "Both texts are true of their own route, and the two stops are clearly apart"},
+        {"v": "stop", "label": "Wrong stop", "help": "A stop phrase does not match where its route ends"},
+        {"v": "event", "label": "Wrong step", "help": "A step (pass / between / through / keep on your side) is not true of its route"},
+        {"v": "object", "label": "Wrong object", "help": "A name does not fit the thing it refers to"},
+        {"v": "same", "label": "Not visibly different", "help": "The two stops are too close to tell apart in the image"},
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
     ],
 ```
-
 4. Functions:
-
 ```python
-def sample_steer(rows, n_per_slice, seed):
-    """Up to n_per_slice pairs per slice (both rows, id order), shuffled; and the population."""
+def sample_steer(rows, n, seed):
+    """Up to n pairs (both rows, id order), shuffled; and the number of pairs available."""
     by = {}
     for r in rows:
         by.setdefault(r["pair_id"], []).append(r)
-    pairs = [sorted(v, key=lambda r: r["id"]) for v in by.values() if len(v) == 2]
-    rng, picked, pop = random.Random(seed), [], {}
-    for sl in ("side", "dest"):
-        ps = sorted((p for p in pairs if p[0]["slice"] == sl), key=lambda p: p[0]["pair_id"])
-        pop[sl] = len(ps)
-        picked += rng.sample(ps, min(n_per_slice, len(ps)))
+    pairs = sorted((sorted(v, key=lambda r: r["id"]) for v in by.values() if len(v) == 2), key=lambda p: p[0]["pair_id"])
+    rng = random.Random(seed)
+    picked = rng.sample(pairs, min(n, len(pairs)))
     rng.shuffle(picked)
-    return picked, pop
+    return picked, len(pairs)
 
 
 def steer_item(a, b):
-    """One audit item: the frame with both routes and the anchor outline(s), both texts."""
+    """One audit item: the frame with both routes and the stop objects outlined, both texts."""
     img = Image.open(a["image"]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
     draw = ImageDraw.Draw(img)
     font = _font(max(16, IMG_PX // 30))
-    for k, oid in enumerate(dict.fromkeys([a["anchor"], b["anchor"]]), 1):
+    for k, oid in enumerate(o for o in dict.fromkeys([a["anchor"], b["anchor"]]) if o):
         poly = a["outlines"].get(oid) or b["outlines"].get(oid) or []
         pts = [(u * IMG_PX, v * IMG_PX) for u, v in poly]
         if len(pts) >= 3:
             draw.polygon(pts, outline=ANCHOR_COLOR, width=4)
             _draw_badge(draw, (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)),
-                        str(k), ANCHOR_COLOR, font, 14)
+                        str(k + 1), ANCHOR_COLOR, font, 14)
     for row, colour in ((a, STEER_A), (b, STEER_B)):
         draw_polyline(draw, [(p[0], p[1]) for p in row["path"]], colour, IMG_PX, IMG_PX, width=6)
     buf = io.BytesIO()
@@ -2250,14 +2510,12 @@ def steer_item(a, b):
             "target": "object", "reason": None,
             "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
 ```
-
-5. `main()`: add `"steer"` to `--mode` choices, and before `if args.mode == "events":`:
-
+5. `main()`: add `"steer"` to the `--mode` choices; before `if args.mode == "events":`:
 ```python
     if args.mode == "steer":
         events = args.events or V3 / "steer" / "events_steer_eval.jsonl"
         check_events_schema(events)
-        picked, pop = sample_steer(jsonl(events), args.n // 2, args.seed)
+        picked, pop = sample_steer(jsonl(events), args.n, args.seed)
         items = [steer_item(a, b) for a, b in picked]
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "steer",
                    "verdicts": VERDICTS["steer"], "source": str(events)}
@@ -2270,43 +2528,37 @@ def steer_item(a, b):
         return
 ```
 
-In `scripts/audit_instruction_labels.html`, add after the `if (DATA.mode === "d1") {...}` block:
-
+In `scripts/audit_instruction_labels.html`, after the `if (DATA.mode === "d1") {...}` block:
 ```js
 if (DATA.mode === "steer") {
   document.title = "Steering Pair Audit";
   $("h1").textContent = "Steering pair audit";
-  $("sub").textContent = "Each frame shows two routes from the same entry: magenta follows the first text, cyan the second; yellow outlines are the anchor objects. Is each text true of its own route, and do the two routes clearly differ where you can see the floor?";
+  $("sub").textContent = "Each frame shows one route cut at two stop points: magenta follows the first text, cyan the second; yellow outlines are the stop objects. Is each text true of its own route (steps and stop), and are the two stops clearly apart?";
   $("tgtleg").hidden = false;
-  $("tgtleg").innerHTML = '<i style="background:#ff00c8"></i>magenta = first text &nbsp; <i style="background:#00c8ff"></i>cyan = second text &nbsp; <i style="background:#ffe600"></i>yellow = anchor';
+  $("tgtleg").innerHTML = '<i style="background:#ff00c8"></i>magenta = first text &nbsp; <i style="background:#00c8ff"></i>cyan = second text &nbsp; <i style="background:#ffe600"></i>yellow = stop object';
   $("altleg").hidden = true;
   document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1–${DATA.verdicts.length} mark and advance, ← → move.`;
 }
 ```
-
-and in `render()`: change the `tgtleg` line's condition to `(DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "steer")`, the `altleg` line's to include `DATA.mode === "steer" ||`, and after the d1 `kind` line add:
-
+and in `render()`: the `tgtleg` condition gains `|| DATA.mode === "steer"`, the `altleg` one `DATA.mode === "steer" ||`, and after the d1 `kind` line:
 ```js
-  if (DATA.mode === "steer") { $("side").textContent = `${it.slice} slice`; $("kind").textContent = "two routes, one entry"; }
+  if (DATA.mode === "steer") { $("side").textContent = `${it.slice} pair`; $("kind").textContent = "one route, two stops"; }
 ```
 
-- [ ] **Step 4: Run the tests**
-
-Run: `uv run pytest tests/test_steering.py -q`
-Expected: all pass.
+- [ ] **Step 4: Run** — `uv run pytest tests/test_steering.py -q && uv run pytest -q`; then `uv run scripts/audit_instruction_labels.py --mode steer --n 10 --events <scratchpad>/steer-stop/events_steer_eval.jsonl --out <scratchpad>/steer-stop/audit.html` (the stage needs `events_meta.json` next to it — Task 10 writes it).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/audit_instruction_labels.py scripts/audit_instruction_labels.html tests/test_steering.py
-git commit -m "feat: --mode steer audit page (Gate 1) — both routes, anchors, both template texts
+git commit -m "feat: --mode steer audit page (Gate 1) — one route, two stops, both template texts
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 11: Composed text — shared style per pair, `STAGE=steer`
+### Task 12: Composed text — shared style per pair, `STAGE=steer`
 
 **Files:**
 - Modify: `src/rover_vlm/descriptions.py` (`label_route`)
@@ -2314,8 +2566,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_descriptions.py`, `tests/test_slurm_thread_caps.py`
 
 **Interfaces:**
-- Consumes: steering rows carry `style_key = pair_id` (Task 9).
-- Produces: `label_route` picks style and shape from `row.get("style_key") or row["id"]`; `STAGE=steer` composes `data/prepared_habitat_instr_v3/steer/events_steer_eval.jsonl` → `outputs/instr_labels_v3/desc_steer_eval_d1.jsonl` with `--names steer/names_primary_eval.jsonl` (d1 Gemma + steer Gemma rows, written by the `steer` stage, Task 8) and `--fallback-names names_eval_d1.jsonl` (Cosmos).
+- Consumes: steering rows carry `style_key = pair_id` (Task 10); `steer/names_primary_eval.jsonl` (d1 Gemma + steer Gemma name rows, written by the `steer` stage).
+- Produces: `label_route` picks style and shape from `row.get("style_key") or row["id"]`; `STAGE=steer` composes `data/prepared_habitat_instr_v3/steer/events_steer_eval.jsonl` → `outputs/instr_labels_v3/desc_steer_eval_d1.jsonl` with `--names steer/names_primary_eval.jsonl` and `--fallback-names names_eval_d1.jsonl`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2339,13 +2591,10 @@ Append to `tests/test_slurm_thread_caps.py`:
 def test_label_descriptions_has_a_steer_stage():
     text = (SLURM / "label_descriptions.sbatch").read_text()
     assert '"$STAGE" = "steer"' in text and "events_steer_eval.jsonl" in text
-    assert "desc_steer_eval_d1.jsonl" in text and "--fallback-names" in text
+    assert "desc_steer_eval_d1.jsonl" in text and "names_primary_eval.jsonl" in text and "--fallback-names" in text
 ```
 
-- [ ] **Step 2: Run them to see them fail**
-
-Run: `uv run pytest tests/test_descriptions.py::test_label_route_style_key_shares_style_and_shape_across_a_pair tests/test_slurm_thread_caps.py -q`
-Expected: FAIL (style differs between `p_L` / `p_R`; no steer stage in the sbatch).
+- [ ] **Step 2: Run them to see them fail** — `uv run pytest tests/test_descriptions.py::test_label_route_style_key_shares_style_and_shape_across_a_pair tests/test_slurm_thread_caps.py -q`.
 
 - [ ] **Step 3: Implement**
 
@@ -2356,17 +2605,15 @@ In `label_route` replace `style, shape = choose_d1_style(row["id"]), choose_shap
     style, shape = choose_d1_style(key), choose_shape(key)
 ```
 
-In `slurm/label_descriptions.sbatch`:
-- header comment, after the NAMER=mix block:
+In `slurm/label_descriptions.sbatch`, header comment after the steer_names block:
 
 ```bash
-# STAGE=steer (2026-10-07, steering eval): compose only, for the steering rows from
-# `prepare_habitat_instr.py steer-select`, with the merged primary names (d1 + steer Gemma, from the steer stage) and the d1 Cosmos fallback;
-# no naming. ~800 calls, < 1 h. Then: uv run scripts/prepare_habitat_instr.py finalize-steer
-#     STAGE=steer sbatch slurm/label_descriptions.sbatch
+# STAGE=steer (2026-10-08, steering stop pairs): compose only, for prepare_habitat_instr.py steer-select's
+# rows, with the merged primary names (d1 + steer Gemma, from the steer stage) and the d1 Cosmos fallback.
+#     STAGE=steer sbatch slurm/label_descriptions.sbatch     # then: prepare_habitat_instr.py finalize-steer
 ```
 
-- just before the line `if [ "$NAMER" = "cosmos" ]; then` (after the `mix_compose` function):
+and just before `if [ "$NAMER" = "cosmos" ]; then` (next to the `steer_names` block):
 
 ```bash
 if [ "$STAGE" = "steer" ]; then
@@ -2389,10 +2636,7 @@ fi
 
 (The template fallback inside `label_route` still runs; `finalize-steer` treats a template row as a composed failure, so the composed files stay purely Cosmos.)
 
-- [ ] **Step 4: Run the tests**
-
-Run: `uv run pytest tests/test_descriptions.py tests/test_slurm_thread_caps.py -q`
-Expected: all pass. Also `bash -n slurm/label_descriptions.sbatch` — no syntax error.
+- [ ] **Step 4: Run** — `uv run pytest tests/test_descriptions.py tests/test_slurm_thread_caps.py -q && bash -n slurm/label_descriptions.sbatch && uv run pytest -q`.
 
 - [ ] **Step 5: Commit**
 
@@ -2400,12 +2644,12 @@ Expected: all pass. Also `bash -n slurm/label_descriptions.sbatch` — no syntax
 git add src/rover_vlm/descriptions.py slurm/label_descriptions.sbatch tests/test_descriptions.py tests/test_slurm_thread_caps.py
 git commit -m "feat: STAGE=steer compose job; a pair shares speaking style and sentence shape
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 12: The 8 eval files (`finalize-steer`)
+### Task 13: The 4 eval files (`finalize-steer`, Gate 2)
 
 **Files:**
 - Modify: `src/rover_vlm/steering.py`
@@ -2413,15 +2657,13 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: d1 entry records (base per `sample_id`); steering rows (Task 9); compose rows `desc_steer_eval_d1.jsonl` (`id, passed, description, instruction_source`); `descriptions.with_description`; `habitat_data.format_answer_goal`.
+- Consumes: d1 entry records (base per `sample_id`); steering rows (Task 10); compose rows `desc_steer_eval_d1.jsonl` (`id, passed, description, instruction_source`); `descriptions.with_description`; `habitat_data.format_answer_goal`.
 - Produces:
-  - `STEER_FILES` (8 stems), `steer_record(base, row, text, source, form) -> record`, `finalize_steer(base_by_sample, rows, desc_by_id) -> {"files": {stem: [records]}, "stats": dict}`
-  - record `habitat_meta`: kept base fields + `pair_id, sibling_id, kind="steer", start_uv_norm, goal_uv_norm, goal_visible=1, steer={slice, anchor, anchor_event, side, viewpoint}` + `with_description`'s `instruction, instruction_source, prompt_form, desc_check, goal_in_prompt`. No `alt_path`.
-  - Stage `finalize-steer` writes `data/prepared_habitat_instr_v3/eval_steer_*.json` and `steer/finalize_meta.json`, prints Gate 2.
+  - `STEER_FILES` = `eval_steer_stop_{template,composed}_{entry,goal}` (4 stems), `steer_record(base, row, text, source, form) -> record`, `finalize_steer(base_by_sample, rows, desc_by_id) -> {"files": {stem: [records]}, "stats": dict}`
+  - record `habitat_meta`: kept base fields + `pair_id, sibling_id, kind="steer", start_uv_norm, goal_uv_norm, goal_visible (the answer's last v), steer={slice, anchor, anchor_event, side, viewpoint}` + `with_description`'s fields. No `alt_path`.
+  - stage `finalize-steer` → `data/prepared_habitat_instr_v3/eval_steer_stop_*.json`, `steer/finalize_meta.json`; prints Gate 2.
 
 - [ ] **Step 1: Write the failing tests**
-
-Append to `tests/test_steering.py`:
 
 ```python
 def _base(sid):
@@ -2432,68 +2674,83 @@ def _base(sid):
                              "alt_path": [[0, 1, 1]], "candidate_index": 2, "instruction": "old text"}}
 
 
-def _srow(pid, tag, sib, sl="side"):
-    return {"id": f"{pid}_{tag}", "pair_id": pid, "sibling_id": f"{pid}_{sib}", "slice": sl, "sample_id": "f",
-            "viewpoint": "f", "path": [[0.5, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.6, 1]],
+def _srow(pid, tag, sib):
+    return {"id": f"{pid}_{tag}", "pair_id": pid, "sibling_id": f"{pid}_{sib}", "slice": "stop", "sample_id": "f",
+            "viewpoint": "f", "path": [[0.5, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.6, 0 if tag == "B" else 1]],
             "desc_check": {"pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 3], "events": []},
-            "anchor": "f:b1", "anchor_event": 0, "side": "left" if tag == "L" else "right",
-            "template": f"Go {tag} of the sofa, and stop just after it."}
+            "anchor": "f:b1", "anchor_event": None, "side": None,
+            "template": f"Go left of the sofa, and stop {tag} it."}
 
 
 def test_finalize_steer_writes_four_records_per_route_and_drops_template_pairs_from_composed():
-    rows = [_srow("p1", "L", "R"), _srow("p1", "R", "L"), _srow("p2", "L", "R"), _srow("p2", "R", "L")]
-    desc = {"p1_L": {"passed": True, "description": "Keep left of the sofa, then stop just after it.", "instruction_source": "cosmos"},
-            "p1_R": {"passed": True, "description": "Keep right of the sofa, then stop just after it.", "instruction_source": "cosmos"},
-            "p2_L": {"passed": True, "description": "Go L of the sofa, and stop just after it.", "instruction_source": "template"},
-            "p2_R": {"passed": True, "description": "x", "instruction_source": "cosmos"}}
+    rows = [_srow("p1", "A", "B"), _srow("p1", "B", "A"), _srow("p2", "A", "B"), _srow("p2", "B", "A")]
+    desc = {"p1_A": {"passed": True, "description": "Keep left of the sofa, then stop just after it.", "instruction_source": "cosmos"},
+            "p1_B": {"passed": True, "description": "Keep left of the sofa, then stop well past it.", "instruction_source": "cosmos"},
+            "p2_A": {"passed": True, "description": "Go left of the sofa, and stop A it.", "instruction_source": "template"},
+            "p2_B": {"passed": True, "description": "x", "instruction_source": "cosmos"}}
     out = st.finalize_steer({"f": _base("f")}, rows, desc)
     files = out["files"]
-    assert set(files) == set(st.STEER_FILES) and len(st.STEER_FILES) == 8
-    assert len(files["eval_steer_side_template_entry"]) == 4 and len(files["eval_steer_side_template_goal"]) == 4
-    assert [r["id"] for r in files["eval_steer_side_composed_entry"]] == ["p1_L", "p1_R"]
-    assert out["stats"]["side:composed_dropped"] == 1 and out["stats"]["side:pairs"] == 2
-    r = files["eval_steer_side_composed_entry"][0]
+    assert set(files) == set(st.STEER_FILES) and len(st.STEER_FILES) == 4
+    assert len(files["eval_steer_stop_template_entry"]) == 4 and len(files["eval_steer_stop_template_goal"]) == 4
+    assert [r["id"] for r in files["eval_steer_stop_composed_entry"]] == ["p1_A", "p1_B"]
+    assert out["stats"]["stop:composed_dropped"] == 1 and out["stats"]["stop:pairs"] == 2
+    r = files["eval_steer_stop_composed_entry"][0]
     hm = r["habitat_meta"]
-    assert hm["steer"] == {"slice": "side", "anchor": "f:b1", "anchor_event": 0, "side": "left", "viewpoint": "f"}
-    assert hm["sibling_id"] == "p1_R" and "alt_path" not in hm and "candidate_index" not in hm
-    assert hm["prompt_form"] == "entry" and "Keep left of the sofa" in r["conversations"][0]["value"]
+    assert hm["steer"] == {"slice": "stop", "anchor": "f:b1", "anchor_event": None, "side": None, "viewpoint": "f"}
+    assert hm["sibling_id"] == "p1_B" and "alt_path" not in hm and "candidate_index" not in hm
+    assert hm["prompt_form"] == "entry" and "stop just after it" in r["conversations"][0]["value"]
     assert json.loads(r["conversations"][1]["value"])["path"][0] == [0.5, 1.0, 1]
-    g = files["eval_steer_side_template_goal"][0]
-    assert g["habitat_meta"]["goal_in_prompt"] and "[0.5, 0.6]" in g["conversations"][0]["value"]
+    g = files["eval_steer_stop_template_goal"][1]
+    assert g["habitat_meta"]["goal_in_prompt"] and g["habitat_meta"]["goal_visible"] == 0
+    assert "[0.5, 0.6]" in g["conversations"][0]["value"]
 
 
 def test_finalize_steer_counts_unlabelled_pairs():
-    rows = [_srow("p1", "L", "R"), _srow("p1", "R", "L")]
+    rows = [_srow("p1", "A", "B"), _srow("p1", "B", "A")]
     out = st.finalize_steer({"f": _base("f")}, rows, {})
-    assert out["stats"]["side:unlabelled"] == 1 and out["files"]["eval_steer_side_composed_entry"] == []
-    assert len(out["files"]["eval_steer_side_template_entry"]) == 2
+    assert out["stats"]["stop:unlabelled"] == 1 and out["files"]["eval_steer_stop_composed_entry"] == []
+    assert len(out["files"]["eval_steer_stop_template_entry"]) == 2
+
+
+def test_finalize_steer_stage_refuses_missing_compose_rows(tmp_path):
+    import types
+    prep = _prep()
+    sd = tmp_path / "steer"
+    sd.mkdir()
+    (sd / "events_steer_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (_srow("p1", "A", "B"), _srow("p1", "B", "A"))))
+    frames = tmp_path / "frames.json"
+    frames.write_text(json.dumps([_base("f")]))
+    args = types.SimpleNamespace(frames=frames, steer_dir=sd, desc=tmp_path / "none.jsonl", out_dir=tmp_path,
+                                 allow_missing=False)
+    with pytest.raises(SystemExit, match="no compose row"):
+        prep.stage_finalize_steer(args)
+    args.allow_missing = True
+    prep.stage_finalize_steer(args)
+    assert len(json.loads((tmp_path / "eval_steer_stop_template_entry.json").read_text())) == 2
 ```
 
-- [ ] **Step 2: Run them to see them fail**
+(`_prep` is the importlib helper already in this file.)
 
-Run: `uv run pytest tests/test_steering.py -q`
-Expected: FAIL — no attribute `finalize_steer`.
+- [ ] **Step 2: Run them to see them fail** — `uv run pytest tests/test_steering.py -q` → FAIL (`finalize_steer` missing).
 
-- [ ] **Step 3: Implement**
-
-Append to `src/rover_vlm/steering.py` (imports: `import copy`; `from .descriptions import with_description`; `from .habitat_data import format_answer_goal`):
+- [ ] **Step 3: Implement** in `src/rover_vlm/steering.py` (imports: `import copy`; `with_description` from `.descriptions`; `format_answer_goal` from `.habitat_data`):
 
 ```python
-STEER_FILES = [f"eval_steer_{s}_{t}_{f}" for s in ("side", "dest") for t in ("template", "composed")
-               for f in ("entry", "goal")]
+STEER_FILES = [f"eval_steer_stop_{t}_{f}" for t in ("template", "composed") for f in ("entry", "goal")]
 # d1 record fields that still hold for a steering route (everything route-specific is rebuilt)
 STEER_META_KEEP = ("scene_id", "sample_id", "parent_sample_id", "source", "yaw_deg", "flavor", "framing", "entry_edge")
 
 
 def steer_record(base, row, text, source, form):
-    """One eval record for a steering route: the frame's d1 record with the route's answer,
-    fresh habitat_meta and the description prompt in `form` ("entry" | "goal")."""
+    """One eval record for a steering route: the frame's d1 record with the route's answer, fresh
+    habitat_meta and the description prompt in `form` ("entry" | "goal")."""
     rec = copy.deepcopy(base)
     rec["id"] = row["id"]
     rec["conversations"][1]["value"] = format_answer_goal([tuple(w) for w in row["path"]])
     hm = {k: base["habitat_meta"].get(k) for k in STEER_META_KEEP}
     hm.update({"pair_id": row["pair_id"], "sibling_id": row["sibling_id"], "kind": "steer",
-               "start_uv_norm": row["path"][0][:2], "goal_uv_norm": row["path"][-1][:2], "goal_visible": 1,
+               "start_uv_norm": row["path"][0][:2], "goal_uv_norm": row["path"][-1][:2],
+               "goal_visible": int(row["path"][-1][2]),
                "steer": {"slice": row["slice"], "anchor": row["anchor"], "anchor_event": row["anchor_event"],
                          "side": row["side"], "viewpoint": row["viewpoint"]}})
     rec["habitat_meta"] = hm
@@ -2501,7 +2758,7 @@ def steer_record(base, row, text, source, form):
 
 
 def finalize_steer(base_by_sample, rows, desc_by_id):
-    """{"files": {stem: records}, "stats"} for the 8 eval files. Template text for every pair;
+    """{"files": {stem: records}, "stats"} for the 4 eval files. Template text for every pair;
     composed text only when both routes' compose rows passed as Cosmos text (a template fallback
     drops the pair from the composed files only)."""
     files = {k: [] for k in STEER_FILES}
@@ -2557,65 +2814,28 @@ def stage_finalize_steer(args):
     meta = {"stats": stats, "files": {k: len(v) for k, v in out["files"].items()}}
     (d / "finalize_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
-    for sl in ("side", "dest"):
-        n, c = stats.get(f"{sl}:pairs", 0), stats.get(f"{sl}:composed", 0)
-        share = c / n if n else 0.0
-        print(f"GATE 2 {sl}: composed {c}/{n} = {share:.3f} -> {'PASS' if share >= GATE2_MIN_COMPOSED else 'FAIL'} "
-              f"(need >= {GATE2_MIN_COMPOSED})")
+    n, c = stats.get("stop:pairs", 0), stats.get("stop:composed", 0)
+    share = c / n if n else 0.0
+    print(f"GATE 2 stop: composed {c}/{n} = {share:.3f} -> {'PASS' if share >= GATE2_MIN_COMPOSED else 'FAIL'} "
+          f"(need >= {GATE2_MIN_COMPOSED})")
 ```
 
-```python
-    q = sub.add_parser("finalize-steer", help="steering: the 8 eval files (after STAGE=steer compose)")
-    q.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
-    q.add_argument("--steer-dir", type=Path, default=STEER_DIR)
-    q.add_argument("--desc", type=Path, default=D1_LABELS / "desc_steer_eval_d1.jsonl")
-    q.add_argument("--out-dir", type=Path, default=V3_OUT)
-    q.add_argument("--allow-missing", action="store_true")
-```
+subparser `finalize-steer` (`--frames` default `V3_OUT / "eval_desc_entry.json"`, `--steer-dir` default `STEER_DIR`, `--desc` default `D1_LABELS / "desc_steer_eval_d1.jsonl"`, `--out-dir` default `V3_OUT`, `--allow-missing`) and its dispatch entry.
 
-plus `"steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer` in the dispatch dict (Task 9 already added `"steer-select"`; add `"finalize-steer"`).
-
-Add a stage test for Review Focus 5 — append to `tests/test_steering.py`:
-
-```python
-def test_finalize_steer_stage_refuses_missing_compose_rows(tmp_path):
-    import importlib.util
-    import types
-    spec = importlib.util.spec_from_file_location(
-        "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
-    prep = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(prep)
-    sd = tmp_path / "steer"
-    sd.mkdir()
-    (sd / "events_steer_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (_srow("p1", "L", "R"), _srow("p1", "R", "L"))))
-    frames = tmp_path / "frames.json"
-    frames.write_text(json.dumps([_base("f")]))
-    args = types.SimpleNamespace(frames=frames, steer_dir=sd, desc=tmp_path / "none.jsonl", out_dir=tmp_path,
-                                 allow_missing=False)
-    with pytest.raises(SystemExit, match="no compose row"):
-        prep.stage_finalize_steer(args)
-    args.allow_missing = True
-    prep.stage_finalize_steer(args)
-    assert len(json.loads((tmp_path / "eval_steer_side_template_entry.json").read_text())) == 2
-```
-
-- [ ] **Step 4: Run the tests**
-
-Run: `uv run pytest tests/test_steering.py -q`
-Expected: all pass.
+- [ ] **Step 4: Run** — `uv run pytest tests/test_steering.py -q && uv run pytest -q`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/rover_vlm/steering.py scripts/prepare_habitat_instr.py tests/test_steering.py
-git commit -m "feat: finalize-steer — 8 eval files (slice x text x form), Gate 2
+git commit -m "feat: finalize-steer — 4 stop-pair eval files (text x form), Gate 2
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 13: Steering metrics in `eval.py`; `SETS=steer` in the eval job
+### Task 14: Steering metrics in `eval.py`; `SETS=steer` in the eval job
 
 **Files:**
 - Modify: `src/rover_vlm/eval.py`
@@ -2623,85 +2843,61 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_description_eval.py`, `tests/test_slurm_thread_caps.py`
 
 **Interfaces:**
-- Consumes: prediction records from `scripts/evaluate.py` (`id, parsed{path}, gt{path}, metrics, habitat_meta` with `steer`, `sibling_id`, `desc_check`).
+- Consumes: prediction records from `scripts/evaluate.py` (`id, generated, parsed{path}, gt{path}, metrics, habitat_meta` with `steer`, `sibling_id`, `desc_check`).
 - Produces:
   - `description_follow(pred_path, check, gt_end_uv=None, stop_tol_uv=STOP_TOL_UV)` (new keyword, default unchanged)
-  - `_floor_path(path, check) -> np.ndarray` (shared floor back-projection with duplicate removal)
-  - `anchor_side_ok(floor, event) -> int`
-  - `steer_scores(rec, sib) -> (own: int, swapped: int)`
+  - `steer_scores(rec, sib) -> (own: int, swapped: int)` — the end of the prediction is closer to its own route's end than to the sibling's (ties neither); unparseable `(0, 0)`
   - `aggregate_steering_metrics(records) -> dict | None`; `aggregate_habitat_metrics` adds `summary["steering"]`
   - `eval_descriptions.sbatch`: `SETS=desc|steer|steer_goal`
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/test_description_eval.py` (it already defines `CAM` at the origin facing +z, `to_image`, `check`, `LEFT_ROUTE`, `RIGHT_ROUTE`, `POST`):
+Append to `tests/test_description_eval.py` (it defines `CAM` at the origin facing +z, `to_image`, `check`, `LEFT_ROUTE`):
 
 ```python
-from rover_vlm.eval import aggregate_steering_metrics, anchor_side_ok, steer_scores
+from rover_vlm.eval import aggregate_steering_metrics, steer_scores
 
-THROUGH_POST = [(0.0, 0.8), (0.02, 2.0), (0.0, 4.0)]   # runs through the post: a graze, no side
-
-
-def _steer_rec(rid, sib, side, pred_xz, gt_xz, sl="side", vp="v1"):
-    chk = check([{"type": "pass", "side": side, "obstacles": POST, "gap_xz": None}])
-    return {"id": rid, "parsed": {"path": to_image(pred_xz)} if pred_xz else None,
-            "gt": {"path": to_image(gt_xz)},
-            "habitat_meta": {"pair_id": rid[:-2], "sibling_id": sib, "desc_check": chk,
-                             "steer": {"slice": sl, "anchor": "f:b1", "anchor_event": 0, "side": side, "viewpoint": vp}}}
+A_GT, B_GT = [(0.0, 0.8), (0.5, 2.0)], [(0.0, 0.8), (0.5, 2.0), (0.0, 3.5)]   # one route, two stops
 
 
-def _side_pair(pred_l, pred_r, pid="p"):
-    return [_steer_rec(f"{pid}_L", f"{pid}_R", "left", pred_l, LEFT_ROUTE),
-            _steer_rec(f"{pid}_R", f"{pid}_L", "right", pred_r, RIGHT_ROUTE)]
+def _srec(rid, sib, pred_xz, gt_xz, vp="v1"):
+    return {"id": rid, "generated": json.dumps(pred_xz) if pred_xz else "",
+            "parsed": {"path": to_image(pred_xz)} if pred_xz else None, "gt": {"path": to_image(gt_xz)},
+            "habitat_meta": {"pair_id": rid[:-2], "sibling_id": sib, "desc_check": check([]),
+                             "steer": {"slice": "stop", "anchor": None, "anchor_event": None, "side": None, "viewpoint": vp}}}
 
 
-def test_anchor_side_ok_refuses_a_graze():
-    ev = {"type": "pass", "side": "left", "obstacles": POST}
-    floor = np.array(LEFT_ROUTE, float)
-    assert anchor_side_ok(floor, ev) == 1
-    assert anchor_side_ok(np.array(RIGHT_ROUTE, float), ev) == 0
-    assert anchor_side_ok(np.array(THROUGH_POST, float), ev) == 0
+def _pair(pa, pb, pid="p"):
+    return [_srec(f"{pid}_A", f"{pid}_B", pa, A_GT), _srec(f"{pid}_B", f"{pid}_A", pb, B_GT)]
 
 
-def test_side_steering_perfect_blind_swapped_and_graze():
-    m = aggregate_steering_metrics(_side_pair(LEFT_ROUTE, RIGHT_ROUTE))
-    assert m["pair_success"] == 1.0 and m["swap_pair_rate"] == 0.0 and m["closer_to_own_gt"] == 1.0
-    assert aggregate_steering_metrics(_side_pair(LEFT_ROUTE, LEFT_ROUTE))["pair_success"] == 0.0   # text-blind
-    m = aggregate_steering_metrics(_side_pair(RIGHT_ROUTE, LEFT_ROUTE))
+def test_stop_steering_perfect_blind_and_swapped():
+    m = aggregate_steering_metrics(_pair(A_GT, B_GT))
+    assert m["pair_success"] == 1.0 and m["swap_pair_rate"] == 0.0 and m["closer_to_own_gt"] == 1.0 and m["slice"] == "stop"
+    assert aggregate_steering_metrics(_pair(B_GT, B_GT))["pair_success"] == 0.0          # text-blind
+    m = aggregate_steering_metrics(_pair(B_GT, A_GT))
     assert m["pair_success"] == 0.0 and m["swap_pair_rate"] == 1.0
-    assert aggregate_steering_metrics(_side_pair(THROUGH_POST, THROUGH_POST))["pair_success"] == 0.0
-
-
-def test_dest_steering_uses_the_closer_endpoint():
-    a_gt, b_gt = [(0.0, 0.8), (1.0, 3.0)], [(0.0, 0.8), (-1.0, 3.0)]
-
-    def pair(pa, pb):
-        ra = _steer_rec("d_A", "d_B", None, pa, a_gt, sl="dest")
-        rb = _steer_rec("d_B", "d_A", None, pb, b_gt, sl="dest")
-        return [ra, rb]
-    assert aggregate_steering_metrics(pair(a_gt, b_gt))["pair_success"] == 1.0
-    assert aggregate_steering_metrics(pair(a_gt, a_gt))["pair_success"] == 0.0          # text-blind
-    ra, rb = pair(b_gt, a_gt)
+    ra, rb = _pair(B_GT, A_GT)
     assert steer_scores(ra, rb) == (0, 1)
 
 
 def test_steering_unparseable_and_missing_sibling():
-    recs = _side_pair(None, RIGHT_ROUTE)                     # one prediction did not parse
+    recs = _pair(None, B_GT)
     m = aggregate_steering_metrics(recs)
     assert m["n_pairs"] == 1 and m["pair_success"] == 0.0 and m["record_hit_rate"] == 0.5
-    assert aggregate_steering_metrics(recs[:1]) is None      # sibling missing: no pair
+    assert aggregate_steering_metrics(recs[:1]) is None
     assert aggregate_steering_metrics([{"id": "x", "habitat_meta": {}}]) is None
 
 
 def test_steering_block_in_habitat_summary_and_ci():
-    recs = _side_pair(LEFT_ROUTE, RIGHT_ROUTE) + _side_pair(LEFT_ROUTE, LEFT_ROUTE, pid="q")
+    recs = _pair(A_GT, B_GT) + _pair(B_GT, B_GT, pid="q")
     for r in recs:
         r["metrics"] = {"mean_point_error": 0.0, "frechet": 0.0, "path_visibility_acc": 1.0, "goal_point_error": 0.0,
                         "goal_visibility_correct": 1, "goal_copy_correct": 1, "start_point_error": 0.0,
                         "start_copy_correct": 1}
         r["gt"]["goal"] = r["gt"]["path"][-1]
     s = aggregate_habitat_metrics(recs)["steering"]
-    assert s["n_pairs"] == 2 and s["pair_success"] == 0.5 and s["slice"] == "side"
+    assert s["n_pairs"] == 2 and s["pair_success"] == 0.5
     lo, hi = s["pair_success_ci"]
     assert 0.0 <= lo <= 0.5 <= hi <= 1.0
     assert set(s) >= {"strict_pair_success_03", "strict_pair_success_05", "identical_prediction_pairs"}
@@ -2715,24 +2911,23 @@ def test_description_follow_stop_tolerance_keyword():
     assert description_follow(path, c, end, stop_tol_uv=0.05)["stop"] == 1
 ```
 
+(add `import json` at the top of that test file if it is not imported.)
+
 Append to `tests/test_slurm_thread_caps.py`:
 
 ```python
 def test_eval_descriptions_sets():
     text = (SLURM / "eval_descriptions.sbatch").read_text()
     assert 'SETS="${SETS:-desc}"' in text
-    for s in ("eval_steer_side_template_entry", "eval_steer_dest_composed_goal"):
+    for s in ("eval_steer_stop_template_entry", "eval_steer_stop_composed_goal"):
         assert s in text
 ```
 
-- [ ] **Step 2: Run them to see them fail**
-
-Run: `uv run pytest tests/test_description_eval.py tests/test_slurm_thread_caps.py -q`
-Expected: FAIL — `ImportError: cannot import name 'aggregate_steering_metrics'`.
+- [ ] **Step 2: Run them to see them fail** — `uv run pytest tests/test_description_eval.py tests/test_slurm_thread_caps.py -q`.
 
 - [ ] **Step 3: Implement in `eval.py`**
 
-Refactor `description_follow` to share the floor helper and take the tolerance:
+Refactor `description_follow` onto a shared floor helper and add the tolerance keyword:
 
 ```python
 def _floor_path(path, check):
@@ -2763,38 +2958,21 @@ def description_follow(pred_path, check, gt_end_uv=None, stop_tol_uv=STOP_TOL_UV
     return {"follows": int(all(res) and stop), "events": res, "stop": stop}
 ```
 
-Append the steering metrics after `aggregate_description_metrics`:
+Append after `aggregate_description_metrics`:
 
 ```python
-# --- steering pairs (2026-10-07, docs/superpowers/specs/2026-10-07-steering-eval-design.md) ---
-def anchor_side_ok(floor, event):
-    """1 when the floor path passes the anchor of a pass event on the stated side, within
-    FOLLOW_NEAR_M and NOT grazing it: a graze (< PASS_TIE_M) has no side here, so a text-blind
-    route through the object cannot count for both texts of a pair."""
-    obs = (event.get("obstacles") or [[]])[0]
-    if len(floor) < 2 or not len(obs):
-        return 0
-    side, dist = _pass_side(floor, obs)
-    return int(side == event.get("side") and PASS_TIE_M <= dist <= FOLLOW_NEAR_M)
-
-
+# --- steering stop pairs (2026-10-08, spec docs/superpowers/specs/2026-10-07-steering-eval-design.md A2) ---
 def _xy(path):
     return [p[:2] for p in path]
 
 
 def steer_scores(rec, sib):
-    """(own, swapped) hits of one steering record against its pair sibling. Side: the anchor
-    passed on this record's side / on the sibling's. Destination: the endpoint closer to this
-    record's GT end than to the sibling's / the reverse (ties are neither). Unparseable = (0, 0)."""
+    """(own, swapped) hits of one steering record against its pair sibling: the prediction's end is
+    closer to this record's GT end than to the sibling's / the reverse (ties are neither).
+    Unparseable = (0, 0). A text-blind model gives one end for both texts: at most one hit a pair."""
     path = (rec.get("parsed") or {}).get("path")
     if not path:
         return 0, 0
-    hm, sh = rec["habitat_meta"], sib["habitat_meta"]
-    if hm["steer"]["slice"] == "side":
-        floor = _floor_path(path, hm["desc_check"])
-        own = anchor_side_ok(floor, hm["desc_check"]["events"][hm["steer"]["anchor_event"]])
-        swap = anchor_side_ok(floor, sh["desc_check"]["events"][sh["steer"]["anchor_event"]])
-        return own, swap
     end = np.asarray(path[-1][:2], float)
     d_own = float(np.linalg.norm(end - np.asarray(rec["gt"]["path"][-1][:2], float)))
     d_sib = float(np.linalg.norm(end - np.asarray(sib["gt"]["path"][-1][:2], float)))
@@ -2804,9 +2982,9 @@ def steer_scores(rec, sib):
 def aggregate_steering_metrics(records):
     """Steering summary for records carrying habitat_meta.steer, else None. Pairs are matched by
     sibling_id; a record whose sibling is absent is skipped. Headline: pair success (both texts
-    steered their own way; a text-blind model scores 0), with a 95% bootstrap interval over
-    viewpoints. Also: swap control, closer-to-own-GT rate, strict follow (all events + stop at
-    0.03 and 0.05), and the share of pairs whose two generations are identical."""
+    steered their own way; text-blind = 0), with a 95% bootstrap interval over viewpoints. Also:
+    swap control, closer-to-own-GT rate, strict follow (all events + stop at 0.03 and 0.05), and the
+    share of pairs whose two generations are identical."""
     rows = [r for r in records if (r.get("habitat_meta") or {}).get("steer")]
     by_id = {r["id"]: r for r in rows}
     pairs, seen = [], set()
@@ -2851,8 +3029,6 @@ def aggregate_steering_metrics(records):
     }
 ```
 
-(`clustered_bootstrap_ci` and `trajectory_metrics` are defined earlier in `eval.py`; `aggregate_steering_metrics` must sit below both, which it does when appended after `aggregate_description_metrics`.)
-
 In `aggregate_habitat_metrics`, after the `description` block:
 
 ```python
@@ -2861,7 +3037,7 @@ In `aggregate_habitat_metrics`, after the `description` block:
         summary["steering"] = steer
 ```
 
-and extend its docstring with one sentence: "Steering sets (habitat_meta.steer) also get a "steering" block (aggregate_steering_metrics)."
+and add to its docstring: "Steering sets (habitat_meta.steer) also get a "steering" block (aggregate_steering_metrics)."
 
 - [ ] **Step 4: `SETS` in `slurm/eval_descriptions.sbatch`**
 
@@ -2869,10 +3045,10 @@ Replace the final `for s in eval_desc_entry ...; do run "$s"; done` line and its
 
 ```bash
 SETS="${SETS:-desc}"
-STEER_GOAL="eval_steer_side_template_goal eval_steer_side_composed_goal eval_steer_dest_template_goal eval_steer_dest_composed_goal"
+STEER_GOAL="eval_steer_stop_template_goal eval_steer_stop_composed_goal"
 case "$SETS" in
     desc)       LIST="eval_desc_entry eval_desc_goal eval_desc_pairs eval_desc_shuffled" ;;
-    steer)      LIST="eval_steer_side_template_entry eval_steer_side_composed_entry eval_steer_dest_template_entry eval_steer_dest_composed_entry $STEER_GOAL" ;;
+    steer)      LIST="eval_steer_stop_template_entry eval_steer_stop_composed_entry $STEER_GOAL" ;;
     steer_goal) LIST="$STEER_GOAL" ;;
     *) echo "SETS must be desc, steer or steer_goal, got '$SETS'"; exit 1 ;;
 esac
@@ -2880,30 +3056,27 @@ for s in $LIST; do run "$s"; done
 echo "all cells done: uv run scripts/render_desc_videos.py --set <set> --tag $TAG; uv run scripts/visualize_steering.py"
 ```
 
-and add to its header comment:
+and to its header comment:
 
 ```bash
-#     SETS=steer sbatch slurm/eval_descriptions.sbatch              # the 8 steering sets (d1)
+#     SETS=steer sbatch slurm/eval_descriptions.sbatch              # the 4 steering stop-pair sets (d1)
 #     SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
 ```
 
-- [ ] **Step 5: Run the tests**
-
-Run: `uv run pytest tests/test_description_eval.py tests/test_slurm_thread_caps.py -q && bash -n slurm/eval_descriptions.sbatch`
-Expected: all pass, no syntax error. Then the whole suite: `uv run pytest -q` — all pass.
+- [ ] **Step 5: Run** — `uv run pytest tests/test_description_eval.py tests/test_slurm_thread_caps.py -q && bash -n slurm/eval_descriptions.sbatch && uv run pytest -q`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/rover_vlm/eval.py slurm/eval_descriptions.sbatch tests/test_description_eval.py tests/test_slurm_thread_caps.py
-git commit -m "feat: steering pair metrics (side / destination, swap control, CI); SETS=steer eval
+git commit -m "feat: steering stop-pair metrics (end closer to own stop, swap control, CI); SETS=steer eval
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 14: Report script and README
+### Task 15: Report script and README
 
 **Files:**
 - Create: `scripts/visualize_steering.py`
@@ -2935,12 +3108,12 @@ def _pred(rid, sib, pred, gt, side):
     return {"id": rid, "generated": json.dumps(pred), "parsed": {"path": pred}, "gt": {"path": gt},
             "habitat_meta": {"sibling_id": sib, "instruction": f"go {side}",
                              "desc_check": {"pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 3], "events": []},
-                             "steer": {"slice": "dest", "anchor": "x", "anchor_event": None, "side": None, "viewpoint": "v"}}}
+                             "steer": {"slice": "stop", "anchor": "x", "anchor_event": None, "side": None, "viewpoint": "v"}}}
 
 
 def test_metric_cells_reads_predictions_per_set_and_tag(tmp_path):
     vz = _viz()
-    run = tmp_path / "eval_steer_dest_template_entry" / "d1"
+    run = tmp_path / "eval_steer_stop_template_entry" / "d1"
     run.mkdir(parents=True)
     a = [[0.5, 1.0, 1], [0.3, 0.6, 1]]
     b = [[0.5, 1.0, 1], [0.7, 0.6, 1]]
@@ -2948,7 +3121,7 @@ def test_metric_cells_reads_predictions_per_set_and_tag(tmp_path):
     cells = vz.metric_cells(tmp_path, ["d1", "r4"])
     assert len(cells) == 1
     c = cells[0]
-    assert (c["slice"], c["text"], c["form"], c["tag"]) == ("dest", "template", "entry", "d1")
+    assert (c["slice"], c["text"], c["form"], c["tag"]) == ("stop", "template", "entry", "d1")
     assert c["steering"]["pair_success"] == 1.0 and c["parse_rate"] == 1.0
 
 
@@ -2972,7 +3145,7 @@ Expected: FAIL — `scripts/visualize_steering.py` not found.
 Create `scripts/visualize_steering.py`:
 
 ```python
-"""Steering eval report: pair success per slice x text x prompt form x model, plus a gallery.
+"""Steering eval report: stop-pair success per text x prompt form x model, plus a gallery.
 
 CPU only, login node, after `SETS=steer sbatch slurm/eval_descriptions.sbatch` (and the
 round-4 control `SETS=steer_goal ... TAG=r4`). Metrics are recomputed from predictions.json
@@ -2997,7 +3170,7 @@ from rover_vlm.eval import aggregate_steering_metrics
 from rover_vlm.overlay import description_panel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CELLS = [(s, t, f) for s in ("side", "dest") for t in ("template", "composed") for f in ("entry", "goal")]
+CELLS = [("stop", t, f) for t in ("template", "composed") for f in ("entry", "goal")]
 TEXT_H = 70
 
 
@@ -3062,8 +3235,8 @@ th:nth-child(-n+4),td:nth-child(-n+4){text-align:left}.muted{color:var(--muted)}
 .wrap{overflow-x:auto}figure{margin:16px 0}img{max-width:100%;height:auto;border-radius:6px}
 </style></head><body>
 <h1>Steering eval</h1>
-<p class="muted">Pair success = both texts of a pair steered their own way (side: anchor passed on the stated side, no graze;
-destination: endpoint closer to its own target). A text-blind model scores 0. Swap = both predictions followed the
+<p class="muted">Pair success = both texts of a pair steered their own way: each prediction ends closer to its own
+stop than to the other text's stop. A text-blind model scores 0. Swap = both predictions followed the
 <em>other</em> text. Strict = every event and the stop (0.03 / 0.05).</p>
 <div class="wrap"><table><thead><tr><th>slice</th><th>text</th><th>form</th><th>model</th><th>pairs</th>
 <th>pair success [95% CI]</th><th>swap</th><th>closer to own GT</th><th>strict .03</th><th>strict .05</th><th>parse</th></tr></thead>
@@ -3091,7 +3264,7 @@ def render(cells, galleries):
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tags", nargs="+", default=["d1", "r4"])
-    p.add_argument("--n", type=int, default=12, help="gallery pairs per slice")
+    p.add_argument("--n", type=int, default=16, help="gallery pairs")
     p.add_argument("--eval-dir", type=Path, default=REPO_ROOT / "outputs" / "eval_desc")
     p.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data" / "prepared_habitat_instr_v3")
     p.add_argument("--out", type=Path, default=REPO_ROOT / "outputs" / "steering_report.html")
@@ -3099,9 +3272,8 @@ def main() -> None:
     cells = metric_cells(args.eval_dir, args.tags)
     if not cells:
         raise SystemExit(f"no eval_steer_* predictions under {args.eval_dir}")
-    galleries = [(f"{s} slice — d1, template text, entry form",
-                  gallery(args.eval_dir, args.data_dir, f"eval_steer_{s}_template_entry", "d1", args.n))
-                 for s in ("side", "dest")]
+    galleries = [("stop pairs — d1, template text, entry form",
+                  gallery(args.eval_dir, args.data_dir, "eval_steer_stop_template_entry", "d1", args.n))]
     args.out.write_text(render(cells, galleries))
     for c in cells:
         print(f"{c['slice']:5s} {c['text']:9s} {c['form']:5s} {c['tag']:3s} pairs {c['steering'].get('n_pairs', 0):4d} "
@@ -3152,31 +3324,27 @@ The working-tree `README.md` holds the user's uncommitted edits; only our sectio
 
 Does d1 *steer* — does changing only the text change the route the way the text says? The d1
 pairs cannot tell (both routes end at the same goal and differ only behind obstacles). This
-eval-only set names every visible object of the eval frames, plans new routes on each scene's navmesh
-(0.3 m clear), and keeps pairs where each route fails the other's text. Spec:
-`docs/superpowers/specs/2026-10-07-steering-eval-design.md` (Addendum A1: why not the frame's own map).
-
-- **side** slice: same entry and stop, pass one named object on opposite sides;
-- **destination** slice: same entry, "stop in front of" two different objects.
+eval-only set keeps each eval frame's ground-truth route and cuts it at two points whose stop phrases
+differ: same image, same entry, same route, two texts, two different ends; each route fails the other's
+text. Every visible object is named first. Side pairs (one object passed on either side) proved not viable
+on these frames — see the spec's Addenda A1/A2: `docs/superpowers/specs/2026-10-07-steering-eval-design.md`.
 
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     uv run scripts/prepare_habitat_instr.py steer-objects               # objects to name (CPU)
     STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # Gemma names them (GPU)
-    uv run scripts/prepare_habitat_instr.py steer-propose               # what to plan (CPU)
-    ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py        # navmesh routes (CPU, habitat env; not `conda run`)
-    uv run scripts/prepare_habitat_instr.py steer                       # candidate pairs (CPU)
-    uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150 / slice)
+    uv run scripts/prepare_habitat_instr.py steer                       # candidate stop pairs (CPU)
+    uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150)
     uv run scripts/audit_instruction_labels.py --mode steer --n 50      # Gate 1 audit page (>= 90% true)
     STAGE=steer sbatch slurm/label_descriptions.sbatch                  # composed text (GPU, < 1 h)
     uv run scripts/prepare_habitat_instr.py finalize-steer              # 8 files; Gate 2 (>= 85% composed)
-    SETS=steer sbatch slurm/eval_descriptions.sbatch                    # d1 on the 8 sets
+    SETS=steer sbatch slurm/eval_descriptions.sbatch                    # d1 on the 4 sets
     SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
     uv run scripts/visualize_steering.py                                # outputs/steering_report.html
-    uv run scripts/render_desc_videos.py --set eval_steer_side_template_entry --tag d1 --n 20
+    uv run scripts/render_desc_videos.py --set eval_steer_stop_template_entry --tag d1 --n 20
 
-Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, requests, navmesh routes, candidates, rows, meta),
-`data/prepared_habitat_instr_v3/eval_steer_{side,dest}_{template,composed}_{entry,goal}.json`,
-`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: pair success per slice (text-blind = 0%).
+Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, candidates, rows, meta),
+`data/prepared_habitat_instr_v3/eval_steer_stop_{template,composed}_{entry,goal}.json`,
+`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success (text-blind = 0%).
 ```
 
 Commit only that hunk:
@@ -3202,10 +3370,10 @@ rm -rf "$SCR"
 
 1. **Objects (CPU, here):** `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1; uv run scripts/prepare_habitat_instr.py steer-objects`.
 2. **Names (user, GPU):** `STAGE=steer_names sbatch slurm/label_descriptions.sbatch` (Gemma).
-3. **Propose → navmesh → steer (CPU, here):** `uv run scripts/prepare_habitat_instr.py steer-propose`; `OMP_NUM_THREADS=4 ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py`; `uv run scripts/prepare_habitat_instr.py steer` — read `steer/steer_meta.json` (reasons, errors). Long runs → `setsid nohup ... > outputs/steer_stage.log 2>&1 &`.
-4. **Select + Gate 0:** `uv run scripts/prepare_habitat_instr.py steer-select`. If a slice has < 150 pairs, stop and bring the drop-reason counts to the user (no silent threshold change — spec risk note).
+3. **Stop pairs (CPU, here):** `uv run scripts/prepare_habitat_instr.py steer` — read `steer/steer_meta.json` (reasons, errors). Long runs → `setsid nohup ... > outputs/steer_stage.log 2>&1 &`.
+4. **Select + Gate 0:** `uv run scripts/prepare_habitat_instr.py steer-select`. If < 150 pairs, stop and bring the drop-reason counts to the user (no silent threshold change — spec risk note).
 5. **Gate 1 audit:** `uv run scripts/audit_instruction_labels.py --mode steer --n 50` → publish `outputs/steer_audit.html` as an artifact with a db `marks` capability (as earlier audits); ≥ 90% of pairs "true". Freeze thresholds.
 6. **Compose (user):** `STAGE=steer sbatch slurm/label_descriptions.sbatch`.
 7. **Finalize + Gate 2:** `uv run scripts/prepare_habitat_instr.py finalize-steer`.
 8. **Eval (user):** `SETS=steer sbatch slurm/eval_descriptions.sbatch`; `SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch` (≤ 3 SLURM jobs at once).
-9. **Report:** `uv run scripts/visualize_steering.py` (publish as an artifact) and `render_desc_videos.py` for `eval_steer_side_template_entry` and `eval_steer_dest_template_entry`, `--n 20`.
+9. **Report:** `uv run scripts/visualize_steering.py` (publish as an artifact) and `render_desc_videos.py` for `eval_steer_stop_template_entry`, `--n 20`.
