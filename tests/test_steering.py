@@ -335,3 +335,67 @@ def test_audit_samples_pairs_and_draws_both_routes(tmp_path):
     assert picked[0][0]["template"] in item["instruction"] and picked[0][1]["template"] in item["instruction"]
     assert [v["v"] for v in au.VERDICTS["steer"]] == ["ok", "stop", "event", "object", "same", "unsure"]
     assert item["pure"] is True
+
+
+def _base(sid):
+    return {"id": f"{sid}_L", "image": [f"/d/{sid}/fpv_enhanced.png"],
+            "conversations": [{"from": "human", "value": "old"}, {"from": "gpt", "value": '{"path":[[0,1,1],[0.5,0.5,0]]}'}],
+            "habitat_meta": {"scene_id": "sc", "sample_id": sid, "parent_sample_id": None, "source": "original",
+                             "yaw_deg": None, "flavor": "doorway", "framing": "endpoints", "entry_edge": "bottom",
+                             "alt_path": [[0, 1, 1]], "candidate_index": 2, "instruction": "old text"}}
+
+
+def _srow(pid, tag, sib):
+    return {"id": f"{pid}_{tag}", "pair_id": pid, "sibling_id": f"{pid}_{sib}", "slice": "stop", "sample_id": "f",
+            "viewpoint": "f", "path": [[0.5, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.6, 0 if tag == "B" else 1]],
+            "desc_check": {"pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 3], "events": []},
+            "anchor": "f:b1", "anchor_event": None, "side": None, "prefix_events": True,
+            "template": f"Go left of the sofa, and stop {tag} it."}
+
+
+def test_finalize_steer_writes_four_records_per_route_and_drops_template_pairs_from_composed():
+    rows = [_srow("p1", "A", "B"), _srow("p1", "B", "A"), _srow("p2", "A", "B"), _srow("p2", "B", "A")]
+    desc = {"p1_A": {"passed": True, "description": "Keep left of the sofa, then stop just after it.", "instruction_source": "cosmos"},
+            "p1_B": {"passed": True, "description": "Keep left of the sofa, then stop well past it.", "instruction_source": "cosmos"},
+            "p2_A": {"passed": True, "description": "Go left of the sofa, and stop A it.", "instruction_source": "template"},
+            "p2_B": {"passed": True, "description": "x", "instruction_source": "cosmos"}}
+    out = st.finalize_steer({"f": _base("f")}, rows, desc)
+    files = out["files"]
+    assert set(files) == set(st.STEER_FILES) and len(st.STEER_FILES) == 4
+    assert len(files["eval_steer_stop_template_entry"]) == 4 and len(files["eval_steer_stop_template_goal"]) == 4
+    assert [r["id"] for r in files["eval_steer_stop_composed_entry"]] == ["p1_A", "p1_B"]
+    assert out["stats"]["stop:composed_dropped"] == 1 and out["stats"]["stop:pairs"] == 2
+    r = files["eval_steer_stop_composed_entry"][0]
+    hm = r["habitat_meta"]
+    assert hm["steer"] == {"slice": "stop", "anchor": "f:b1", "anchor_event": None, "side": None, "viewpoint": "f",
+                           "prefix_events": True}
+    assert hm["sibling_id"] == "p1_B" and "alt_path" not in hm and "candidate_index" not in hm
+    assert hm["prompt_form"] == "entry" and "stop just after it" in r["conversations"][0]["value"]
+    assert json.loads(r["conversations"][1]["value"])["path"][0] == [0.5, 1.0, 1]
+    g = files["eval_steer_stop_template_goal"][1]
+    assert g["habitat_meta"]["goal_in_prompt"] and g["habitat_meta"]["goal_visible"] == 0
+    assert "[0.5, 0.6]" in g["conversations"][0]["value"]
+
+
+def test_finalize_steer_counts_unlabelled_pairs():
+    rows = [_srow("p1", "A", "B"), _srow("p1", "B", "A")]
+    out = st.finalize_steer({"f": _base("f")}, rows, {})
+    assert out["stats"]["stop:unlabelled"] == 1 and out["files"]["eval_steer_stop_composed_entry"] == []
+    assert len(out["files"]["eval_steer_stop_template_entry"]) == 2
+
+
+def test_finalize_steer_stage_refuses_missing_compose_rows(tmp_path):
+    import types
+    prep = _prep()
+    sd = tmp_path / "steer"
+    sd.mkdir()
+    (sd / "events_steer_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (_srow("p1", "A", "B"), _srow("p1", "B", "A"))))
+    frames = tmp_path / "frames.json"
+    frames.write_text(json.dumps([_base("f")]))
+    args = types.SimpleNamespace(frames=frames, steer_dir=sd, desc=tmp_path / "none.jsonl", out_dir=tmp_path,
+                                 allow_missing=False)
+    with pytest.raises(SystemExit, match="no compose row"):
+        prep.stage_finalize_steer(args)
+    args.allow_missing = True
+    prep.stage_finalize_steer(args)
+    assert len(json.loads((tmp_path / "eval_steer_stop_template_entry.json").read_text())) == 2

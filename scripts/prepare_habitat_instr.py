@@ -503,6 +503,34 @@ def stage_finalize_descriptions(args):
     print(json.dumps(meta, indent=2))
 
 
+GATE2_MIN_COMPOSED = 0.85
+
+
+def stage_finalize_steer(args):
+    """Assemble the 4 eval_steer_stop_* files from steering rows + compose rows; print Gate 2."""
+    d = args.steer_dir
+    base = {}
+    for r in json.loads(args.frames.read_text()):
+        base.setdefault(r["habitat_meta"]["sample_id"], r)
+    rows = [json.loads(x) for x in (d / "events_steer_eval.jsonl").read_text().splitlines() if x.strip()]
+    out = steering.finalize_steer(base, rows, _label_rows([args.desc]) if args.desc.exists() else {})
+    stats = out["stats"]
+    pairs = sum(v for k, v in stats.items() if k.endswith(":pairs"))
+    missing = sum(v for k, v in stats.items() if k.endswith(":unlabelled"))
+    if missing > 0.01 * max(1, pairs) and not args.allow_missing:
+        raise SystemExit(f"{missing} of {pairs} pairs have no compose row (> 1%) — finish "
+                         "STAGE=steer sbatch slurm/label_descriptions.sbatch or pass --allow-missing")
+    for stem, recs in out["files"].items():
+        (args.out_dir / f"{stem}.json").write_text(json.dumps(recs, indent=1))
+    meta = {"stats": stats, "files": {k: len(v) for k, v in out["files"].items()}}
+    (d / "finalize_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+    n, c = stats.get("stop:pairs", 0), stats.get("stop:composed", 0)
+    share = c / n if n else 0.0
+    print(f"GATE 2 stop: composed {c}/{n} = {share:.3f} -> {'PASS' if share >= GATE2_MIN_COMPOSED else 'FAIL'} "
+          f"(need >= {GATE2_MIN_COMPOSED})")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
@@ -544,6 +572,12 @@ def main() -> None:
     m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     sel = sub.add_parser("steer-select", help="steering: one stop pair per viewpoint -> events_steer_eval.jsonl (CPU)")
     sel.add_argument("--out-dir", type=Path, default=STEER_DIR)
+    fs = sub.add_parser("finalize-steer", help="steering: the 4 eval_steer_stop_* files + Gate 2 (after compose, CPU)")
+    fs.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
+    fs.add_argument("--steer-dir", type=Path, default=STEER_DIR)
+    fs.add_argument("--desc", type=Path, default=D1_LABELS / "desc_steer_eval_d1.jsonl")
+    fs.add_argument("--out-dir", type=Path, default=V3_OUT)
+    fs.add_argument("--allow-missing", action="store_true", help="proceed with unlabelled pairs")
     o = sub.add_parser("steer-objects", help="steering: naming rows for every visible non-wall eval object (CPU)")
     o.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
     o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
@@ -553,7 +587,7 @@ def main() -> None:
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
-     "steer-select": stage_steer_select,
+     "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
      "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 

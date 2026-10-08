@@ -11,15 +11,17 @@ image (hidden stretches v = 0). A pair is kept only when each cut fails the othe
 under the eval's own checker. Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
 """
 
+import copy
 import itertools
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-from .descriptions import choose_names, desc_check, name_rows_split, route_objects, template_description
+from .descriptions import (choose_names, desc_check, name_rows_split, route_objects, template_description,
+                           with_description)
 from .eval import description_follow, resample_polyline
-from .habitat_data import clip_polyline_unit, resample_with_transitions
+from .habitat_data import clip_polyline_unit, format_answer_goal, resample_with_transitions
 from .instructions import head_noun
 from .landmarks import CAM_HEIGHT_M, MIN_FWD_M, densify
 from .route_events import (MIN_AREA, MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
@@ -294,3 +296,58 @@ def pair_rows(pair):
             "outlines": {oid: o["polygon"] for oid, o in d["objects"].items()},
         })
     return rows
+
+
+STEER_FILES = [f"eval_steer_stop_{t}_{f}" for t in ("template", "composed") for f in ("entry", "goal")]
+# d1 record fields that still hold for a steering route (everything route-specific is rebuilt)
+STEER_META_KEEP = ("scene_id", "sample_id", "parent_sample_id", "source", "yaw_deg", "flavor", "framing", "entry_edge")
+
+
+def steer_record(base, row, text, source, form):
+    """One eval record for a steering route: the frame's d1 record with the route's answer, fresh
+    habitat_meta and the description prompt in `form` ("entry" | "goal")."""
+    rec = copy.deepcopy(base)
+    rec["id"] = row["id"]
+    rec["conversations"][1]["value"] = format_answer_goal([tuple(w) for w in row["path"]])
+    hm = {k: base["habitat_meta"].get(k) for k in STEER_META_KEEP}
+    hm.update({"pair_id": row["pair_id"], "sibling_id": row["sibling_id"], "kind": "steer",
+               "start_uv_norm": row["path"][0][:2], "goal_uv_norm": row["path"][-1][:2],
+               "goal_visible": int(row["path"][-1][2]),
+               "steer": {"slice": row["slice"], "anchor": row["anchor"], "anchor_event": row["anchor_event"],
+                         "side": row["side"], "viewpoint": row["viewpoint"],
+                         "prefix_events": row.get("prefix_events")}})
+    rec["habitat_meta"] = hm
+    return with_description(rec, text, source, form, row["desc_check"])
+
+
+def finalize_steer(base_by_sample, rows, desc_by_id):
+    """{"files": {stem: records}, "stats"} for the 4 eval files. Template text for every pair;
+    composed text only when both routes' compose rows passed as Cosmos text (a template fallback
+    drops the pair from the composed files only)."""
+    files = {k: [] for k in STEER_FILES}
+    stats = Counter()
+    by_pair = {}
+    for r in rows:
+        by_pair.setdefault(r["pair_id"], []).append(r)
+    for pid in sorted(by_pair):
+        pair = sorted(by_pair[pid], key=lambda r: r["id"])
+        if len(pair) != 2:
+            stats["incomplete_pair"] += 1
+            continue
+        sl, base = pair[0]["slice"], base_by_sample[pair[0]["sample_id"]]
+        stats[f"{sl}:pairs"] += 1
+        for form in ("entry", "goal"):
+            files[f"eval_steer_{sl}_template_{form}"] += [steer_record(base, r, r["template"], "template", form)
+                                                          for r in pair]
+        labels = [desc_by_id.get(r["id"]) for r in pair]
+        if any(lab is None for lab in labels):
+            stats[f"{sl}:unlabelled"] += 1
+            continue
+        if not all(lab.get("passed") and lab.get("instruction_source") == "cosmos" for lab in labels):
+            stats[f"{sl}:composed_dropped"] += 1
+            continue
+        stats[f"{sl}:composed"] += 1
+        for form in ("entry", "goal"):
+            files[f"eval_steer_{sl}_composed_{form}"] += [steer_record(base, r, lab["description"], "cosmos", form)
+                                                          for r, lab in zip(pair, labels)]
+    return {"files": files, "stats": dict(stats)}
