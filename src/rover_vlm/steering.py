@@ -25,10 +25,11 @@ from .descriptions import choose_names, desc_check, name_rows_split, route_objec
 from .eval import description_follow, image_to_floor, resample_polyline
 from .habitat_data import clip_polyline_unit, resample_with_transitions
 from .instructions import head_noun
-from .landmarks import FREE, OCC, Camera, densify
-from .route_events import MIN_VISIBLE_CELLS, WALL_EXTENT_M, _blob_cells, describe_xz, load_frame
+from .landmarks import FREE, MIN_FWD_M, OCC, Camera, densify
+from .route_events import (MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
+                           first_blocker, load_frame)
 
-CLEAR_M = 0.45      # d1 / round-4 GT routes keep 0.44-0.51 m from map obstacles (p10-p75)
+CLEAR_M = 0.30      # Addendum A1: navmesh bake radius and via clearance (d1 GT routes keep 0.44-0.51 m)
 SNAP_M = 0.3        # a waypoint may move this far onto the nearest traversable cell
 MIN_ROUTE_M = 1.5
 MIN_SEP_UV = 0.1
@@ -165,13 +166,52 @@ def entry_floor(meta, start_uv):
     return xz[0] if len(xz) else None
 
 
-def answer_path(cam, route_xz):
-    """[x, y, 1] waypoints of a fully visible floor route, built as the d1 answers are (clip to
-    the unit square, resample with transitions). Floor lines project to image lines, so the
-    route's corners are enough."""
-    uv, _ = cam.uv(np.asarray(route_xz, float))
-    clipped = clip_polyline_unit([(float(u), float(v), False) for u, v in uv])
+def answer_path(cam, route_xz, frame=None):
+    """[x, y, v] waypoints of a floor route, built as the d1 answers are: densified at
+    ROUTE_STEP_M, projected, v = 0 where the frame map (when given) has an occupied cell between
+    the camera and the point (route_events.first_blocker), clipped to the unit square, resampled
+    with transitions. None when any point is less than MIN_FWD_M in front of the camera."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    uv, fwd = cam.uv(pts)
+    if (fwd < MIN_FWD_M).any():
+        return None
+    hidden = [frame is not None and first_blocker(frame, p) is not None for p in pts]
+    clipped = clip_polyline_unit([(float(u), float(v), h) for (u, v), h in zip(uv, hidden)])
     return [list(w) for w in resample_with_transitions(clipped)]
+
+
+def map_planner(clear_m=CLEAR_M):
+    """plan(frame, waypoints_xz) on the frame's own map (Task 1's A*): the unit tests' stand-in
+    for the navmesh (synthetic scenes have none). Masks are cached per frame."""
+    masks = {}
+
+    def plan(frame, waypoints_xz):
+        if frame.name not in masks:
+            masks[frame.name] = traversable(frame.grid, frame.cam, clear_m)
+        return plan_route(frame.grid, masks[frame.name], waypoints_xz)
+    return plan
+
+
+def request_key(frame_name, waypoints_xz):
+    """Stable id of one planning request: the frame and its waypoints to the millimetre."""
+    return frame_name + "|" + ";".join(f"{x:.3f},{z:.3f}" for x, z in np.asarray(waypoints_xz, float))
+
+
+def recording_planner(requests):
+    """plan() that plans nothing and records each request in `requests` (key -> waypoints):
+    steer-propose runs the builders with it to learn what navmesh_plan.py must plan."""
+    def plan(frame, waypoints_xz):
+        requests[request_key(frame.name, waypoints_xz)] = _rounded(waypoints_xz)
+        return None
+    return plan
+
+
+def lookup_planner(routes):
+    """plan() answering from navmesh routes {key: route_xz or None} (navmesh_plan.py output)."""
+    def plan(frame, waypoints_xz):
+        r = routes.get(request_key(frame.name, waypoints_xz))
+        return None if r is None else np.asarray(r, float)
+    return plan
 
 
 def separation(path_a, path_b):
@@ -245,7 +285,7 @@ def stop_key(stop):
     return stop["type"], stop["relation"], stop.get("amount"), stop.get("object")
 
 
-def side_routes(frame, mask, start, blob):
+def side_routes(frame, start, blob, plan):
     """({"left": xz, "right": xz}, None): one route each way round `blob` to a shared stop past
     it; else (None, reason). A via on the route's right of O means the route goes RIGHT of O
     (route_events' pass side = the route's side)."""
@@ -260,20 +300,18 @@ def side_routes(frame, mask, start, blob):
     lat = (xz - c) @ right
     via = {"right": c + right * (lat.max() + CLEAR_M + VIA_EXTRA_M),
            "left": c + right * (lat.min() - CLEAR_M - VIA_EXTRA_M)}
-    if any(snap(frame.grid, mask, v) is None for v in via.values()):
-        return None, "no_free_side"
     far = start + d * float(((xz - start) @ d).max())
     for k in STOP_BEYOND_M:
         stop = far + d * k
-        routes = {s: plan_route(frame.grid, mask, [start, via[s], stop]) for s in ("left", "right")}
+        routes = {s: plan(frame, [start, via[s], stop]) for s in ("left", "right")}
         if all(r is not None for r in routes.values()):
             return routes, None
     return None, "plan_failed"
 
 
-def side_pair(frame, meta, mask, start, blob):
+def side_pair(frame, meta, start, blob, plan):
     """(pair dict, None) for the side slice around one blob, else (None, reason)."""
-    routes, why = side_routes(frame, mask, start, blob)
+    routes, why = side_routes(frame, start, blob, plan)
     if routes is None:
         return None, why
     if min(route_length(r) for r in routes.values()) < MIN_ROUTE_M:
@@ -291,7 +329,9 @@ def side_pair(frame, meta, mask, start, blob):
         return None, "events_differ"
     out = []
     for tag, s in (("L", "left"), ("R", "right")):
-        path = answer_path(frame.cam, routes[s])
+        path = answer_path(frame.cam, routes[s], frame)
+        if path is None:
+            return None, "behind_camera"
         if len(path) < 2:
             return None, "too_short"
         out.append({"tag": tag, "side": s, "route_xz": _rounded(routes[s]), "path": path,
@@ -302,7 +342,7 @@ def side_pair(frame, meta, mask, start, blob):
     return {"slice": "side", "anchor": oid, "targets": None, "separation": round(sep, 4), "routes": out}, None
 
 
-def dest_route(frame, meta, mask, start, blob):
+def dest_route(frame, meta, start, blob, plan):
     """(route dict, None) from the entry to DEST_GAP_M in front of `blob`, whose stop phrase is
     "in front of" that blob; else (None, reason)."""
     xz = _blob_cells(frame)[blob][1]
@@ -311,7 +351,7 @@ def dest_route(frame, meta, mask, start, blob):
         return None, "too_near"
     q = xz[dd.argmin()]
     d = (q - start) / dd.min()
-    route = plan_route(frame.grid, mask, [start, q - d * DEST_GAP_M])
+    route = plan(frame, [start, q - d * DEST_GAP_M])
     if route is None:
         return None, "plan_failed"
     if route_length(route) < MIN_ROUTE_M:
@@ -324,7 +364,9 @@ def dest_route(frame, meta, mask, start, blob):
         return None, "no_stop"
     if any(oid in e["objects"] for e in desc["events"]):
         return None, "target_passed"      # another cell of the blob lies within PASS_M of the route
-    path = answer_path(frame.cam, route)
+    path = answer_path(frame.cam, route, frame)
+    if path is None:
+        return None, "behind_camera"
     if len(path) < 2:
         return None, "too_short"
     return {"tag": None, "side": None, "route_xz": _rounded(route), "path": path, "desc": desc,
@@ -399,18 +441,18 @@ def anchor_blobs(frame, names, fallback, kinds):
     return out
 
 
-def frame_pairs(sample_dir, start_uv, names, fallback, kinds):
+def frame_pairs(sample_dir, start_uv, names, fallback, kinds, plan):
     """Every candidate pair of one frame, both slices, named and mutually exclusive, with the
-    drop reasons counted as "<slice>:<reason>" (frame-level reasons unprefixed)."""
+    drop reasons counted as "<slice>:<reason>" (frame-level reasons unprefixed). `plan` is a planner
+    callable (map_planner in tests, lookup_planner in the steer stage)."""
     sd = Path(sample_dir)
     reasons = Counter()
     if not (sd / "state.npz").exists():
         reasons["no_state"] += 1
         return [], reasons
     meta, frame = load_frame(sd)
-    mask = traversable(frame.grid, frame.cam)
     start = entry_floor(meta, start_uv)
-    if start is None or snap(frame.grid, mask, start) is None:
+    if start is None:
         reasons["no_start"] += 1
         return [], reasons
     blobs = anchor_blobs(frame, names, fallback, kinds)
@@ -426,7 +468,7 @@ def frame_pairs(sample_dir, start_uv, names, fallback, kinds):
             pairs.append(pair)
 
     for b in blobs:
-        pair, why = side_pair(frame, meta, mask, start, b)
+        pair, why = side_pair(frame, meta, start, b, plan)
         if pair is None:
             reasons[f"side:{why}"] += 1
         else:
@@ -434,7 +476,7 @@ def frame_pairs(sample_dir, start_uv, names, fallback, kinds):
             keep(pair)
     routes = []
     for b in blobs:
-        r, why = dest_route(frame, meta, mask, start, b)
+        r, why = dest_route(frame, meta, start, b, plan)
         if r is None:
             reasons[f"dest:{why}"] += 1
         else:

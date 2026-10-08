@@ -37,7 +37,7 @@ def cell(x, z):
 def test_traversable_keeps_clearance_unknown_and_frame():
     s = _box(_state(), (50, 58), (46, 54))      # box: cell centres x 2.325..2.675, z 2.525..2.875
     s[:, 90:] = UNKNOWN                          # x >= 4.5 never seen
-    m = st.traversable(_grid(s), CAM)
+    m = st.traversable(_grid(s), CAM, clear_m=0.45)
     assert not m[cell(2.5, 2.2)]                 # centre 0.30 m from the box
     assert m[cell(2.5, 2.0)]                     # centre 0.50 m from the box
     assert not m[cell(4.6, 4.0)]                 # unknown
@@ -142,7 +142,7 @@ def _frame(tmp_path, state, name="f"):
 def test_side_pair_rounds_both_sides_one_word_apart(tmp_path):
     meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
     blob = int(frame.lab[54, 50])
-    pair, why = st.side_pair(frame, meta, mask, START, blob)
+    pair, why = st.side_pair(frame, meta, START, blob, st.map_planner())
     assert why is None and pair["slice"] == "side" and pair["anchor"] == f"f:b{blob}"
     l, r = pair["routes"]
     assert (l["tag"], l["side"], r["tag"], r["side"]) == ("L", "left", "R", "right")
@@ -158,7 +158,7 @@ def test_side_pair_rejects_a_second_obstacle_between_the_routes(tmp_path):
     s = _box(_state(), *BOX)
     s[62:64, 49:51] = OCC                        # post 0.25 m behind the box, between both routes
     meta, frame, mask = _frame(tmp_path, s)
-    pair, why = st.side_pair(frame, meta, mask, START, int(frame.lab[54, 50]))
+    pair, why = st.side_pair(frame, meta, START, int(frame.lab[54, 50]), st.map_planner())
     assert pair is None and why == "not_two_sided"
 
 
@@ -174,7 +174,7 @@ def test_two_routes_round_the_same_side_are_not_two_sided(tmp_path):
 
 def test_anchor_too_close_to_the_entry(tmp_path):
     meta, frame, mask = _frame(tmp_path, _box(_state(), (26, 30), (48, 52)))   # 0.3-0.5 m ahead
-    pair, why = st.side_pair(frame, meta, mask, START, int(frame.lab[28, 50]))
+    pair, why = st.side_pair(frame, meta, START, int(frame.lab[28, 50]), st.map_planner())
     assert pair is None and why == "too_near"
 
 
@@ -203,7 +203,7 @@ def _dest_state():
 def test_dest_route_stops_in_front_of_its_object(tmp_path):
     meta, frame, mask = _frame(tmp_path, _dest_state())
     blob = int(frame.lab[70, 70])
-    r, why = st.dest_route(frame, meta, mask, START, blob)
+    r, why = st.dest_route(frame, meta, START, blob, st.map_planner())
     assert why is None and r["target"] == f"f:b{blob}"
     stop = r["desc"]["stop"]
     assert (stop["type"], stop["relation"], stop["object"]) == ("near", "in front of", f"f:b{blob}")
@@ -213,8 +213,8 @@ def test_dest_route_stops_in_front_of_its_object(tmp_path):
 
 def test_dest_pairs_tags_by_image_x_and_drops_close_endpoints(tmp_path):
     meta, frame, mask = _frame(tmp_path, _dest_state())
-    ra, _ = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 70]))
-    rb, _ = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 30]))
+    ra, _ = st.dest_route(frame, meta, START, int(frame.lab[70, 70]), st.map_planner())
+    rb, _ = st.dest_route(frame, meta, START, int(frame.lab[70, 30]), st.map_planner())
     pairs, reasons = st.dest_pairs([rb, ra])
     assert len(pairs) == 1 and not reasons
     p = pairs[0]
@@ -232,12 +232,12 @@ def test_dest_route_too_short_and_wrong_stop(tmp_path, monkeypatch):
     s = _state()
     s[46:50, 48:52] = OCC                        # small box 1.3-1.5 m ahead: target 0.5 m from the entry
     meta, frame, mask = _frame(tmp_path, s)
-    r, why = st.dest_route(frame, meta, mask, START, int(frame.lab[48, 50]))
+    r, why = st.dest_route(frame, meta, START, int(frame.lab[48, 50]), st.map_planner())
     assert r is None and why == "too_short"
     meta, frame, mask = _frame(tmp_path, _dest_state(), name="g")
     monkeypatch.setattr(st, "describe_xz", lambda m, f, route: {
         "reason": None, "events": [], "stop": {"type": "near", "relation": "in front of", "object": "g:b999"}})
-    r, why = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 70]))
+    r, why = st.dest_route(frame, meta, START, int(frame.lab[70, 70]), st.map_planner())
     assert r is None and why == "no_stop"
 
 
@@ -248,7 +248,7 @@ def test_dest_route_rejects_target_that_is_also_a_pass_event(tmp_path, monkeypat
     monkeypatch.setattr(st, "describe_xz", lambda m, f, route: {
         "reason": None, "events": [{"type": "pass", "side": "left", "objects": [oid]}],
         "stop": {"type": "near", "relation": "in front of", "object": oid}})
-    r, why = st.dest_route(frame, meta, mask, START, blob)
+    r, why = st.dest_route(frame, meta, START, blob, st.map_planner())
     assert r is None and why == "target_passed"
 
 
@@ -271,7 +271,7 @@ def test_load_names_splits_files_and_keeps_kinds():
 def test_side_pair_named_gets_one_word_apart_templates(tmp_path):
     meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
     blob = int(frame.lab[54, 50])
-    pair, _ = st.side_pair(frame, meta, mask, START, blob)
+    pair, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
     assert st.name_pair(pair, {f"f:b{blob}": "armchair"}, None, {}) is None
     l, r = pair["routes"]
     assert l["namer"] == "primary" and "left of the armchair" in l["template"]
@@ -290,13 +290,13 @@ def test_anchor_blobs_and_frame_pairs_on_named_frames(tmp_path):
     assert st.anchor_blobs(frame, names, None, {}) == [o]
     assert st.anchor_blobs(frame, names, None, {f"f:b{o}": "wall"}) == []
     assert st.anchor_blobs(frame, {}, names, {}) == [o]                     # fallback names count too
-    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {})
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.map_planner())
     assert [p["pair_id"] for p in pairs] == [f"steer_side_f_b{o}"]
     assert reasons["side:kept"] == 1 and reasons["dest:too_short"] == 1  # target 0.7 m from the entry
     sd = _sample(tmp_path / "g", _dest_state())
     _, frame = load_frame(sd)
     a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])                  # a = image-left box
-    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}, None, {})
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}, None, {}, st.map_planner())
     dest = [p for p in pairs if p["slice"] == "dest"]
     assert [p["pair_id"] for p in dest] == [f"steer_dest_g_b{a}_b{b}"] and reasons["dest:kept"] == 1
     json.dumps(pairs)                                                        # JSON-ready
@@ -304,11 +304,11 @@ def test_anchor_blobs_and_frame_pairs_on_named_frames(tmp_path):
 
 def test_frame_pairs_counts_no_start_and_no_names(tmp_path):
     sd = _sample(tmp_path / "f", _dest_state())
-    _, reasons = st.frame_pairs(sd, [0.5, 0.4], {"f:b1": "x"}, None, {})
+    _, reasons = st.frame_pairs(sd, [0.5, 0.4], {"f:b1": "x"}, None, {}, st.map_planner())
     assert reasons == {"no_start": 1}
-    _, reasons = st.frame_pairs(sd, [0.5, 1.0], {}, None, {})
+    _, reasons = st.frame_pairs(sd, [0.5, 1.0], {}, None, {}, st.map_planner())
     assert reasons == {"no_named_object": 1}
-    _, reasons = st.frame_pairs(tmp_path / "missing", [0.5, 1.0], {}, None, {})
+    _, reasons = st.frame_pairs(tmp_path / "missing", [0.5, 1.0], {}, None, {}, st.map_planner())
     assert reasons == {"no_state": 1}
 
 
@@ -342,3 +342,40 @@ def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
     prep._steer_init({}, None, {})
     pairs, reasons, err = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "start_uv": [0.5, 1.0]})
     assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err
+
+
+def test_answer_path_marks_floor_behind_an_obstacle_hidden(tmp_path):
+    _, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    path = st.answer_path(frame.cam, [(3.4, 1.2), (2.5, 3.6)], frame)    # from beside the box to straight behind it
+    assert path[0][2] == 1                                   # near the entry: seen
+    assert path[-1][2] == 0                                  # 0.7 m behind the box, straight behind it
+    assert st.answer_path(frame.cam, [(2.5, 0.3), (2.5, 2.0)], frame) is None   # starts 0.1 m from the camera
+
+
+def test_planners_record_look_up_and_agree(tmp_path):
+    meta, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    reqs = {}
+    pair, why = st.side_pair(frame, meta, START, blob, st.recording_planner(reqs))
+    assert pair is None and why == "plan_failed" and len(reqs) == 2 * len(st.STOP_BEYOND_M)
+    assert all(k.startswith("f|") for k in reqs)
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    looked, _ = st.side_pair(frame, meta, START, blob, st.lookup_planner(routes))
+    ref, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
+    assert looked["routes"][0]["route_xz"] == ref["routes"][0]["route_xz"]
+    assert st.request_key("f", [(1.0, 2.0)]) == "f|1.000,2.000"
+
+
+def test_frame_pairs_with_recorded_then_looked_up_routes(tmp_path):
+    sd = _sample(tmp_path / "g", _dest_state())
+    _, frame = load_frame(sd)
+    a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])
+    names = {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}
+    reqs = {}
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.recording_planner(reqs))
+    assert pairs == [] and reqs
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.lookup_planner(routes))
+    assert [p["pair_id"] for p in pairs if p["slice"] == "dest"] == [f"steer_dest_g_b{a}_b{b}"]

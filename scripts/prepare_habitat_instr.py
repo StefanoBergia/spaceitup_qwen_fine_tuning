@@ -366,7 +366,8 @@ def steer_frame(item):
     """(candidate pairs, reason counts, error or None) for one eval frame (pool worker)."""
     try:
         pairs, reasons = frame_pairs(item["sample_dir"], item["start_uv"], _STEER["names"],
-                                     _STEER["fallback"], _STEER["kinds"])
+                                     _STEER["fallback"], _STEER["kinds"],
+                                     steering.map_planner())  # replaced in Task 8
     except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
         return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
     floor_y = steering.floor_height(item["sample_dir"])
