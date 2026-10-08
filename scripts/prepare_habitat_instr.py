@@ -40,15 +40,13 @@ frame object for Cosmos to name. CPU, 4 single-threaded workers:
     # after slurm/label_descriptions.sbatch (STAGE=full)
     uv run scripts/prepare_habitat_instr.py finalize-descriptions
 
-Steering eval (2026-10-07, docs/superpowers/specs/2026-10-07-steering-eval-design.md, Addendum A1):
-eval-only pairs on each d1 eval frame; routes come from the scene navmesh at 0.30 m. Pair builders
-run propose (record what to plan) then, once routes exist, steer (build pairs); CPU, 4 workers:
+Steering eval (2026-10-07, docs/superpowers/specs/2026-10-07-steering-eval-design.md, Addendum A2):
+eval-only stop pairs: each d1 eval frame's ground-truth route cut at two points whose stop phrases
+differ. CPU, 4 workers:
 
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     uv run scripts/prepare_habitat_instr.py steer-objects
     STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # GPU, Gemma
-    uv run scripts/prepare_habitat_instr.py steer-propose
-    ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py        # CPU, habitat env
     uv run scripts/prepare_habitat_instr.py steer
     uv run scripts/prepare_habitat_instr.py steer-select
     # after STAGE=steer sbatch slurm/label_descriptions.sbatch
@@ -360,27 +358,20 @@ STEER_WORKERS = 4
 _STEER = {}
 
 
-def _steer_init(names, fallback, kinds, routes):
-    _STEER.update(names=names, fallback=fallback, kinds=kinds, routes=routes)
+def _steer_init(names, fallback, kinds):
+    _STEER.update(names=names, fallback=fallback, kinds=kinds)
 
 
 def steer_frame(item):
-    """(candidate pairs, reason counts, error or None, recorded requests) for one eval frame
-    (pool worker). With no routes loaded the builders only record what to plan (steer-propose);
-    with routes they build pairs from them (steer)."""
-    reqs = {}
-    plan = (steering.recording_planner(reqs) if _STEER["routes"] is None
-            else steering.lookup_planner(_STEER["routes"]))
+    """(candidate pairs, reason counts, error or None) for one eval frame (pool worker)."""
     try:
-        pairs, reasons = frame_pairs(item["sample_dir"], item["start_uv"], _STEER["names"],
-                                     _STEER["fallback"], _STEER["kinds"], plan)
-        floor_y = steering.floor_height(item["sample_dir"])
+        pairs, reasons = frame_pairs(item["sample_dir"], item["candidate_index"], _STEER["names"],
+                                     _STEER["fallback"], _STEER["kinds"])
         for p in pairs:
-            p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
-                     floor_y=floor_y)
-    except Exception as e:  # noqa: BLE001 — one bad frame (or a never-proposed key) is a counted reason
-        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}", {}
-    return pairs, dict(reasons), None, reqs
+            p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")})
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
+        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
+    return pairs, dict(reasons), None
 
 
 def _jsonl(path):
@@ -423,46 +414,25 @@ def _steer_names(args):
     return prim, steering.load_names(prim, _jsonl(args.fallback_names))
 
 
-def _run_steer_pool(args, routes):
+def _run_steer_pool(args):
     items = steering.steer_frames(json.loads(args.frames.read_text()))
     if args.limit:
         items = items[: args.limit]
     prim, (names, fallback, kinds) = _steer_names(args)
-    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=(names, fallback, kinds, routes)) as pool:
+    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=(names, fallback, kinds)) as pool:
         return items, prim, pool.map(steer_frame, items, chunksize=8)
-
-
-def stage_steer_propose(args):
-    out = args.out_dir
-    out.mkdir(parents=True, exist_ok=True)
-    items, _, results = _run_steer_pool(args, None)
-    by_id = {i["sample_id"]: i for i in items}
-    rows = {}
-    for _, _, _, reqs in results:
-        for key, wps in reqs.items():
-            it = by_id[key.split("|")[0]]
-            rows[key] = {"key": key, "sample_id": it["sample_id"], "scene_id": it["scene_id"],
-                         "floor_y": steering.floor_height(it["sample_dir"]), "waypoints_xz": wps}
-    (out / "requests_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows.values()))
-    errors = [e for _, _, e, _ in results if e]
-    print(json.dumps({"frames": len(items), "requests": len(rows), "n_errors": len(errors), "errors": errors[:20]},
-                     indent=2))
 
 
 def stage_steer(args):
     import time
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
-    if not args.routes.exists():
-        raise SystemExit(f"{args.routes} missing — run steer-propose, then in the habitat env:\n"
-                         f"  ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py")
-    routes = {k: v["route_xz"] for k, v in json.loads(args.routes.read_text()).items()}
     t0 = time.time()
-    items, prim, results = _run_steer_pool(args, routes)
+    items, prim, results = _run_steer_pool(args)
     (out / "names_primary_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in prim))
-    reasons, errors, n_frames = Counter(), [], {"side": set(), "dest": set()}
+    reasons, errors, n_frames = Counter(), [], {"stop": set()}
     with (out / "candidates_eval.jsonl").open("w") as f:
-        for pairs, rs, err, _ in results:
+        for pairs, rs, err in results:
             reasons.update(rs)
             if err:
                 errors.append(err)
@@ -548,8 +518,7 @@ def main() -> None:
     k.add_argument("--desc-suffix", default="",
                    help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
-    for nm, hp in (("steer", "steering: candidate pairs from navmesh routes per d1 eval frame (CPU)"),
-                   ("steer-propose", "steering: record the routes to plan on the navmesh (CPU)")):
+    for nm, hp in (("steer", "steering: stop pairs per d1 eval frame (CPU)"),):
         m = sub.add_parser(nm, help=hp)
         m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
         m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
@@ -557,8 +526,6 @@ def main() -> None:
         m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
         m.add_argument("--out-dir", type=Path, default=STEER_DIR)
         m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
-        if nm == "steer":
-            m.add_argument("--routes", type=Path, default=STEER_DIR / "routes_eval.json")
     o = sub.add_parser("steer-objects", help="steering: naming rows for every visible non-wall eval object (CPU)")
     o.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
     o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
@@ -567,7 +534,7 @@ def main() -> None:
     o.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-propose": stage_steer_propose, "steer-objects": stage_steer_objects,
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 
