@@ -877,3 +877,14 @@ def test_choose_names_primary_fallback_and_rejects():
     assert choose_names(row, {"f:b5": "fridge"}, {"f:b5": "fridge"}) == (None, None, "unnamed_object")
     clash = {**NAMES, "f:b1": "fridge"}
     assert choose_names(row, clash) == (None, None, "name:clash")
+
+
+def test_label_route_style_key_shares_style_and_shape_across_a_pair():
+    from rover_vlm.descriptions import choose_d1_style, choose_shape, label_route
+    row = {"pair_id": "p", "kind": "steer", "events": [PASS_L], "stop": NEAR, "style_key": "p"}
+    seen = {}
+    for rid in ("p_L", "p_R"):
+        label_route(lambda pr, s, rid=rid: (seen.setdefault(rid, " ".join(pr.split())) or "", "stop"),
+                    {**row, "id": rid}, NAMES, seed=0)
+    for rid in ("p_L", "p_R"):
+        assert choose_d1_style("p") in seen[rid] and choose_shape("p") in seen[rid]

@@ -451,7 +451,8 @@ def label_route(ask_text, row, names, seed, kinds=None, fallback_names=None):
         return {**out, "passed": False, "description": None, "instruction_source": None,
                 "rejects": ["name:clash"]}
     names = chosen
-    style, shape = choose_d1_style(row["id"]), choose_shape(row["id"])
+    key = row.get("style_key") or row["id"]     # steering pairs share one style and shape
+    style, shape = choose_d1_style(key), choose_shape(key)
     prompt = compose_prompt(row["events"], row["stop"], names, style, shape, kinds)
     rejects, raws = [], []
     for attempt, s in enumerate((seed, seed + 1), 1):

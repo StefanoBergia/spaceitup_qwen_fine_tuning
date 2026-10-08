@@ -20,3 +20,10 @@ def test_label_descriptions_has_a_steer_names_stage():
     text = (SLURM / "label_descriptions.sbatch").read_text()
     assert '"$STAGE" = "steer_names"' in text and "--all-objects" in text
     assert "names_steer_gemma_d1.jsonl" in text and 'serve "$GEMMA_MODEL"' in text
+
+
+def test_label_descriptions_has_a_steer_stage():
+    text = (SLURM / "label_descriptions.sbatch").read_text()
+    assert '"$STAGE" = "steer"' in text and "events_steer_eval.jsonl" in text
+    assert "desc_steer_eval_d1.jsonl" in text and "names_primary_eval.jsonl" in text and "--fallback-names" in text
+    assert "steer-propose" not in text

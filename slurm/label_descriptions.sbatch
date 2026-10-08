@@ -4,8 +4,11 @@
 #     sbatch slurm/label_descriptions.sbatch              # gate: 300 eval routes, then stop for the audit
 #     STAGE=full sbatch slurm/label_descriptions.sbatch   # eval + train (resumes after a TIMEOUT)
 # STAGE=steer_names (2026-10-08, steering Addendum A1): Gemma names every not-yet-named visible object of
-# the eval frames (prepare_habitat_instr.py steer-objects); no compose. Then: steer-propose.
+# the eval frames (prepare_habitat_instr.py steer-objects); no compose. Then: steer.
 #     STAGE=steer_names sbatch slurm/label_descriptions.sbatch
+# STAGE=steer (2026-10-08, steering stop pairs): compose only, for prepare_habitat_instr.py steer-select's
+# rows, with the merged primary names (d1 + steer Gemma, from the steer stage) and the d1 Cosmos fallback.
+#     STAGE=steer sbatch slurm/label_descriptions.sbatch     # then: prepare_habitat_instr.py finalize-steer
 #
 # Per split: name pass 1, name pass 2 (--resume retries request errors), compose pass 1,
 # compose pass 2 (--resume retries). The name passes are report-only (read their summary in
@@ -147,7 +150,24 @@ if [ "$STAGE" = "steer_names" ]; then
     "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
     echo; echo "=============== name: steer objects (pass 2, retries errors) ==============="
     "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
-    echo "steer names done: uv run scripts/prepare_habitat_instr.py steer-propose"
+    echo "steer names done: uv run scripts/prepare_habitat_instr.py steer"
+    exit 0
+fi
+
+if [ "$STAGE" = "steer" ]; then
+    SD=data/prepared_habitat_instr_v3/steer
+    for f in events_steer_eval.jsonl names_primary_eval.jsonl; do
+        [ -f "$SD/$f" ] || { echo "missing $SD/$f — run prepare_habitat_instr.py steer + steer-select"; exit 1; }
+    done
+    serve "$COSMOS_MODEL"
+    steer_args=(--stage compose --events "$SD/events_steer_eval.jsonl" --names "$SD/names_primary_eval.jsonl"
+                --fallback-names "$OUT/names_eval_d1.jsonl" --out "$OUT/desc_steer_eval_d1.jsonl"
+                --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== compose: steer (pass 1) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_args[@]}" --resume
+    echo; echo "=============== compose: steer (pass 2, retries errors) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_args[@]}" --resume
+    echo "steer compose done: uv run scripts/prepare_habitat_instr.py finalize-steer"
     exit 0
 fi
 
