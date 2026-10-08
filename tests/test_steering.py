@@ -329,19 +329,43 @@ def test_floor_height(tmp_path):
     assert st.floor_height(tmp_path / "missing") is None
 
 
-def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
+def _prep():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
     prep = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(prep)
+    return prep
+
+
+def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
+    prep = _prep()
 
     def boom(*a, **k):
         raise ValueError("bad map")
     monkeypatch.setattr(prep, "frame_pairs", boom)
-    prep._steer_init({}, None, {})
-    pairs, reasons, err = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "start_uv": [0.5, 1.0]})
-    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err
+    prep._steer_init({}, None, {}, None)
+    pairs, reasons, err, reqs = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "start_uv": [0.5, 1.0]})
+    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err and reqs == {}
+
+
+def test_steer_frame_records_then_looks_up(tmp_path):
+    prep = _prep()
+    sd = _sample(tmp_path / "g", _dest_state())
+    _, frame = load_frame(sd)
+    a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])
+    names = {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}
+    item = {"sample_id": "g", "sample_dir": str(sd), "start_uv": [0.5, 1.0], "viewpoint": "g", "is_aug": False,
+            "scene_id": "sc", "image": "/img.png"}
+    prep._steer_init(names, None, {}, None)
+    pairs, _, err, reqs = prep.steer_frame(item)
+    assert err is None and pairs == [] and reqs
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    prep._steer_init(names, None, {}, routes)
+    pairs, _, err, reqs = prep.steer_frame(item)
+    assert err is None and reqs == {} and "dest" in [p["slice"] for p in pairs]
+    assert pairs[0]["floor_y"] == pytest.approx(0.1) and pairs[0]["viewpoint"] == "g"
 
 
 def test_answer_path_marks_floor_behind_an_obstacle_hidden(tmp_path):
