@@ -13,7 +13,9 @@ checker. Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-
 """
 
 import heapq
+import itertools
 import math
+from collections import Counter
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -32,6 +34,11 @@ VIA_EXTRA_M = 0.1                 # via point: CLEAR_M + this beyond O's side
 STOP_BEYOND_M = (0.5, 1.0, 1.5)   # shared stop: this far past O's far edge, first that plans
 MIN_AHEAD_M = 1.0                 # an anchor nearer the entry leaves no room to go round it
 INSIDE_FRAC = 0.9                 # share of O's cells that must lie between the two routes
+MIN_DEST_DU = 0.15                # destination endpoints at least this far apart in image x
+# A destination stop sits this far before its object: beyond route_events.PASS_M (0.7), so the
+# target is not also a "pass" event of its own route, and inside STOP_NEAR_M (1.0), so the
+# stop phrase is "in front of" that object.
+DEST_GAP_M = 0.8
 _NEIGH = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 _CHUNK = 1024
 
@@ -291,3 +298,45 @@ def side_pair(frame, meta, mask, start, blob):
     if sep < MIN_SEP_UV:
         return None, "too_close"
     return {"slice": "side", "anchor": oid, "targets": None, "separation": round(sep, 4), "routes": out}, None
+
+
+def dest_route(frame, meta, mask, start, blob):
+    """(route dict, None) from the entry to DEST_GAP_M in front of `blob`, whose stop phrase is
+    "in front of" that blob; else (None, reason)."""
+    xz = _blob_cells(frame)[blob][1]
+    dd = np.linalg.norm(xz - start, axis=1)
+    if dd.min() < MIN_AHEAD_M:
+        return None, "too_near"
+    q = xz[dd.argmin()]
+    d = (q - start) / dd.min()
+    route = plan_route(frame.grid, mask, [start, q - d * DEST_GAP_M])
+    if route is None:
+        return None, "plan_failed"
+    if route_length(route) < MIN_ROUTE_M:
+        return None, "too_short"
+    desc = describe_xz(meta, frame, route)
+    oid = f"{frame.name}:b{blob}"
+    stop = desc.get("stop") or {}
+    if desc["reason"] or stop.get("type") != "near" or stop.get("relation") != "in front of" \
+            or stop.get("object") != oid:
+        return None, "no_stop"
+    path = answer_path(frame.cam, route)
+    if len(path) < 2:
+        return None, "too_short"
+    return {"tag": None, "side": None, "route_xz": _rounded(route), "path": path, "desc": desc,
+            "anchor_event": None, "target": oid}, None
+
+
+def dest_pairs(routes):
+    """Every two destination routes whose endpoints are MIN_DEST_DU apart in image x, tagged
+    A (image-left end) / B; (pairs, reasons)."""
+    pairs, reasons = [], Counter()
+    for a, b in itertools.combinations(routes, 2):
+        a, b = sorted((a, b), key=lambda r: r["path"][-1][0])
+        if b["path"][-1][0] - a["path"][-1][0] < MIN_DEST_DU:
+            reasons["too_close"] += 1
+            continue
+        ra, rb = {**a, "tag": "A"}, {**b, "tag": "B"}
+        pairs.append({"slice": "dest", "anchor": None, "targets": [ra["target"], rb["target"]],
+                      "separation": round(separation(ra["path"], rb["path"]), 4), "routes": [ra, rb]})
+    return pairs, reasons

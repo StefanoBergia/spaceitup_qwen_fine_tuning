@@ -191,3 +191,51 @@ def test_side_difference():
     assert st.side_difference([wall_l, _ev("pass", "left", [o])], [_ev("pass", "right", [o])], o) == (None, "events_differ")
     assert st.side_difference([_ev("pass", "left", [o]), _ev("pass", "left", ["f:b2"])],
                               [_ev("pass", "right", [o]), _ev("pass", "right", ["f:b2"])], o) == (None, "events_differ")
+
+
+def _dest_state():
+    s = _state()
+    s[66:74, 66:74] = OCC        # box A: x 3.3..3.7, z 3.3..3.7 (image-left)
+    s[66:74, 26:34] = OCC        # box B: x 1.3..1.7 (image-right)
+    return s
+
+
+def test_dest_route_stops_in_front_of_its_object(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _dest_state())
+    blob = int(frame.lab[70, 70])
+    r, why = st.dest_route(frame, meta, mask, START, blob)
+    assert why is None and r["target"] == f"f:b{blob}"
+    stop = r["desc"]["stop"]
+    assert (stop["type"], stop["relation"], stop["object"]) == ("near", "in front of", f"f:b{blob}")
+    assert f"f:b{blob}" not in {o for e in r["desc"]["events"] for o in e["objects"]}   # not also a pass
+    assert r["path"][-1][0] < 0.5
+
+
+def test_dest_pairs_tags_by_image_x_and_drops_close_endpoints(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _dest_state())
+    ra, _ = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 70]))
+    rb, _ = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 30]))
+    pairs, reasons = st.dest_pairs([rb, ra])
+    assert len(pairs) == 1 and not reasons
+    p = pairs[0]
+    assert [r["tag"] for r in p["routes"]] == ["A", "B"]
+    assert p["routes"][0]["path"][-1][0] < p["routes"][1]["path"][-1][0]
+    assert p["targets"] == [ra["target"], rb["target"]] and p["slice"] == "dest"
+    assert st.exclusive(*p["routes"])
+    near_twin = {**ra, "path": [w[:] for w in ra["path"]]}
+    near_twin["path"][-1][0] += 0.1                                  # endpoints 0.1 apart in x
+    pairs, reasons = st.dest_pairs([ra, near_twin])
+    assert pairs == [] and reasons["too_close"] == 1
+
+
+def test_dest_route_too_short_and_wrong_stop(tmp_path, monkeypatch):
+    s = _state()
+    s[46:50, 48:52] = OCC                        # small box 1.3-1.5 m ahead: target 0.5 m from the entry
+    meta, frame, mask = _frame(tmp_path, s)
+    r, why = st.dest_route(frame, meta, mask, START, int(frame.lab[48, 50]))
+    assert r is None and why == "too_short"
+    meta, frame, mask = _frame(tmp_path, _dest_state(), name="g")
+    monkeypatch.setattr(st, "describe_xz", lambda m, f, route: {
+        "reason": None, "events": [], "stop": {"type": "near", "relation": "in front of", "object": "g:b999"}})
+    r, why = st.dest_route(frame, meta, mask, START, int(frame.lab[70, 70]))
+    assert r is None and why == "no_stop"
