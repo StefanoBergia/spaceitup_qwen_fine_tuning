@@ -40,6 +40,18 @@ frame object for Cosmos to name. CPU, 4 single-threaded workers:
     # after slurm/label_descriptions.sbatch (STAGE=full)
     uv run scripts/prepare_habitat_instr.py finalize-descriptions
 
+Steering eval (2026-10-07, docs/superpowers/specs/2026-10-07-steering-eval-design.md): eval-only
+pairs planned on each d1 eval frame's own map (CPU, 4 single-threaded workers), checked on the
+navmesh in the habitat env, then one pair per viewpoint per slice:
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py steer --limit 40     # smoke run
+    uv run scripts/prepare_habitat_instr.py steer
+    conda run -n habitat python scripts/navmesh_check.py         # see its docstring
+    uv run scripts/prepare_habitat_instr.py steer-select
+    # after STAGE=steer sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-steer
+
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
 belong to the unrotated camera.
@@ -57,8 +69,10 @@ from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
 )
+from rover_vlm import steering
 from rover_vlm.landmarks import select_target
 from rover_vlm.route_events import EVENTS_SCHEMA, collect_objects, describe_route
+from rover_vlm.steering import frame_pairs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "data" / "prepared_habitat_v4"
@@ -339,6 +353,60 @@ def stage_events(args):
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
 
 
+STEER_DIR = V3_OUT / "steer"
+STEER_WORKERS = 4
+_STEER = {}
+
+
+def _steer_init(names, fallback, kinds):
+    _STEER.update(names=names, fallback=fallback, kinds=kinds)
+
+
+def steer_frame(item):
+    """(candidate pairs, reason counts, error or None) for one eval frame (pool worker)."""
+    try:
+        pairs, reasons = frame_pairs(item["sample_dir"], item["start_uv"], _STEER["names"],
+                                     _STEER["fallback"], _STEER["kinds"])
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
+        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
+    floor_y = steering.floor_height(item["sample_dir"])
+    for p in pairs:
+        p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
+                 floor_y=floor_y)
+    return pairs, dict(reasons), None
+
+
+def _jsonl(path):
+    return [json.loads(x) for x in Path(path).read_text().splitlines() if x.strip()]
+
+
+def stage_steer(args):
+    import time
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    items = steering.steer_frames(json.loads(args.frames.read_text()))
+    if args.limit:
+        items = items[: args.limit]
+    names, fallback, kinds = steering.load_names(_jsonl(args.names), _jsonl(args.fallback_names))
+    t0 = time.time()
+    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=(names, fallback, kinds)) as pool:
+        results = pool.map(steer_frame, items, chunksize=8)
+    reasons, errors, n_frames = Counter(), [], {"side": set(), "dest": set()}
+    with (out / "candidates_eval.jsonl").open("w") as f:
+        for pairs, rs, err in results:
+            reasons.update(rs)
+            if err:
+                errors.append(err)
+            for p in pairs:
+                n_frames[p["slice"]].add(p["viewpoint"])
+                f.write(json.dumps(p) + "\n")
+    meta = {"frames": len(items), "seconds": round(time.time() - t0, 1),
+            "viewpoints_with_candidates": {k: len(v) for k, v in n_frames.items()},
+            "reasons": dict(sorted(reasons.items())), "errors": errors[:20], "n_errors": len(errors)}
+    (out / "steer_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+
+
 def desc_path(labels: Path, split: str, suffix: str = "") -> Path:
     """Composed-description file of one split: desc_<split><suffix>_d1.jsonl (suffix "_mix" = NAMER=mix)."""
     return labels / f"desc_{split}{suffix}_d1.jsonl"
@@ -411,9 +479,15 @@ def main() -> None:
     k.add_argument("--desc-suffix", default="",
                    help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
+    m = sub.add_parser("steer", help="steering: candidate pairs per d1 eval frame (CPU)")
+    m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
+    m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
+    m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
+    m.add_argument("--out-dir", type=Path, default=STEER_DIR)
+    m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events,
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer,
      "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 

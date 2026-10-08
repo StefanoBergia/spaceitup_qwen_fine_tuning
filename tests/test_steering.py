@@ -250,3 +250,95 @@ def test_dest_route_rejects_target_that_is_also_a_pass_event(tmp_path, monkeypat
         "stop": {"type": "near", "relation": "in front of", "object": oid}})
     r, why = st.dest_route(frame, meta, mask, START, blob)
     assert r is None and why == "target_passed"
+
+
+def test_frame_clash_is_within_one_frame():
+    names = {"f:b1": "grey sofa", "f:b2": "leather sofa", "g:b1": "sofa", "f:b3": "lamp"}
+    assert st.frame_clash("f:b1", names)
+    assert not st.frame_clash("f:b3", names)
+    assert not st.frame_clash("g:b1", names)
+
+
+def test_load_names_splits_files_and_keeps_kinds():
+    prim = [{"id": "f:b1", "passed": True, "name": "sofa", "need": "object"},
+            {"id": "f:b2", "passed": False, "name": None, "need": "wall"}]
+    fb = [{"id": "f:b2", "passed": True, "name": "white wall", "need": "wall"}]
+    names, fallback, kinds = st.load_names(prim, fb)
+    assert names == {"f:b1": "sofa"} and fallback == {"f:b2": "white wall"}
+    assert kinds == {"f:b1": "object", "f:b2": "wall"}
+
+
+def test_side_pair_named_gets_one_word_apart_templates(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    pair, _ = st.side_pair(frame, meta, mask, START, blob)
+    assert st.name_pair(pair, {f"f:b{blob}": "armchair"}, None, {}) is None
+    l, r = pair["routes"]
+    assert l["namer"] == "primary" and "left of the armchair" in l["template"]
+    assert l["template"].replace("left", "right") == r["template"]
+    assert st.name_pair(pair, {}, None, {}) == "unnamed_object"
+
+
+def test_anchor_blobs_and_frame_pairs_on_named_frames(tmp_path):
+    # Two separate scenes: with the side box and the two destination boxes in ONE room, the
+    # side routes pass within PASS_M of a destination box (an extra, one-sided event) and the
+    # destination targets have the side box nearer than their own object (wrong stop anchor).
+    sd = _sample(tmp_path / "f", _box(_state(), *BOX))
+    _, frame = load_frame(sd)
+    o = int(frame.lab[54, 50])
+    names = {f"f:b{o}": "ottoman"}
+    assert st.anchor_blobs(frame, names, None, {}) == [o]
+    assert st.anchor_blobs(frame, names, None, {f"f:b{o}": "wall"}) == []
+    assert st.anchor_blobs(frame, {}, names, {}) == [o]                     # fallback names count too
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {})
+    assert [p["pair_id"] for p in pairs] == [f"steer_side_f_b{o}"]
+    assert reasons["side:kept"] == 1 and reasons["dest:too_short"] == 1  # target 0.7 m from the entry
+    sd = _sample(tmp_path / "g", _dest_state())
+    _, frame = load_frame(sd)
+    a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])                  # a = image-left box
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}, None, {})
+    dest = [p for p in pairs if p["slice"] == "dest"]
+    assert [p["pair_id"] for p in dest] == [f"steer_dest_g_b{a}_b{b}"] and reasons["dest:kept"] == 1
+    json.dumps(pairs)                                                        # JSON-ready
+
+
+def test_frame_pairs_counts_no_start_and_no_names(tmp_path):
+    sd = _sample(tmp_path / "f", _dest_state())
+    _, reasons = st.frame_pairs(sd, [0.5, 0.4], {"f:b1": "x"}, None, {})
+    assert reasons == {"no_start": 1}
+    _, reasons = st.frame_pairs(sd, [0.5, 1.0], {}, None, {})
+    assert reasons == {"no_named_object": 1}
+    _, reasons = st.frame_pairs(tmp_path / "missing", [0.5, 1.0], {}, None, {})
+    assert reasons == {"no_state": 1}
+
+
+def test_steer_frames_one_item_per_frame_gt_record_first():
+    def rec(rid, sid, kind, src="original", parent=None, start=(0.5, 1.0)):
+        return {"id": rid, "image": [f"/d/{sid}/fpv_enhanced.png"],
+                "habitat_meta": {"sample_id": sid, "kind": kind, "source": src, "parent_sample_id": parent,
+                                 "start_uv_norm": list(start), "scene_id": "sc"}}
+    items = st.steer_frames([rec("a_R", "a", "opposite", start=(0.4, 1.0)), rec("a_L", "a", "instructed"),
+                             rec("b_y0_L", "b_y0", "instructed", "augmented", "b")])
+    assert [i["sample_id"] for i in items] == ["a", "b_y0"]
+    assert items[0]["start_uv"] == [0.5, 1.0] and items[0]["viewpoint"] == "a" and not items[0]["is_aug"]
+    assert items[1]["viewpoint"] == "b" and items[1]["is_aug"] and items[1]["sample_dir"] == "/d/b_y0"
+
+
+def test_floor_height(tmp_path):
+    assert st.floor_height(_sample(tmp_path / "f", _state())) == pytest.approx(0.1)
+    assert st.floor_height(tmp_path / "missing") is None
+
+
+def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
+    prep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prep)
+
+    def boom(*a, **k):
+        raise ValueError("bad map")
+    monkeypatch.setattr(prep, "frame_pairs", boom)
+    prep._steer_init({}, None, {})
+    pairs, reasons, err = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "start_uv": [0.5, 1.0]})
+    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err

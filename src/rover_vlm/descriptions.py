@@ -421,24 +421,36 @@ def _usable(row, names):
     return all(names.get(o) for o in route_objects(row)) and not name_clash(row, names)
 
 
+def choose_names(row, names, fallback_names=None):
+    """The A5 naming rule for one route: (names, "primary", None) when `names` serves it (every
+    route object named, no two sharing a head noun), else (fallback_names, "fallback", None)
+    under the same test, else (None, None, "unnamed_object" | "name:clash")."""
+    if _usable(row, names):
+        return names, "primary", None
+    if fallback_names is not None and _usable(row, fallback_names):
+        return fallback_names, "fallback", None
+    tried = [names] + ([fallback_names] if fallback_names is not None else [])
+    if any(not any(n.get(o) for n in tried) for o in route_objects(row)):
+        return None, None, "unnamed_object"
+    return None, None, "name:clash"
+
+
 def label_route(ask_text, row, names, seed, kinds=None, fallback_names=None):
     """Compose one route's description: two Cosmos attempts, then the template. `kinds` (object
     id -> kind_hint, e.g. the name rows' "need") lets the template say "past the end of" a wall.
     `names` is tried first; if it leaves an object unnamed or two objects share a head noun,
     `fallback_names` is tried; the row's "namer" says which one was used."""
     out = {"id": row["id"], "pair_id": row.get("pair_id"), "kind": row.get("kind"), "prompt_version": PROMPT_VERSION}
-    if _usable(row, names):
-        namer = "primary"
-    elif fallback_names is not None and _usable(row, fallback_names):
-        names, namer = fallback_names, "fallback"
-    else:
-        tried = [names] + ([fallback_names] if fallback_names is not None else [])
-        missing = [o for o in route_objects(row) if not any(n.get(o) for n in tried)]
-        if missing:
+    chosen, namer, reject = choose_names(row, names, fallback_names)
+    if chosen is None:
+        if reject == "unnamed_object":
+            tried = [names] + ([fallback_names] if fallback_names is not None else [])
+            missing = [o for o in route_objects(row) if not any(n.get(o) for n in tried)]
             return {**out, "passed": False, "description": None, "instruction_source": None,
                     "rejects": ["unnamed_object"], "missing": missing}
         return {**out, "passed": False, "description": None, "instruction_source": None,
                 "rejects": ["name:clash"]}
+    names = chosen
     style, shape = choose_d1_style(row["id"]), choose_shape(row["id"])
     prompt = compose_prompt(row["events"], row["stop"], names, style, shape, kinds)
     rejects, raws = [], []

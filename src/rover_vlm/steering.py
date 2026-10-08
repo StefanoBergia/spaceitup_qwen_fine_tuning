@@ -16,15 +16,17 @@ import heapq
 import itertools
 import math
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .descriptions import desc_check
+from .descriptions import choose_names, desc_check, name_rows_split, route_objects, template_description
 from .eval import description_follow, image_to_floor, resample_polyline
 from .habitat_data import clip_polyline_unit, resample_with_transitions
+from .instructions import head_noun
 from .landmarks import FREE, OCC, Camera, densify
-from .route_events import MIN_VISIBLE_CELLS, _blob_cells, describe_xz
+from .route_events import MIN_VISIBLE_CELLS, WALL_EXTENT_M, _blob_cells, describe_xz, load_frame
 
 CLEAR_M = 0.45      # d1 / round-4 GT routes keep 0.44-0.51 m from map obstacles (p10-p75)
 SNAP_M = 0.3        # a waypoint may move this far onto the nearest traversable cell
@@ -342,3 +344,128 @@ def dest_pairs(routes):
         pairs.append({"slice": "dest", "anchor": None, "targets": [ra["target"], rb["target"]],
                       "separation": round(separation(ra["path"], rb["path"]), 4), "routes": [ra, rb]})
     return pairs, reasons
+
+
+def load_names(primary_rows, fallback_rows):
+    """(names, fallback, kinds) from the two name-row files of the mixed namer (A5): Gemma rows
+    are primary, Cosmos rows the fallback; kinds = each object's "need" (wall / object / opening)."""
+    names, _ = name_rows_split(primary_rows)
+    fallback, _ = name_rows_split(fallback_rows)
+    kinds = {r["id"]: r.get("need") for r in primary_rows}
+    for r in fallback_rows:
+        kinds.setdefault(r["id"], r.get("need"))
+    return names, fallback, kinds
+
+
+def frame_clash(oid, names):
+    """True when another object of the same frame has a name with the same head noun."""
+    frame, h = oid.split(":")[0], head_noun(names.get(oid))
+    return bool(h) and any(o != oid and o.split(":")[0] == frame and head_noun(n) == h
+                           for o, n in names.items())
+
+
+def name_pair(pair, names, fallback, kinds):
+    """Pick each route's names (A5 rule), refuse anchors whose name is ambiguous in the frame and
+    destination targets sharing a head noun, and write each route's template sentence. Returns
+    the drop reason, or None after adding namer / names / template to both route dicts."""
+    heads = []
+    for r in pair["routes"]:
+        row = {"events": r["desc"]["events"], "stop": r["desc"]["stop"]}
+        chosen, namer, reject = choose_names(row, names, fallback)
+        if chosen is None:
+            return "unnamed_object" if reject == "unnamed_object" else "name_clash"
+        anchor = pair["anchor"] or r["target"]
+        if frame_clash(anchor, chosen):
+            return "name_clash"
+        heads.append(head_noun(chosen[anchor]))
+        r.update(namer=namer, names={o: chosen[o] for o in route_objects(row)},
+                 template=template_description(row["events"], row["stop"], chosen, kinds))
+    if pair["slice"] == "dest" and heads[0] == heads[1]:
+        return "name_clash"
+    return None
+
+
+def anchor_blobs(frame, names, fallback, kinds):
+    """Blobs that may anchor a pair: named (either file), not used as a wall, shorter than
+    WALL_EXTENT_M."""
+    out = []
+    for b, (_, xz) in sorted(_blob_cells(frame).items()):
+        oid = f"{frame.name}:b{b}"
+        if not (names.get(oid) or (fallback or {}).get(oid)) or kinds.get(oid) == "wall":
+            continue
+        if float(np.hypot(*np.ptp(xz, axis=0))) >= WALL_EXTENT_M:
+            continue
+        out.append(int(b))
+    return out
+
+
+def frame_pairs(sample_dir, start_uv, names, fallback, kinds):
+    """Every candidate pair of one frame, both slices, named and mutually exclusive, with the
+    drop reasons counted as "<slice>:<reason>" (frame-level reasons unprefixed)."""
+    sd = Path(sample_dir)
+    reasons = Counter()
+    if not (sd / "state.npz").exists():
+        reasons["no_state"] += 1
+        return [], reasons
+    meta, frame = load_frame(sd)
+    mask = traversable(frame.grid, frame.cam)
+    start = entry_floor(meta, start_uv)
+    if start is None or snap(frame.grid, mask, start) is None:
+        reasons["no_start"] += 1
+        return [], reasons
+    blobs = anchor_blobs(frame, names, fallback, kinds)
+    if not blobs:
+        reasons["no_named_object"] += 1
+        return [], reasons
+    pairs = []
+
+    def keep(pair):
+        why = name_pair(pair, names, fallback, kinds) or (None if exclusive(*pair["routes"]) else "not_exclusive")
+        reasons[f"{pair['slice']}:{why or 'kept'}"] += 1
+        if why is None:
+            pairs.append(pair)
+
+    for b in blobs:
+        pair, why = side_pair(frame, meta, mask, start, b)
+        if pair is None:
+            reasons[f"side:{why}"] += 1
+        else:
+            pair["pair_id"] = f"steer_side_{frame.name}_b{b}"
+            keep(pair)
+    routes = []
+    for b in blobs:
+        r, why = dest_route(frame, meta, mask, start, b)
+        if r is None:
+            reasons[f"dest:{why}"] += 1
+        else:
+            routes.append(r)
+    dpairs, dwhy = dest_pairs(routes)
+    reasons.update({f"dest:{k}": v for k, v in dwhy.items()})
+    for p in dpairs:
+        p["pair_id"] = f"steer_dest_{frame.name}_" + "_".join(t.split(":")[-1] for t in p["targets"])
+        keep(p)
+    return pairs, reasons
+
+
+def steer_frames(records):
+    """One item per eval frame (sample_id) from the d1 entry records; the frame's GT-route
+    record ("instructed") gives the entry point when present."""
+    by = {}
+    for r in records:
+        hm = r["habitat_meta"]
+        cur = by.get(hm["sample_id"])
+        if cur is None or (hm.get("kind") == "instructed" and cur["habitat_meta"].get("kind") != "instructed"):
+            by[hm["sample_id"]] = r
+    return [{"sample_id": s, "sample_dir": str(Path(r["image"][0]).parent), "image": r["image"][0],
+             "start_uv": list(r["habitat_meta"]["start_uv_norm"]), "scene_id": r["habitat_meta"]["scene_id"],
+             "viewpoint": r["habitat_meta"].get("parent_sample_id") or s,
+             "is_aug": r["habitat_meta"].get("source") == "augmented"} for s, r in sorted(by.items())]
+
+
+def floor_height(sample_dir):
+    """World Y of the frame's floor (state.npz floor_height), or None."""
+    p = Path(sample_dir) / "state.npz"
+    if not p.exists():
+        return None
+    z = np.load(p)
+    return float(z["floor_height"]) if "floor_height" in z.files else None

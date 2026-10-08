@@ -867,3 +867,13 @@ def test_primary_usable_route_composes_with_fallback_file_lacking_its_objects():
     assert names_missing(route, named, rejected, {}, set()) == []   # fallback never ran these objects
     out = label_route(_good_ask(GOOD), route, named, seed=0, fallback_names={})
     assert out["passed"] and out["namer"] == "primary"
+
+
+def test_choose_names_primary_fallback_and_rejects():
+    from rover_vlm.descriptions import choose_names
+    row = _route([PASS_L], NEAR)                                       # f:b1, stop f:b5
+    assert choose_names(row, NAMES) == (NAMES, "primary", None)
+    assert choose_names(row, {"f:b5": "fridge"}, NAMES) == (NAMES, "fallback", None)
+    assert choose_names(row, {"f:b5": "fridge"}, {"f:b5": "fridge"}) == (None, None, "unnamed_object")
+    clash = {**NAMES, "f:b1": "fridge"}
+    assert choose_names(row, clash) == (None, None, "name:clash")
