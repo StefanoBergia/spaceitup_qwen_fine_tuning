@@ -47,6 +47,7 @@ navmesh in the habitat env, then one pair per viewpoint per slice:
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     uv run scripts/prepare_habitat_instr.py steer --limit 40     # smoke run
     uv run scripts/prepare_habitat_instr.py steer
+    uv run scripts/prepare_habitat_instr.py steer-objects       # then STAGE=steer_names sbatch slurm/label_descriptions.sbatch
     conda run -n habitat python scripts/navmesh_check.py         # see its docstring
     uv run scripts/prepare_habitat_instr.py steer-select
     # after STAGE=steer sbatch slurm/label_descriptions.sbatch
@@ -381,6 +382,32 @@ def _jsonl(path):
     return [json.loads(x) for x in Path(path).read_text().splitlines() if x.strip()]
 
 
+def steer_objects_frame(args):
+    item, skip = args
+    try:
+        return steering.object_rows(item["sample_dir"], item["image"], skip), None
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted error, not a dead stage
+        return [], f"{item['sample_id']}: {type(e).__name__}: {e}"
+
+
+def stage_steer_objects(args):
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    items = steering.steer_frames(json.loads(args.frames.read_text()))
+    if args.limit:
+        items = items[: args.limit]
+    named = {r["id"] for p in (args.names, args.fallback_names) for r in _jsonl(p) if r.get("passed")}
+    with Pool(STEER_WORKERS) as pool:
+        results = pool.map(steer_objects_frame, [(i, named) for i in items], chunksize=8)
+    rows = [r for rs, _ in results for r in rs]
+    errors = [e for _, e in results if e]
+    (out / "objects_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    meta = {"frames": len(items), "objects": len(rows), "already_named": len(named), "errors": errors[:20],
+            "n_errors": len(errors)}
+    (out / "objects_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+
+
 def stage_steer(args):
     import time
     out = args.out_dir
@@ -486,9 +513,15 @@ def main() -> None:
     m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
     m.add_argument("--out-dir", type=Path, default=STEER_DIR)
     m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
+    o = sub.add_parser("steer-objects", help="steering: naming rows for every visible non-wall eval object (CPU)")
+    o.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
+    o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
+    o.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
+    o.add_argument("--out-dir", type=Path, default=STEER_DIR)
+    o.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     args = p.parse_args()
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
-     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer,
+     "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
 
 

@@ -13,6 +13,10 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
         --events data/prepared_habitat_instr_v2/events_eval.jsonl \
         --names outputs/instr_labels_v3/names_eval_d1.jsonl \
         --out outputs/instr_labels_v3/desc_eval_d1.jsonl --concurrency 8 --resume
+    # steering (Addendum A1): name every row of an objects file, no routes
+    uv run scripts/label_descriptions.py --stage name --all-objects \
+        --objects data/prepared_habitat_instr_v3/steer/objects_eval.jsonl \
+        --out outputs/instr_labels_v3/names_steer_gemma_d1.jsonl --concurrency 8 --resume
     #   --fallback-names OTHER_names.jsonl: used per route when --names leaves an object unnamed or two
     #   objects share a head noun ("name:clash"); rows carry "namer": primary|fallback
     # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
@@ -52,7 +56,9 @@ def jsonl(path):
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--stage", choices=["name", "compose"], required=True)
-    p.add_argument("--events", type=Path, required=True, help="events_*.jsonl")
+    p.add_argument("--events", type=Path, help="events_*.jsonl (not with --all-objects)")
+    p.add_argument("--all-objects", action="store_true",
+                   help="stage name: name every row of --objects; no --events (steering, Addendum A1)")
     p.add_argument("--objects", type=Path, help="objects_*.jsonl (stage name)")
     p.add_argument("--names", type=Path, help="names_*_d1.jsonl from stage name (stage compose)")
     p.add_argument("--only-unusable-under", type=Path,
@@ -72,22 +78,31 @@ def main() -> None:
     p.add_argument("--gate", action="store_true", help="exit 2 unless accept >= 0.9 (and template share <= 0.1)")
     args = p.parse_args()
 
-    check_events_schema(args.events)
-    routes = select_routes(jsonl(args.events), args.limit)
+    if args.all_objects and args.stage != "name":
+        raise SystemExit("--all-objects is for --stage name")
+    if not args.all_objects:
+        if not args.events:
+            raise SystemExit("--events is required (unless --stage name --all-objects)")
+        check_events_schema(args.events)
+    routes = [] if args.all_objects else select_routes(jsonl(args.events), args.limit)
     if args.stage == "name":
         if not args.objects:
             raise SystemExit("--stage name needs --objects objects_*.jsonl")
-        if args.only_unusable_under:
+        if args.all_objects:
+            items = jsonl(args.objects)
+            items = items[: args.limit] if args.limit else items
+        elif args.only_unusable_under:
             if not args.only_unusable_under.exists():
                 raise SystemExit(f"--only-unusable-under {args.only_unusable_under} not found")
             wanted = objects_needing_fallback(routes, jsonl(args.only_unusable_under))
             print(f"only-unusable-under: {len(wanted)} objects of {len(routes)} routes", flush=True)
         else:
             wanted = {o for r in routes for o in route_objects(r)}
-        items = [o for o in jsonl(args.objects) if o["object_id"] in wanted]
-        missing = wanted - {o["object_id"] for o in items}
-        if missing:
-            raise SystemExit(f"{len(missing)} route objects have no object row (e.g. {sorted(missing)[:3]})")
+        if not args.all_objects:
+            items = [o for o in jsonl(args.objects) if o["object_id"] in wanted]
+            missing = wanted - {o["object_id"] for o in items}
+            if missing:
+                raise SystemExit(f"{len(missing)} route objects have no object row (e.g. {sorted(missing)[:3]})")
         key = "object_id"
     else:
         if not (args.names and args.names.exists()):

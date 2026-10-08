@@ -14,3 +14,9 @@ def test_thread_caps(name):
     text = (SLURM / name).read_text()
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         assert f"{var}=" in text, f"{name} does not set {var}"
+
+
+def test_label_descriptions_has_a_steer_names_stage():
+    text = (SLURM / "label_descriptions.sbatch").read_text()
+    assert '"$STAGE" = "steer_names"' in text and "--all-objects" in text
+    assert "names_steer_gemma_d1.jsonl" in text and 'serve "$GEMMA_MODEL"' in text

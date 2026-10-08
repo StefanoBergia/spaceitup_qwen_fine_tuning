@@ -3,6 +3,9 @@
 #
 #     sbatch slurm/label_descriptions.sbatch              # gate: 300 eval routes, then stop for the audit
 #     STAGE=full sbatch slurm/label_descriptions.sbatch   # eval + train (resumes after a TIMEOUT)
+# STAGE=steer_names (2026-10-08, steering Addendum A1): Gemma names every not-yet-named visible object of
+# the eval frames (prepare_habitat_instr.py steer-objects); no compose. Then: steer-propose.
+#     STAGE=steer_names sbatch slurm/label_descriptions.sbatch
 #
 # Per split: name pass 1, name pass 2 (--resume retries request errors), compose pass 1,
 # compose pass 2 (--resume retries). The name passes are report-only (read their summary in
@@ -133,6 +136,20 @@ mix_compose() {  # mix_compose <split> <tag> [opts]: compose with Gemma names + 
     local NAME_SFX="_gemma" FALLBACK=(--fallback-names "$OUT/names_${tag}_d1.jsonl")
     compose_stage "$@"
 }
+
+if [ "$STAGE" = "steer_names" ]; then
+    SD=data/prepared_habitat_instr_v3/steer
+    [ -f "$SD/objects_eval.jsonl" ] || { echo "missing $SD/objects_eval.jsonl — run prepare_habitat_instr.py steer-objects"; exit 1; }
+    serve "$GEMMA_MODEL"
+    steer_names=(--stage name --all-objects --objects "$SD/objects_eval.jsonl" --out "$OUT/names_steer_gemma_d1.jsonl"
+                 --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== name: steer objects (pass 1) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
+    echo; echo "=============== name: steer objects (pass 2, retries errors) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
+    echo "steer names done: uv run scripts/prepare_habitat_instr.py steer-propose"
+    exit 0
+fi
 
 if [ "$NAMER" = "cosmos" ]; then
     serve "$COSMOS_MODEL"

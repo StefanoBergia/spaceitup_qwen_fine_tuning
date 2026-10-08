@@ -29,8 +29,8 @@ from .eval import description_follow, image_to_floor, resample_polyline
 from .habitat_data import clip_polyline_unit, resample_with_transitions
 from .instructions import head_noun
 from .landmarks import FREE, MIN_FWD_M, OCC, Camera, densify
-from .route_events import (MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
-                           first_blocker, load_frame)
+from .route_events import (MIN_AREA, MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
+                           first_blocker, load_frame, object_outline, visible_cells)
 
 CLEAR_M = 0.30      # Addendum A1: navmesh bake radius and via clearance (d1 GT routes keep 0.44-0.51 m)
 SNAP_M = 0.3        # a waypoint may move this far onto the nearest traversable cell
@@ -528,3 +528,27 @@ def floor_height(sample_dir):
         return None
     z = np.load(p)
     return float(z["floor_height"]) if "floor_height" in z.files else None
+
+
+def object_rows(sample_dir, image, skip_ids=()):
+    """One naming row per visible non-wall object of a frame (Addendum A1), as d1's object rows:
+    blobs shorter than WALL_EXTENT_M, with >= MIN_VISIBLE_CELLS visible cells and an outline of
+    at least MIN_AREA; ids in skip_ids (already named) are left out."""
+    sd = Path(sample_dir)
+    if not (sd / "state.npz").exists():
+        return []
+    _, frame = load_frame(sd)
+    out = []
+    for b, (cells, xz) in sorted(_blob_cells(frame).items()):
+        oid = f"{frame.name}:b{b}"
+        if oid in skip_ids or float(np.hypot(*np.ptp(xz, axis=0))) >= WALL_EXTENT_M:
+            continue
+        vis = visible_cells(frame, cells, int(b))
+        if len(vis) < MIN_VISIBLE_CELLS:
+            continue
+        o = object_outline(frame, vis)
+        if o["area"] < MIN_AREA:
+            continue
+        out.append({"object_id": oid, "kind_hint": "object", "image": image,
+                    **{k: o[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")}})
+    return out

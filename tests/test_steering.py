@@ -399,3 +399,42 @@ def test_lookup_planner_distinguishes_no_route_from_never_requested(tmp_path):
     assert plan(frame, [(3.0, 4.0)]).shape == (2, 2)
     with pytest.raises(KeyError):
         plan(frame, [(9.0, 9.0)])
+
+
+def test_object_rows_cover_visible_non_wall_objects(tmp_path):
+    s = _dest_state()
+    s[90:94, 0:100] = OCC                       # a wall across the far end (longer than WALL_EXTENT_M)
+    sd = _sample(tmp_path / "g", s)
+    _, frame = load_frame(sd)
+    a, b, w = int(frame.lab[70, 70]), int(frame.lab[70, 30]), int(frame.lab[92, 50])
+    rows = st.object_rows(sd, "/img.png")
+    ids = {r["object_id"] for r in rows}
+    assert ids == {f"g:b{a}", f"g:b{b}"}                         # the wall is left out
+    assert all(r["kind_hint"] == "object" and r["image"] == "/img.png" and len(r["polygon"]) >= 3 for r in rows)
+    assert {r["object_id"] for r in st.object_rows(sd, "/img.png", skip_ids={f"g:b{a}"})} == {f"g:b{b}"}
+    assert st.object_rows(tmp_path / "missing", "/img.png") == []
+
+
+def _label_desc():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "label_descriptions", Path(__file__).resolve().parent.parent / "scripts" / "label_descriptions.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_label_descriptions_all_objects_needs_no_events(tmp_path, monkeypatch, capsys):
+    ld = _label_desc()
+    objs = tmp_path / "objects.jsonl"
+    objs.write_text(json.dumps({"object_id": "g:b1", "kind_hint": "object", "image": "x", "polygon": [],
+                                "crop_box": None, "bbox": None}) + "\n")
+    out = tmp_path / "names.jsonl"
+    out.write_text(json.dumps({"id": "g:b1", "passed": True, "name": "sofa"}) + "\n")   # already done
+    monkeypatch.setattr("sys.argv", ["x", "--stage", "name", "--all-objects", "--objects", str(objs),
+                                     "--out", str(out), "--resume"])
+    ld.main()                                                    # nothing to label: no endpoint needed
+    assert "1 items, 0 to label" in capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", ["x", "--stage", "compose", "--all-objects", "--out", str(out)])
+    with pytest.raises(SystemExit):
+        ld.main()
