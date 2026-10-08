@@ -12,6 +12,7 @@ import pytest
 
 from rover_vlm import steering as st
 from rover_vlm.landmarks import FREE, OCC, UNKNOWN, Camera, Grid
+from rover_vlm.route_events import load_frame
 
 CAM = Camera([2.5, 0.2], [0.0, 1.0])
 
@@ -116,3 +117,77 @@ def test_exclusive_needs_each_route_to_fail_the_other_text():
     assert st.exclusive(rl, rr)
     assert not st.exclusive(rl, {**rr, "desc": _desc("left")})     # R fails its own text
     assert not st.exclusive(rl, {**rl, "desc": _desc("left")})     # one route satisfies both
+
+
+def _sample(d, state):
+    """A synthetic sample dir: state.npz (with floor_height) and meta.json, no candidates."""
+    d = Path(d)
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez(d / "state.npz", state=state, mpp=0.05, x_min=0.0, z_min=0.0, floor_height=0.1)
+    (d / "meta.json").write_text(json.dumps({"pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0],
+                                             "flavor": "detour", "chord": {"crossing_xz": None},
+                                             "candidates": []}))
+    return d
+
+
+START = np.array([2.5, 1.0])
+BOX = ((50, 58), (46, 54))                      # 0.4 m box 1.5-1.9 m ahead of the entry
+
+
+def _frame(tmp_path, state, name="f"):
+    meta, frame = load_frame(_sample(tmp_path / name, state))
+    return meta, frame, st.traversable(frame.grid, frame.cam)
+
+
+def test_side_pair_rounds_both_sides_one_word_apart(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    pair, why = st.side_pair(frame, meta, mask, START, blob)
+    assert why is None and pair["slice"] == "side" and pair["anchor"] == f"f:b{blob}"
+    l, r = pair["routes"]
+    assert (l["tag"], l["side"], r["tag"], r["side"]) == ("L", "left", "R", "right")
+    assert l["route_xz"][0] == r["route_xz"][0] and l["path"][0] == r["path"][0]     # shared entry
+    i = l["anchor_event"]
+    assert i == r["anchor_event"]
+    assert l["desc"]["events"][i]["side"] == "left" and r["desc"]["events"][i]["side"] == "right"
+    assert st.stop_key(l["desc"]["stop"]) == st.stop_key(r["desc"]["stop"])
+    assert pair["separation"] >= st.MIN_SEP_UV
+
+
+def test_side_pair_rejects_a_second_obstacle_between_the_routes(tmp_path):
+    s = _box(_state(), *BOX)
+    s[62:64, 49:51] = OCC                        # post 0.25 m behind the box, between both routes
+    meta, frame, mask = _frame(tmp_path, s)
+    pair, why = st.side_pair(frame, meta, mask, START, int(frame.lab[54, 50]))
+    assert pair is None and why == "not_two_sided"
+
+
+def test_two_routes_round_the_same_side_are_not_two_sided(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    a = st.plan_route(frame.grid, mask, [START, (3.25, 2.7), (2.5, 3.4)])
+    b = st.plan_route(frame.grid, mask, [START, (3.7, 2.7), (2.5, 3.4)])
+    assert not st.two_sided(frame, a, b, blob)
+    c = st.plan_route(frame.grid, mask, [START, (1.75, 2.7), (2.5, 3.4)])
+    assert st.two_sided(frame, a, c, blob)
+
+
+def test_anchor_too_close_to_the_entry(tmp_path):
+    meta, frame, mask = _frame(tmp_path, _box(_state(), (26, 30), (48, 52)))   # 0.3-0.5 m ahead
+    pair, why = st.side_pair(frame, meta, mask, START, int(frame.lab[28, 50]))
+    assert pair is None and why == "too_near"
+
+
+def _ev(t, side, objs):
+    return {"type": t, "side": side, "objects": objs, "arc_m": 1.0}
+
+
+def test_side_difference():
+    o = "f:b1"
+    wall_l, wall_r = _ev("wall", "left", ["f:b9"]), _ev("wall", "left", ["f:b9"])
+    assert st.side_difference([wall_l, _ev("pass", "left", [o])], [wall_r, _ev("pass", "right", [o])], o) == (1, None)
+    assert st.side_difference([_ev("pass", "left", [o])], [_ev("pass", "left", [o])], o) == (None, "anchor_missing")
+    assert st.side_difference([_ev("pass", "left", [o, "f:b2"])], [_ev("pass", "right", [o])], o) == (None, "anchor_missing")
+    assert st.side_difference([wall_l, _ev("pass", "left", [o])], [_ev("pass", "right", [o])], o) == (None, "events_differ")
+    assert st.side_difference([_ev("pass", "left", [o]), _ev("pass", "left", ["f:b2"])],
+                              [_ev("pass", "right", [o]), _ev("pass", "right", ["f:b2"])], o) == (None, "events_differ")

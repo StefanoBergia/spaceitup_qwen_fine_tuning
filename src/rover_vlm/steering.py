@@ -16,14 +16,22 @@ import heapq
 import math
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 from .descriptions import desc_check
 from .eval import description_follow, image_to_floor, resample_polyline
 from .habitat_data import clip_polyline_unit, resample_with_transitions
-from .landmarks import FREE, OCC, Camera
+from .landmarks import FREE, OCC, Camera, densify
+from .route_events import MIN_VISIBLE_CELLS, _blob_cells, describe_xz
 
 CLEAR_M = 0.45      # d1 / round-4 GT routes keep 0.44-0.51 m from map obstacles (p10-p75)
 SNAP_M = 0.3        # a waypoint may move this far onto the nearest traversable cell
+MIN_ROUTE_M = 1.5
+MIN_SEP_UV = 0.1
+VIA_EXTRA_M = 0.1                 # via point: CLEAR_M + this beyond O's side
+STOP_BEYOND_M = (0.5, 1.0, 1.5)   # shared stop: this far past O's far edge, first that plans
+MIN_AHEAD_M = 1.0                 # an anchor nearer the entry leaves no room to go round it
+INSIDE_FRAC = 0.9                 # share of O's cells that must lie between the two routes
 _NEIGH = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 _CHUNK = 1024
 
@@ -173,3 +181,113 @@ def exclusive(ra, rb):
             and description_follow(rb["path"], cb, eb)["follows"] == 1
             and description_follow(ra["path"], cb, eb)["follows"] == 0
             and description_follow(rb["path"], ca, ea)["follows"] == 0)
+
+
+def _rounded(xz):
+    return [[round(float(x), 3), round(float(z), 3)] for x, z in np.asarray(xz, float)]
+
+
+def enclosed_blobs(frame, a_xz, b_xz):
+    """{blob: cells inside the closed loop a + reversed(b)} (PIL even-odd polygon fill on the
+    grid): two routes with the same ends differ in which way they go round exactly the blobs
+    between them."""
+    mpp = frame.grid.mpp
+    pts = np.vstack([densify(np.asarray(a_xz, float), mpp / 2), densify(np.asarray(b_xz, float), mpp / 2)[::-1]])
+    rc = frame.grid.rc(pts)
+    img = Image.new("1", (frame.lab.shape[1], frame.lab.shape[0]), 0)
+    ImageDraw.Draw(img).polygon([(float(c), float(r)) for r, c in rc], fill=1)
+    inside = np.asarray(img, bool) & (frame.lab > 0)
+    labs, counts = np.unique(frame.lab[inside], return_counts=True)
+    return {int(b): int(n) for b, n in zip(labs, counts)}
+
+
+def two_sided(frame, a_xz, b_xz, blob):
+    """True when the two routes go round `blob` on opposite sides and round nothing else:
+    at least INSIDE_FRAC of its cells lie between them, and no other blob with
+    MIN_VISIBLE_CELLS or more cells does."""
+    inside = enclosed_blobs(frame, a_xz, b_xz)
+    n = len(_blob_cells(frame)[blob][0])
+    return (inside.get(blob, 0) >= INSIDE_FRAC * n
+            and not any(b != blob and k >= MIN_VISIBLE_CELLS for b, k in inside.items()))
+
+
+def _event_key(e):
+    return e["type"], e["side"], tuple(e["objects"])
+
+
+def side_difference(ev_l, ev_r, oid):
+    """(index of O's pass event, None) when the two event lists are identical except that the
+    left route passes O alone on the left and the right route on the right; else
+    (None, "anchor_missing" | "events_differ")."""
+    def at(events, side):
+        return [i for i, e in enumerate(events) if e["type"] == "pass" and e["objects"] == [oid] and e["side"] == side]
+
+    il, ir = at(ev_l, "left"), at(ev_r, "right")
+    if len(il) != 1 or len(ir) != 1:
+        return None, "anchor_missing"
+    if il != ir or len(ev_l) != len(ev_r):
+        return None, "events_differ"
+    if any(_event_key(a) != _event_key(b) for i, (a, b) in enumerate(zip(ev_l, ev_r)) if i != il[0]):
+        return None, "events_differ"
+    return il[0], None
+
+
+def stop_key(stop):
+    return stop["type"], stop["relation"], stop.get("amount"), stop.get("object")
+
+
+def side_routes(frame, mask, start, blob):
+    """({"left": xz, "right": xz}, None): one route each way round `blob` to a shared stop past
+    it; else (None, reason). A via on the route's right of O means the route goes RIGHT of O
+    (route_events' pass side = the route's side)."""
+    xz = _blob_cells(frame)[blob][1]
+    c = xz.mean(0)
+    d = c - start
+    dist = float(np.linalg.norm(d))
+    if dist < MIN_AHEAD_M:
+        return None, "too_near"
+    d /= dist
+    right = np.array([-d[1], d[0]])              # Camera.right's handedness
+    lat = (xz - c) @ right
+    via = {"right": c + right * (lat.max() + CLEAR_M + VIA_EXTRA_M),
+           "left": c + right * (lat.min() - CLEAR_M - VIA_EXTRA_M)}
+    if any(snap(frame.grid, mask, v) is None for v in via.values()):
+        return None, "no_free_side"
+    far = start + d * float(((xz - start) @ d).max())
+    for k in STOP_BEYOND_M:
+        stop = far + d * k
+        routes = {s: plan_route(frame.grid, mask, [start, via[s], stop]) for s in ("left", "right")}
+        if all(r is not None for r in routes.values()):
+            return routes, None
+    return None, "plan_failed"
+
+
+def side_pair(frame, meta, mask, start, blob):
+    """(pair dict, None) for the side slice around one blob, else (None, reason)."""
+    routes, why = side_routes(frame, mask, start, blob)
+    if routes is None:
+        return None, why
+    if min(route_length(r) for r in routes.values()) < MIN_ROUTE_M:
+        return None, "too_short"
+    if not two_sided(frame, routes["left"], routes["right"], blob):
+        return None, "not_two_sided"
+    desc = {s: describe_xz(meta, frame, r) for s, r in routes.items()}
+    if any(d["reason"] for d in desc.values()):
+        return None, "no_stop"
+    oid = f"{frame.name}:b{blob}"
+    idx, why = side_difference(desc["left"]["events"], desc["right"]["events"], oid)
+    if why:
+        return None, why
+    if stop_key(desc["left"]["stop"]) != stop_key(desc["right"]["stop"]):
+        return None, "events_differ"
+    out = []
+    for tag, s in (("L", "left"), ("R", "right")):
+        path = answer_path(frame.cam, routes[s])
+        if len(path) < 2:
+            return None, "too_short"
+        out.append({"tag": tag, "side": s, "route_xz": _rounded(routes[s]), "path": path,
+                    "desc": desc[s], "anchor_event": idx, "target": None})
+    sep = separation(out[0]["path"], out[1]["path"])
+    if sep < MIN_SEP_UV:
+        return None, "too_close"
+    return {"slice": "side", "anchor": oid, "targets": None, "separation": round(sep, 4), "routes": out}, None
