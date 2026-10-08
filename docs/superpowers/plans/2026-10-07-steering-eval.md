@@ -4,33 +4,35 @@
 
 **Goal:** Build an eval-only set of steering pairs (side + destination slices) from d1's eval frames, with template and Cosmos-composed text, plus the metrics, audit page, report and run scripts to test whether d1 steers.
 
-**Architecture:** A new pure-numpy module `src/rover_vlm/steering.py` plans routes on each frame's own map (`state.npz`) — known free floor, ≥ 0.45 m from obstacles, in view — builds side pairs (pass one named object on opposite sides) and destination pairs (two "stop in front of" targets), describes them with the existing `route_events` / `descriptions` code, and keeps only pairs where each route fails the other's description. A standalone `scripts/navmesh_check.py` (the `habitat` conda env) re-checks every route on a navmesh baked at the same clearance. New stages in `scripts/prepare_habitat_instr.py` run plan → select → finalize; the existing compose job adds the natural-language text; `eval.py` gains steering pair metrics.
+**Architecture (Revision R1, 2026-10-08, after Addendum A1):** A new pure-numpy module `src/rover_vlm/steering.py` builds side pairs (pass one named object on opposite sides) and destination pairs (two "stop in front of" targets), describes them with the existing `route_events` / `descriptions` code, and keeps only pairs where each route fails the other's description. The builders take a planner: `steer-propose` records what to plan, `scripts/navmesh_plan.py` (the `habitat` env) plans it on the scene navmesh baked at 0.30 m, and `steer` builds the pairs from those routes (unit tests inject Task 1's frame-map A*). Every visible eval object gets a Gemma name first (`steer-objects` + `STAGE=steer_names`). New stages in `scripts/prepare_habitat_instr.py` run objects → propose → steer → select → finalize; the existing compose job adds the natural-language text; `eval.py` gains steering pair metrics.
 
-**Tech Stack:** Python 3.12 (uv `.venv`: numpy, PIL — no scipy), pytest; `habitat` conda env (Python 3.9, habitat_sim 0.3.3) for the navmesh check only, importing `roverbench` from `../spaceitup-habitat/src`; SLURM sbatch for the Cosmos compose and the Qwen eval.
+**Tech Stack:** Python 3.12 (uv `.venv`: numpy, PIL — no scipy), pytest; `habitat` conda env (Python 3.9, habitat_sim 0.3.3) for navmesh planning only (`scripts/navmesh_plan.py`), importing `roverbench` from `../spaceitup-habitat/src`; SLURM sbatch for the Cosmos compose and the Qwen eval.
 
-**Spec:** `docs/superpowers/specs/2026-10-07-steering-eval-design.md` (commit 2d578e3). Read it first.
+**Spec:** `docs/superpowers/specs/2026-10-07-steering-eval-design.md` (commit 2d578e3) **and its Addendum A1 (commit 0ea0364), which overrides it**. Read both first.
+
+**Revision R1 (2026-10-08):** Tasks 1–5 were built as first planned (frame-map planning) and kept 0 pairs on real frames; Addendum A1 moves planning to the scene navmesh at 0.30 m and names every visible object. Tasks 6–9 are new (they replace the first plan's navmesh-check and selection tasks); the first plan's Tasks 8–12 are now Tasks 10–14.
 
 ## Global Constraints
 
-- Thresholds, verbatim from the spec: `CLEAR_M = 0.45`, `MIN_ROUTE_M = 1.5`, `MIN_SEP_UV = 0.1`, `MIN_DEST_DU = 0.15`, side stop 0.5–1.5 m beyond O's far edge, via at `CLEAR_M + 0.1` m beside O. Eval tolerances unchanged: `STOP_TOL_UV = 0.03` (also report 0.05), `PASS_TIE_M = 0.15`, `FOLLOW_NEAR_M = 2.0`.
-- Additions decided while planning (consistent with the spec): `DEST_GAP_M = 0.8` — a destination stop sits 0.8 m before its object, beyond `route_events.PASS_M` (0.7) so the target is not also a "pass" event, inside `STOP_NEAR_M` (1.0) so `stop_phrase` says "in front of"; `SNAP_M = 0.3`; `MIN_AHEAD_M = 1.0`; `INSIDE_FRAC = 0.9`. Extra drop reasons beyond the spec's list: `no_state`, `no_start`, `too_near`, `too_short`, `no_stop`, `anchor_missing`, `unnamed_object`, `error`. The spec's `out_of_frame` cannot happen: the planner's mask only holds in-frame cells.
-- Three refinements of the spec's wording, same intent: (1) the navmesh check bakes the navmesh at agent radius `CLEAR_M` (the generator's own `recompute_navmesh`, CPU, verified 2026-10-07: 1.1 s per scene, the scene's oracle route passes 9/9 points) and tests `is_navigable` / `snap_point`, instead of `distance_to_closest_obstacle` on the default navmesh; (2) the spec's `steer_anchor` field is the dict `habitat_meta.steer = {slice, anchor, anchor_event, side, viewpoint}`; (3) the side headline ignores a graze (< `PASS_TIE_M`): the d1 checker counts a graze as either side, which would let a text-blind route through the object score both texts.
+- Thresholds, verbatim from the spec: `CLEAR_M = 0.30` (Addendum A1; was 0.45), `MIN_ROUTE_M = 1.5`, `MIN_SEP_UV = 0.1`, `MIN_DEST_DU = 0.15`, side stop 0.5–1.5 m beyond O's far edge, via at `CLEAR_M + 0.1` m beside O. Eval tolerances unchanged: `STOP_TOL_UV = 0.03` (also report 0.05), `PASS_TIE_M = 0.15`, `FOLLOW_NEAR_M = 2.0`.
+- Additions decided while planning (consistent with the spec): `DEST_GAP_M = 0.8` — a destination stop sits 0.8 m before its object, beyond `route_events.PASS_M` (0.7) so the target is not also a "pass" event, inside `STOP_NEAR_M` (1.0) so `stop_phrase` says "in front of"; `SNAP_M = 0.3`; `MIN_AHEAD_M = 1.0`; `INSIDE_FRAC = 0.9`. Extra drop reasons beyond the spec's list: `no_state`, `no_start`, `too_near`, `too_short`, `no_stop`, `anchor_missing`, `unnamed_object`, `target_passed`, `behind_camera`, `error` (`no_free_side` is gone after Task 6: the planner decides). After A1 routes may leave the view and are clipped like d1's; a route passing < 0.3 m in front of the camera is dropped (`behind_camera`).
+- Three refinements of the spec's wording, same intent: (1) superseded by Addendum A1: routes are planned on a navmesh baked at agent radius `CLEAR_M` with the generator's own `recompute_navmesh` (CPU, ~1 s per scene), so there is no separate navmesh check; (2) the spec's `steer_anchor` field is the dict `habitat_meta.steer = {slice, anchor, anchor_event, side, viewpoint}`; (3) the side headline ignores a graze (< `PASS_TIE_M`): the d1 checker counts a graze as either side, which would let a text-blind route through the object score both texts.
 - Shared box: before any CPU-heavy run, `export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4` (pool workers: 1 thread each, 4 workers). Never load Qwen / Cosmos / Gemma on the login node.
 - `.venv` has no scipy: numpy + PIL only in `src/`.
-- `scripts/navmesh_check.py` must run under Python 3.9 (`from __future__ import annotations`; no `match`); it must import `habitat_sim` / `roverbench` only inside `main()` so the uv test suite can import it.
-- The user's uncommitted edits to `README.md` and `scripts/evaluate.py` are NOT ours: never stage them. README changes go in with an index-only commit (Task 12 shows how). Never touch `scripts/evaluate.py`.
+- `scripts/navmesh_plan.py` must run under Python 3.9 (`from __future__ import annotations`; no `match`); it must import `habitat_sim` / `roverbench` only inside `main()` so the uv test suite can import it. Run it with `~/miniforge3/envs/habitat/bin/python`, never `conda run -n habitat python` (inside this repo `conda run` resolves the repo's `.python-version` to pyenv's missing 3.12).
+- The user's uncommitted edits to `README.md` and `scripts/evaluate.py` are NOT ours: never stage them. README changes go in with an index-only commit (Task 14 shows how). Never touch `scripts/evaluate.py`.
 - Every script / module gets a docstring saying what it does and how to run it (CLAUDE.md).
-- Commit messages end with `Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>`.
+- Commit messages end with a `Co-Authored-By:` trailer naming the model that wrote the commit (controller ruling).
 - Tests: `uv run pytest -q` (1014 pass at plan time). Run one file with `uv run pytest tests/test_steering.py -q`.
-- Data paths: eval frames from `data/prepared_habitat_instr_v3/eval_desc_entry.json`; names from `outputs/instr_labels_v3/names_eval_gemma_d1.jsonl` (primary) and `names_eval_d1.jsonl` (fallback); steering intermediates under `data/prepared_habitat_instr_v3/steer/`; final files `data/prepared_habitat_instr_v3/eval_steer_{side,dest}_{template,composed}_{entry,goal}.json`.
+- Data paths: eval frames from `data/prepared_habitat_instr_v3/eval_desc_entry.json`; names from `outputs/instr_labels_v3/names_eval_gemma_d1.jsonl` + `names_steer_gemma_d1.jsonl` (primary, after A1) and `names_eval_d1.jsonl` (fallback); steering intermediates under `data/prepared_habitat_instr_v3/steer/`; final files `data/prepared_habitat_instr_v3/eval_steer_{side,dest}_{template,composed}_{entry,goal}.json`.
 
 ## Review Focus
 
-1. **An entry point that is not on known free floor** (side entries at u = 0 / 1, or v ≤ 0.5): the frame counts `no_start` and the stage goes on — pinned in Task 5 (`test_frame_pairs_counts_no_start`).
+1. **An entry point that back-projects to no floor point** (v ≤ 0.5): the frame counts `no_start` and the stage goes on — pinned in Task 5 (`test_frame_pairs_counts_no_start`).
 2. **A frame that raises inside a pool worker** (corrupt `state.npz`, odd meta): counted as `error` with the message kept, never a dead stage — pinned in Task 5 (`test_steer_frame_turns_an_exception_into_a_reason`).
-3. **A navmesh `snap_point` returning NaN or a missing scene `.glb`**: the route fails with a reason, no exception — pinned in Task 6.
-4. **An eval set cut short** (a record's sibling missing from predictions, or an unparseable prediction): unparseable counts as a miss and stays in the denominator; a pair without both records is skipped — pinned in Task 11.
-5. **`finalize-steer` run before the compose job finished**: refuses when > 1% of pairs have no compose row, unless `--allow-missing` — pinned in Task 10.
+3. **A navmesh `snap_point` returning NaN or a missing scene `.glb`**: the request fails with a reason, no exception — pinned in Task 8 (`tests/test_navmesh_plan.py`).
+4. **An eval set cut short** (a record's sibling missing from predictions, or an unparseable prediction): unparseable counts as a miss and stays in the denominator; a pair without both records is skipped — pinned in Task 13.
+5. **`finalize-steer` run before the compose job finished**: refuses when > 1% of pairs have no compose row, unless `--allow-missing` — pinned in Task 12.
 
 ---
 
@@ -1274,38 +1276,399 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Navmesh check (habitat env)
+### Task 6: Builders take a planner; clearance 0.30 m; hidden stretches in the answer (Addendum A1)
 
 **Files:**
-- Create: `scripts/navmesh_check.py`
-- Test: `tests/test_navmesh_check.py`
+- Modify: `src/rover_vlm/steering.py`
+- Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: `steer/candidates_eval.jsonl` rows (`pair_id, scene_id, floor_y, routes[{tag, route_xz}]`); in `main()` only: `roverbench.scene.navmesh.{load_pathfinder, recompute_navmesh}` from `../spaceitup-habitat/src`.
-- Produces: `steer/navmesh_eval.json` = `{"<pair_id>_<tag>": {"ok": bool, "reason": str|null}}`; pure functions `densify_xz`, `route_ok(pf, pts_xz, floor_y, tol_m) -> (bool, str|None)`, `find_scene_glb(root, scene_id) -> Path|None`, `check_candidates(rows, get_pf, tol_m) -> dict`.
+- Consumes: Tasks 1–5 (`traversable`, `plan_route`, `side_routes`, `side_pair`, `dest_route`, `frame_pairs`, `answer_path`, `_rounded`); `route_events.{first_blocker, ROUTE_STEP_M}`; `landmarks.MIN_FWD_M`.
+- Produces (Tasks 8–9 rely on these exact names):
+  - `CLEAR_M = 0.30` (was 0.45)
+  - **planner callable** `plan(frame, waypoints_xz) -> np.ndarray (N, 2) | None`
+  - `map_planner(clear_m=CLEAR_M)` — A* on the frame's own map (the unit tests' stand-in)
+  - `request_key(frame_name, waypoints_xz) -> str`
+  - `recording_planner(requests: dict) -> plan` (plans nothing, records `key -> waypoints`)
+  - `lookup_planner(routes: dict) -> plan` (answers from `{key: route_xz | None}`)
+  - `answer_path(cam, route_xz, frame=None) -> list | None` — `None` when a point is < `MIN_FWD_M` in front of the camera; with `frame`, `v = 0` where `first_blocker` finds an occupied cell
+  - new signatures: `side_routes(frame, start, blob, plan)`, `side_pair(frame, meta, start, blob, plan)`, `dest_route(frame, meta, start, blob, plan)`, `frame_pairs(sample_dir, start_uv, names, fallback, kinds, plan)`
+  - reason `no_free_side` is gone (the planner decides); new reason `behind_camera`
+
+Why: Addendum A1 — the frame-map planner kept 0 pairs on real frames; routes now come from the scene navmesh, planned in the `habitat` env between two uv passes (Task 8). The builders therefore take the planner as an argument.
+
+- [ ] **Step 1: Update the existing tests and write the new ones**
+
+In `tests/test_steering.py`:
+1. `test_traversable_keeps_clearance_unknown_and_frame`: call `st.traversable(_grid(s), CAM, clear_m=0.45)` (the test pins the mechanism at the old radius; the default is now 0.30).
+2. Every call of `st.side_pair(frame, meta, mask, START, blob)` becomes `st.side_pair(frame, meta, START, blob, st.map_planner())`; every `st.dest_route(frame, meta, mask, START, b)` becomes `st.dest_route(frame, meta, START, b, st.map_planner())`; every `st.frame_pairs(sd, uv, names, fb, kinds)` gains a last argument `st.map_planner()`. `_frame` keeps returning `(meta, frame, mask)` (the two-sided test still plans with the mask).
+3. In `test_frame_pairs_counts_no_start_and_no_names` nothing else changes (a start above the horizon is still `no_start`).
+
+Append:
+
+```python
+def test_answer_path_marks_floor_behind_an_obstacle_hidden(tmp_path):
+    _, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    path = st.answer_path(frame.cam, [(3.4, 1.2), (2.5, 3.6)], frame)    # from beside the box to straight behind it
+    assert path[0][2] == 1                                   # near the entry: seen
+    assert path[-1][2] == 0                                  # 0.7 m behind the box, straight behind it
+    assert st.answer_path(frame.cam, [(2.5, 0.3), (2.5, 2.0)], frame) is None   # starts 0.1 m from the camera
+
+
+def test_planners_record_look_up_and_agree(tmp_path):
+    meta, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
+    blob = int(frame.lab[54, 50])
+    reqs = {}
+    pair, why = st.side_pair(frame, meta, START, blob, st.recording_planner(reqs))
+    assert pair is None and why == "plan_failed" and len(reqs) == 2 * len(st.STOP_BEYOND_M)
+    assert all(k.startswith("f|") for k in reqs)
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    looked, _ = st.side_pair(frame, meta, START, blob, st.lookup_planner(routes))
+    ref, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
+    assert looked["routes"][0]["route_xz"] == ref["routes"][0]["route_xz"]
+    assert st.request_key("f", [(1.0, 2.0)]) == "f|1.000,2.000"
+
+
+def test_frame_pairs_with_recorded_then_looked_up_routes(tmp_path):
+    sd = _sample(tmp_path / "g", _dest_state())
+    _, frame = load_frame(sd)
+    a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])
+    names = {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}
+    reqs = {}
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.recording_planner(reqs))
+    assert pairs == [] and reqs
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    pairs, reasons = st.frame_pairs(sd, [0.5, 1.0], names, None, {}, st.lookup_planner(routes))
+    assert [p["pair_id"] for p in pairs if p["slice"] == "dest"] == [f"steer_dest_g_b{a}_b{b}"]
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `uv run pytest tests/test_steering.py -q`
+Expected: FAIL — `side_pair()` takes the old arguments / `map_planner` missing.
+
+- [ ] **Step 3: Implement**
+
+In `src/rover_vlm/steering.py`:
+
+```python
+CLEAR_M = 0.30      # Addendum A1: navmesh bake radius and via clearance (d1 GT routes keep 0.44-0.51 m)
+```
+
+(add `MIN_FWD_M` to the `.landmarks` import and `ROUTE_STEP_M, first_blocker` to the `.route_events` import)
+
+```python
+def answer_path(cam, route_xz, frame=None):
+    """[x, y, v] waypoints of a floor route, built as the d1 answers are: densified at
+    ROUTE_STEP_M, projected, v = 0 where the frame map (when given) has an occupied cell between
+    the camera and the point (route_events.first_blocker), clipped to the unit square, resampled
+    with transitions. None when any point is less than MIN_FWD_M in front of the camera."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    uv, fwd = cam.uv(pts)
+    if (fwd < MIN_FWD_M).any():
+        return None
+    hidden = [frame is not None and first_blocker(frame, p) is not None for p in pts]
+    clipped = clip_polyline_unit([(float(u), float(v), h) for (u, v), h in zip(uv, hidden)])
+    return [list(w) for w in resample_with_transitions(clipped)]
+
+
+def map_planner(clear_m=CLEAR_M):
+    """plan(frame, waypoints_xz) on the frame's own map (Task 1's A*): the unit tests' stand-in
+    for the navmesh (synthetic scenes have none). Masks are cached per frame."""
+    masks = {}
+
+    def plan(frame, waypoints_xz):
+        if frame.name not in masks:
+            masks[frame.name] = traversable(frame.grid, frame.cam, clear_m)
+        return plan_route(frame.grid, masks[frame.name], waypoints_xz)
+    return plan
+
+
+def request_key(frame_name, waypoints_xz):
+    """Stable id of one planning request: the frame and its waypoints to the millimetre."""
+    return frame_name + "|" + ";".join(f"{x:.3f},{z:.3f}" for x, z in np.asarray(waypoints_xz, float))
+
+
+def recording_planner(requests):
+    """plan() that plans nothing and records each request in `requests` (key -> waypoints):
+    steer-propose runs the builders with it to learn what navmesh_plan.py must plan."""
+    def plan(frame, waypoints_xz):
+        requests[request_key(frame.name, waypoints_xz)] = _rounded(waypoints_xz)
+        return None
+    return plan
+
+
+def lookup_planner(routes):
+    """plan() answering from navmesh routes {key: route_xz or None} (navmesh_plan.py output)."""
+    def plan(frame, waypoints_xz):
+        r = routes.get(request_key(frame.name, waypoints_xz))
+        return None if r is None else np.asarray(r, float)
+    return plan
+```
+
+`side_routes(frame, start, blob, plan)`: drop the `mask` argument and the `snap(...) is None -> "no_free_side"` check; plan each side with `plan(frame, [start, via[s], stop])`; everything else as before (it still returns `"too_near"` / `"plan_failed"`).
+
+`side_pair(frame, meta, start, blob, plan)`: call `side_routes(frame, start, blob, plan)`; build each path with `path = answer_path(frame.cam, routes[s], frame)`; `if path is None: return None, "behind_camera"` before the existing `len(path) < 2` check.
+
+`dest_route(frame, meta, start, blob, plan)`: `route = plan(frame, [start, q - d * DEST_GAP_M])`; same `answer_path(..., frame)` / `behind_camera` handling.
+
+`frame_pairs(sample_dir, start_uv, names, fallback, kinds, plan)`: delete the `mask = traversable(...)` line and the `snap(...) is None` start test (the planner snaps); `no_start` now means only `entry_floor(...) is None`; pass `plan` to `side_pair` / `dest_route`. Update its docstring: "`plan` is a planner callable (map_planner in tests, lookup_planner in the steer stage)".
+
+`traversable`, `snap`, `plan_route` stay: `map_planner` uses them.
+
+In `scripts/prepare_habitat_instr.py`, `steer_frame` calls `frame_pairs(..., kinds)` without a planner — leave it for Task 8, which rewrites the stage; to keep the suite green now, pass `steering.map_planner()` there with a `# replaced in Task 8` comment.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `uv run pytest tests/test_steering.py -q && uv run pytest -q`
+Expected: all pass. If a synthetic scene changes outcome at 0.30 m (e.g. the second-obstacle test), print both routes and adjust only the scene, never the rule; say so in the report.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/rover_vlm/steering.py tests/test_steering.py scripts/prepare_habitat_instr.py
+git commit -m "feat: steering builders take a planner (navmesh-ready); 0.30 m clearance; hidden answer stretches
+
+Co-Authored-By: <your model's trailer>"
+```
+
+---
+
+### Task 7: Name every visible object (`steer-objects`, `--all-objects`, `STAGE=steer_names`)
+
+**Files:**
+- Modify: `src/rover_vlm/steering.py`
+- Modify: `scripts/prepare_habitat_instr.py`
+- Modify: `scripts/label_descriptions.py`
+- Modify: `slurm/label_descriptions.sbatch`
+- Test: `tests/test_steering.py`, `tests/test_slurm_thread_caps.py`
+
+**Interfaces:**
+- Consumes: `route_events.{load_frame, _blob_cells, visible_cells, object_outline, WALL_EXTENT_M, MIN_VISIBLE_CELLS, MIN_AREA}`; `steering.steer_frames` (Task 5).
+- Produces:
+  - `steering.object_rows(sample_dir, image, skip_ids=()) -> list[dict]` — rows `{object_id, kind_hint: "object", image, polygon, bbox, crop_box, area, depth_fallback}` (the fields `descriptions.label_object` reads)
+  - stage `prepare_habitat_instr.py steer-objects` → `steer/objects_eval.jsonl`, `steer/objects_meta.json`
+  - `label_descriptions.py --stage name --all-objects --objects FILE --out FILE` (no `--events`)
+  - `STAGE=steer_names sbatch slurm/label_descriptions.sbatch` → `outputs/instr_labels_v3/names_steer_gemma_d1.jsonl` (Gemma)
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_navmesh_check.py`:
+Append to `tests/test_steering.py`:
 
 ```python
-"""navmesh_check: verdict logic with a fake PathFinder (habitat_sim is not imported here)."""
+def test_object_rows_cover_visible_non_wall_objects(tmp_path):
+    s = _dest_state()
+    s[90:94, 0:100] = OCC                       # a wall across the far end (longer than WALL_EXTENT_M)
+    sd = _sample(tmp_path / "g", s)
+    _, frame = load_frame(sd)
+    a, b, w = int(frame.lab[70, 70]), int(frame.lab[70, 30]), int(frame.lab[92, 50])
+    rows = st.object_rows(sd, "/img.png")
+    ids = {r["object_id"] for r in rows}
+    assert ids == {f"g:b{a}", f"g:b{b}"}                         # the wall is left out
+    assert all(r["kind_hint"] == "object" and r["image"] == "/img.png" and len(r["polygon"]) >= 3 for r in rows)
+    assert {r["object_id"] for r in st.object_rows(sd, "/img.png", skip_ids={f"g:b{a}"})} == {f"g:b{b}"}
+    assert st.object_rows(tmp_path / "missing", "/img.png") == []
+
+
+def _label_desc():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "label_descriptions", Path(__file__).resolve().parent.parent / "scripts" / "label_descriptions.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_label_descriptions_all_objects_needs_no_events(tmp_path, monkeypatch, capsys):
+    ld = _label_desc()
+    objs = tmp_path / "objects.jsonl"
+    objs.write_text(json.dumps({"object_id": "g:b1", "kind_hint": "object", "image": "x", "polygon": [],
+                                "crop_box": None, "bbox": None}) + "\n")
+    out = tmp_path / "names.jsonl"
+    out.write_text(json.dumps({"id": "g:b1", "passed": True, "name": "sofa"}) + "\n")   # already done
+    monkeypatch.setattr("sys.argv", ["x", "--stage", "name", "--all-objects", "--objects", str(objs),
+                                     "--out", str(out), "--resume"])
+    ld.main()                                                    # nothing to label: no endpoint needed
+    assert "1 items, 0 to label" in capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", ["x", "--stage", "compose", "--all-objects", "--out", str(out)])
+    with pytest.raises(SystemExit):
+        ld.main()
+```
+
+Append to `tests/test_slurm_thread_caps.py`:
+
+```python
+def test_label_descriptions_has_a_steer_names_stage():
+    text = (SLURM / "label_descriptions.sbatch").read_text()
+    assert '"$STAGE" = "steer_names"' in text and "--all-objects" in text
+    assert "names_steer_gemma_d1.jsonl" in text and 'serve "$GEMMA_MODEL"' in text
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `uv run pytest tests/test_steering.py tests/test_slurm_thread_caps.py -q`
+Expected: FAIL (`object_rows` missing; `--all-objects` unknown; no `steer_names` stage).
+
+- [ ] **Step 3: Implement**
+
+`src/rover_vlm/steering.py` (imports: `visible_cells, object_outline, MIN_AREA` from `.route_events`):
+
+```python
+def object_rows(sample_dir, image, skip_ids=()):
+    """One naming row per visible non-wall object of a frame (Addendum A1), as d1's object rows:
+    blobs shorter than WALL_EXTENT_M, with >= MIN_VISIBLE_CELLS visible cells and an outline of
+    at least MIN_AREA; ids in skip_ids (already named) are left out."""
+    sd = Path(sample_dir)
+    if not (sd / "state.npz").exists():
+        return []
+    _, frame = load_frame(sd)
+    out = []
+    for b, (cells, xz) in sorted(_blob_cells(frame).items()):
+        oid = f"{frame.name}:b{b}"
+        if oid in skip_ids or float(np.hypot(*np.ptp(xz, axis=0))) >= WALL_EXTENT_M:
+            continue
+        vis = visible_cells(frame, cells, int(b))
+        if len(vis) < MIN_VISIBLE_CELLS:
+            continue
+        o = object_outline(frame, vis)
+        if o["area"] < MIN_AREA:
+            continue
+        out.append({"object_id": oid, "kind_hint": "object", "image": image,
+                    **{k: o[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")}})
+    return out
+```
+
+`scripts/prepare_habitat_instr.py` — docstring line `uv run scripts/prepare_habitat_instr.py steer-objects` in the steering block, and:
+
+```python
+def steer_objects_frame(args):
+    item, skip = args
+    try:
+        return steering.object_rows(item["sample_dir"], item["image"], skip), None
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted error, not a dead stage
+        return [], f"{item['sample_id']}: {type(e).__name__}: {e}"
+
+
+def stage_steer_objects(args):
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    items = steering.steer_frames(json.loads(args.frames.read_text()))
+    if args.limit:
+        items = items[: args.limit]
+    named = {r["id"] for p in (args.names, args.fallback_names) for r in _jsonl(p) if r.get("passed")}
+    with Pool(STEER_WORKERS) as pool:
+        results = pool.map(steer_objects_frame, [(i, named) for i in items], chunksize=8)
+    rows = [r for rs, _ in results for r in rs]
+    errors = [e for _, e in results if e]
+    (out / "objects_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    meta = {"frames": len(items), "objects": len(rows), "already_named": len(named), "errors": errors[:20],
+            "n_errors": len(errors)}
+    (out / "objects_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+```
+
+with subparser `steer-objects` (`--frames`, `--names`, `--fallback-names`, `--out-dir`, `--limit`, defaults as the `steer` stage's) and its dispatch entry.
+
+`scripts/label_descriptions.py`:
+- docstring: add
+  ```
+  # steering (Addendum A1): name every row of an objects file, no routes
+  uv run scripts/label_descriptions.py --stage name --all-objects \
+      --objects data/prepared_habitat_instr_v3/steer/objects_eval.jsonl \
+      --out outputs/instr_labels_v3/names_steer_gemma_d1.jsonl --concurrency 8 --resume
+  ```
+- `--events` no longer `required=True` (help: "events_*.jsonl (not with --all-objects)"); new `p.add_argument("--all-objects", action="store_true", help="stage name: name every row of --objects; no --events (steering, Addendum A1)")`.
+- after parsing:
+  ```python
+  if args.all_objects and args.stage != "name":
+      raise SystemExit("--all-objects is for --stage name")
+  if not args.all_objects:
+      if not args.events:
+          raise SystemExit("--events is required (unless --stage name --all-objects)")
+      check_events_schema(args.events)
+  routes = [] if args.all_objects else select_routes(jsonl(args.events), args.limit)
+  ```
+  and in the name branch, before the `--only-unusable-under` logic: `if args.all_objects: items = jsonl(args.objects)[: args.limit] if args.limit else jsonl(args.objects)` (keeping the existing branches as `elif` / `else`), skipping the `wanted`/`missing` check for this case.
+
+`slurm/label_descriptions.sbatch`: header comment
+
+```bash
+# STAGE=steer_names (2026-10-08, steering Addendum A1): Gemma names every not-yet-named visible object of
+# the eval frames (prepare_habitat_instr.py steer-objects); no compose. Then: steer-propose.
+#     STAGE=steer_names sbatch slurm/label_descriptions.sbatch
+```
+
+and, just before `if [ "$NAMER" = "cosmos" ]; then`:
+
+```bash
+if [ "$STAGE" = "steer_names" ]; then
+    SD=data/prepared_habitat_instr_v3/steer
+    [ -f "$SD/objects_eval.jsonl" ] || { echo "missing $SD/objects_eval.jsonl — run prepare_habitat_instr.py steer-objects"; exit 1; }
+    serve "$GEMMA_MODEL"
+    steer_names=(--stage name --all-objects --objects "$SD/objects_eval.jsonl" --out "$OUT/names_steer_gemma_d1.jsonl"
+                 --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    echo; echo "=============== name: steer objects (pass 1) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
+    echo; echo "=============== name: steer objects (pass 2, retries errors) ==============="
+    "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
+    echo "steer names done: uv run scripts/prepare_habitat_instr.py steer-propose"
+    exit 0
+fi
+```
+
+- [ ] **Step 4: Run the tests, then a smoke run**
+
+Run: `uv run pytest tests/test_steering.py tests/test_slurm_thread_caps.py -q && uv run pytest -q && bash -n slurm/label_descriptions.sbatch`. Then (CPU, OMP 1, 4 workers) `uv run scripts/prepare_habitat_instr.py steer-objects --limit 40 --out-dir <scratchpad>/steer-smoke` and paste `objects_meta.json` into the report (expect `n_errors: 0` and objects ≈ 1–2 per frame).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/rover_vlm/steering.py scripts/prepare_habitat_instr.py scripts/label_descriptions.py slurm/label_descriptions.sbatch tests/test_steering.py tests/test_slurm_thread_caps.py
+git commit -m "feat: steer-objects + --all-objects + STAGE=steer_names — name every visible eval object
+
+Co-Authored-By: <your model's trailer>"
+```
+
+---
+
+### Task 8: Propose → navmesh plan → steer (`steer-propose`, `scripts/navmesh_plan.py`, `steer`)
+
+**Files:**
+- Create: `scripts/navmesh_plan.py`
+- Create: `tests/test_navmesh_plan.py`
+- Modify: `scripts/prepare_habitat_instr.py` (rewrite `_steer_init` / `steer_frame` / `stage_steer`; add `stage_steer_propose`)
+- Test: `tests/test_steering.py`
+
+**Interfaces:**
+- Consumes: Task 6 planners (`recording_planner`, `lookup_planner`, `request_key`), `frame_pairs(..., plan)`; `steering.load_names`; in `navmesh_plan.py`'s `main()` only: `roverbench.scene.navmesh.{load_pathfinder, recompute_navmesh}` and `habitat_sim.ShortestPath`.
+- Produces:
+  - `steer/requests_eval.jsonl` rows `{key, sample_id, scene_id, floor_y, waypoints_xz}` (`steer-propose`)
+  - `steer/routes_eval.json` = `{key: {"route_xz": [[x, z], ...] | null, "reason": str | null}}` (`navmesh_plan.py`)
+  - `steer/candidates_eval.jsonl`, `steer/steer_meta.json` (as Task 5) and `steer/names_primary_eval.jsonl` (d1 Gemma + steer Gemma name rows — the compose job's `--names`) (`steer`)
+  - `navmesh_plan.py` pure functions: `snap_xz(pf, xz, floor_y, tol)`, `plan_request(pf, waypoints_xz, floor_y, find_path, tol) -> (route | None, reason | None)`, `plan_all(rows, get_pf, find_path, tol) -> dict`, `find_scene_glb(root, scene_id)`
+  - `_steer_init(names, fallback, kinds, routes)` and `steer_frame(item) -> (pairs, reasons, error, requests)`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_navmesh_plan.py`:
+
+```python
+"""navmesh_plan: request planning with a fake PathFinder (habitat_sim is not imported here)."""
 import importlib.util
 from pathlib import Path
 
 import numpy as np
 
 _SPEC = importlib.util.spec_from_file_location(
-    "navmesh_check", Path(__file__).resolve().parent.parent / "scripts" / "navmesh_check.py")
-nc = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(nc)
+    "navmesh_plan", Path(__file__).resolve().parent.parent / "scripts" / "navmesh_plan.py")
+npl = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(npl)
 
 
 class FakePF:
     """Navigable floor: the square 0 <= x, z <= 2 at y = 1.0."""
-    def is_navigable(self, p, max_y_delta):
-        return 0 <= p[0] <= 2 and 0 <= p[2] <= 2 and abs(p[1] - 1.0) <= max_y_delta
-
     def snap_point(self, p):
         return np.array([min(max(p[0], 0), 2), 1.0, min(max(p[2], 0), 2)], np.float32)
 
@@ -1315,22 +1678,26 @@ class NanPF(FakePF):
         return np.array([np.nan, np.nan, np.nan], np.float32)
 
 
-def test_route_inside_passes_and_outside_fails():
-    assert nc.route_ok(FakePF(), [(0.2, 0.2), (1.8, 1.8)], 1.0) == (True, None)
-    assert nc.route_ok(FakePF(), [(0.2, 0.2), (2.05, 1.0)], 1.0, tol_m=0.1) == (True, None)   # within tolerance
-    assert nc.route_ok(FakePF(), [(0.2, 0.2), (2.5, 1.0)], 1.0) == (False, "off_navmesh")
-    assert nc.route_ok(NanPF(), [(0.2, 0.2), (2.5, 1.0)], 1.0) == (False, "off_navmesh")
-    assert nc.route_ok(FakePF(), [(0.2, 0.2)], None) == (False, "no_floor")
+def straight(pf, a, b):
+    return [a, (a + b) / 2, b]
 
 
-def test_check_candidates_ids_and_missing_scene():
-    rows = [{"pair_id": "p", "scene_id": "s1", "floor_y": 1.0,
-             "routes": [{"tag": "L", "route_xz": [[0.2, 0.2], [1.0, 1.0]]},
-                        {"tag": "R", "route_xz": [[0.2, 0.2], [3.0, 1.0]]}]},
-            {"pair_id": "q", "scene_id": "gone", "floor_y": 1.0, "routes": [{"tag": "A", "route_xz": [[0, 0], [1, 1]]}]}]
-    out = nc.check_candidates(rows, lambda s: FakePF() if s == "s1" else None)
-    assert out == {"p_L": {"ok": True, "reason": None}, "p_R": {"ok": False, "reason": "off_navmesh"},
-                   "q_A": {"ok": False, "reason": "no_navmesh"}}
+def test_plan_request_joins_legs_and_reports_reasons():
+    route, why = npl.plan_request(FakePF(), [(0.2, 0.2), (1.0, 1.8), (1.8, 0.2)], 1.0, straight)
+    assert why is None and route[0] == [0.2, 0.2] and route[-1] == [1.8, 0.2]
+    assert [1.0, 1.8] in route and len(route) == 5                      # legs joined, shared via kept once
+    assert npl.plan_request(FakePF(), [(0.2, 0.2), (2.5, 1.0)], 1.0, straight) == (None, "off_navmesh")
+    assert npl.plan_request(NanPF(), [(0.2, 0.2), (1.0, 1.0)], 1.0, straight) == (None, "off_navmesh")
+    assert npl.plan_request(FakePF(), [(0.2, 0.2), (1.0, 1.0)], None, straight) == (None, "no_floor")
+    assert npl.plan_request(FakePF(), [(0.2, 0.2), (1.0, 1.0)], 1.0, lambda pf, a, b: None) == (None, "no_path")
+
+
+def test_plan_all_keys_and_missing_scene():
+    rows = [{"key": "f|a", "scene_id": "s1", "floor_y": 1.0, "waypoints_xz": [[0.2, 0.2], [1.0, 1.0]]},
+            {"key": "g|b", "scene_id": "gone", "floor_y": 1.0, "waypoints_xz": [[0.2, 0.2], [1.0, 1.0]]}]
+    out = npl.plan_all(rows, lambda s: FakePF() if s == "s1" else None, straight)
+    assert out["f|a"]["reason"] is None and out["f|a"]["route_xz"][-1] == [1.0, 1.0]
+    assert out["g|b"] == {"route_xz": None, "reason": "no_navmesh"}
 
 
 def test_find_scene_glb_skips_semantic(tmp_path):
@@ -1338,36 +1705,75 @@ def test_find_scene_glb_skips_semantic(tmp_path):
     d.mkdir(parents=True)
     (d / "abc.semantic.glb").write_text("")
     (d / "abc.basis.glb").write_text("")
-    assert nc.find_scene_glb(tmp_path, "00803-abc") == d / "abc.basis.glb"
-    assert nc.find_scene_glb(tmp_path, "nope") is None
+    assert npl.find_scene_glb(tmp_path, "00803-abc") == d / "abc.basis.glb"
+    assert npl.find_scene_glb(tmp_path, "nope") is None
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
-
-Run: `uv run pytest tests/test_navmesh_check.py -q`
-Expected: FAIL — file not found.
-
-- [ ] **Step 3: Write the script**
-
-Create `scripts/navmesh_check.py`:
+In `tests/test_steering.py`, replace `test_steer_frame_turns_an_exception_into_a_reason` with:
 
 ```python
-"""Check steering routes on the scene navmesh, baked for the rover's clearance (habitat env).
+def _prep():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
+    prep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prep)
+    return prep
 
-Runs in the `habitat` conda env (habitat_sim 0.3.3, Python 3.9), NOT in the uv .venv. CPU only:
-the navmesh is re-baked per scene at agent radius --clear-m with the Simulator built without a
-renderer (spaceitup-habitat's roverbench.scene.navmesh.recompute_navmesh, ~1 s per scene) and
-cached under outputs/navmesh_cache/.
+
+def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
+    prep = _prep()
+
+    def boom(*a, **k):
+        raise ValueError("bad map")
+    monkeypatch.setattr(prep, "frame_pairs", boom)
+    prep._steer_init({}, None, {}, None)
+    pairs, reasons, err, reqs = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "start_uv": [0.5, 1.0]})
+    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err and reqs == {}
+
+
+def test_steer_frame_records_then_looks_up(tmp_path):
+    prep = _prep()
+    sd = _sample(tmp_path / "g", _dest_state())
+    _, frame = load_frame(sd)
+    a, b = int(frame.lab[70, 70]), int(frame.lab[70, 30])
+    names = {f"g:b{a}": "armchair", f"g:b{b}": "sofa"}
+    item = {"sample_id": "g", "sample_dir": str(sd), "start_uv": [0.5, 1.0], "viewpoint": "g", "is_aug": False,
+            "scene_id": "sc", "image": "/img.png"}
+    prep._steer_init(names, None, {}, None)
+    pairs, _, err, reqs = prep.steer_frame(item)
+    assert err is None and pairs == [] and reqs
+    direct = st.map_planner()
+    routes = {k: (lambda r: None if r is None else r.tolist())(direct(frame, w)) for k, w in reqs.items()}
+    prep._steer_init(names, None, {}, routes)
+    pairs, _, err, reqs = prep.steer_frame(item)
+    assert err is None and reqs == {} and "dest" in [p["slice"] for p in pairs]
+    assert pairs[0]["floor_y"] == pytest.approx(0.1) and pairs[0]["viewpoint"] == "g"
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `uv run pytest tests/test_navmesh_plan.py tests/test_steering.py -q`
+Expected: FAIL (script missing; `_steer_init` takes 3 arguments).
+
+- [ ] **Step 3: Write `scripts/navmesh_plan.py`**
+
+```python
+"""Plan steering routes on the scene navmesh (habitat env; Addendum A1).
+
+Runs in the `habitat` conda env (habitat_sim 0.3.3, Python 3.9), NOT the uv .venv. Call the env's
+python directly — `conda run` inside this repo picks up .python-version (pyenv 3.12) and fails:
 
     export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
-    conda run -n habitat python scripts/navmesh_check.py \
-        --routes data/prepared_habitat_instr_v3/steer/candidates_eval.jsonl \
-        --out data/prepared_habitat_instr_v3/steer/navmesh_eval.json
+    ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py \
+        --requests data/prepared_habitat_instr_v3/steer/requests_eval.jsonl \
+        --out data/prepared_habitat_instr_v3/steer/routes_eval.json
 
-Every route point, densified to 5 cm, must be navigable at the frame's floor height or snap
-onto the navmesh within --tol-m. Writes {"<pair_id>_<tag>": {"ok", "reason"}}; a scene without a
-.basis.glb fails its routes with reason "no_navmesh". The frame map can miss low obstacles that
-the scene mesh has: this is the check that catches them.
+Per scene the navmesh is baked at agent radius --clear-m (CPU, create_renderer=False, via
+spaceitup-habitat's roverbench.scene.navmesh.recompute_navmesh; ~1 s per scene) and cached under
+outputs/navmesh_cache/. Each request's waypoints are snapped onto the navmesh (within --snap-m,
+at the frame's floor height) and joined by one geodesic per leg. Writes
+{key: {"route_xz": [[x, z], ...] | null, "reason": null | "off_navmesh" | "no_path" | "no_floor" | "no_navmesh"}}.
 """
 from __future__ import annotations
 
@@ -1384,35 +1790,49 @@ HM3D_ROOT = Path("/nfs/projects/spaceitup/rover_navigation/data/hm3d")
 ROVERBENCH_SRC = REPO_ROOT.parent / "spaceitup-habitat" / "src"
 CACHE = REPO_ROOT / "outputs" / "navmesh_cache"
 STEER = REPO_ROOT / "data" / "prepared_habitat_instr_v3" / "steer"
-CLEAR_M = 0.45      # = rover_vlm.steering.CLEAR_M (this script runs outside the uv env)
-TOL_M = 0.1         # rasterisation slack: a 5 cm grid route may graze the baked navmesh edge
-STEP_M = 0.05
+CLEAR_M = 0.30      # = rover_vlm.steering.CLEAR_M (this script runs outside the uv env)
+SNAP_M = 0.3        # = rover_vlm.steering.SNAP_M
 MAX_Y_DELTA = 0.5
 
 
-def densify_xz(pts, step=STEP_M):
-    pts = np.asarray(pts, float)
-    out = [pts[0]]
-    for a, b in zip(pts[:-1], pts[1:]):
-        n = max(1, int(np.ceil(np.linalg.norm(b - a) / step)))
-        out += [a + (b - a) * t / n for t in range(1, n + 1)]
-    return np.array(out)
+def snap_xz(pf, xz, floor_y, tol=SNAP_M):
+    """The navmesh point nearest to floor point xz, or None when it is farther than tol (or NaN)."""
+    p = np.array([xz[0], floor_y, xz[1]], np.float32)
+    s = np.asarray(pf.snap_point(p), float)
+    if (not np.all(np.isfinite(s)) or abs(s[1] - floor_y) > MAX_Y_DELTA
+            or np.hypot(s[0] - xz[0], s[2] - xz[1]) > tol):
+        return None
+    return s
 
 
-def route_ok(pf, pts_xz, floor_y, tol_m=TOL_M):
-    """(True, None) when every densified point is navigable or snaps within tol_m, else
-    (False, reason)."""
+def plan_request(pf, waypoints_xz, floor_y, find_path, tol=SNAP_M):
+    """(route_xz, None) through the snapped waypoints, one geodesic per leg (find_path(pf, a, b) ->
+    list of 3-D points or None); else (None, reason)."""
     if floor_y is None:
-        return False, "no_floor"
-    for x, z in densify_xz(pts_xz):
-        p = np.array([x, floor_y, z], np.float32)
-        if pf.is_navigable(p, MAX_Y_DELTA):
+        return None, "no_floor"
+    pts = [snap_xz(pf, w, floor_y, tol) for w in waypoints_xz]
+    if any(p is None for p in pts):
+        return None, "off_navmesh"
+    out = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        leg = find_path(pf, a, b)
+        if leg is None or len(leg) < 2:
+            return None, "no_path"
+        leg = [[round(float(q[0]), 3), round(float(q[2]), 3)] for q in leg]
+        out += leg if not out else leg[1:]
+    return out, None
+
+
+def plan_all(rows, get_pf, find_path, tol=SNAP_M):
+    out = {}
+    for row in rows:
+        pf = get_pf(row["scene_id"])
+        if pf is None:
+            out[row["key"]] = {"route_xz": None, "reason": "no_navmesh"}
             continue
-        s = np.asarray(pf.snap_point(p), float)
-        if (not np.all(np.isfinite(s)) or abs(s[1] - floor_y) > MAX_Y_DELTA
-                or np.hypot(s[0] - x, s[2] - z) > tol_m):
-            return False, "off_navmesh"
-    return True, None
+        route, why = plan_request(pf, row["waypoints_xz"], row.get("floor_y"), find_path, tol)
+        out[row["key"]] = {"route_xz": route, "reason": why}
+    return out
 
 
 def find_scene_glb(root, scene_id):
@@ -1421,31 +1841,18 @@ def find_scene_glb(root, scene_id):
     return hits[0] if hits else None
 
 
-def check_candidates(rows, get_pf, tol_m=TOL_M):
-    out = {}
-    for row in rows:
-        pf = get_pf(row["scene_id"])
-        for r in row["routes"]:
-            rid = f"{row['pair_id']}_{r['tag']}"
-            if pf is None:
-                out[rid] = {"ok": False, "reason": "no_navmesh"}
-                continue
-            ok, why = route_ok(pf, r["route_xz"], row.get("floor_y"), tol_m)
-            out[rid] = {"ok": ok, "reason": why}
-    return out
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--routes", type=Path, default=STEER / "candidates_eval.jsonl")
-    p.add_argument("--out", type=Path, default=STEER / "navmesh_eval.json")
+    p.add_argument("--requests", type=Path, default=STEER / "requests_eval.jsonl")
+    p.add_argument("--out", type=Path, default=STEER / "routes_eval.json")
     p.add_argument("--clear-m", type=float, default=CLEAR_M)
-    p.add_argument("--tol-m", type=float, default=TOL_M)
+    p.add_argument("--snap-m", type=float, default=SNAP_M)
     p.add_argument("--hm3d-root", type=Path, default=HM3D_ROOT)
     p.add_argument("--roverbench-src", type=Path, default=ROVERBENCH_SRC)
     p.add_argument("--cache", type=Path, default=CACHE)
     args = p.parse_args()
     sys.path.insert(0, str(args.roverbench_src))
+    import habitat_sim
     from roverbench.scene.navmesh import load_pathfinder, recompute_navmesh
 
     args.cache.mkdir(parents=True, exist_ok=True)
@@ -1463,45 +1870,126 @@ def main() -> None:
             print(f"scene {scene_id}: {'ok' if pfs[scene_id] is not None else 'NO NAVMESH'}", flush=True)
         return pfs[scene_id]
 
-    rows = [json.loads(x) for x in args.routes.read_text().splitlines() if x.strip()]
-    verdicts = check_candidates(rows, get_pf, args.tol_m)
-    args.out.write_text(json.dumps(verdicts))
-    counts = Counter("ok" if v["ok"] else v["reason"] for v in verdicts.values())
-    print(f"{len(verdicts)} routes of {len(rows)} pairs: {dict(counts)} -> {args.out}")
+    def find_path(pf, a, b):
+        sp = habitat_sim.ShortestPath()
+        sp.requested_start = np.asarray(a, np.float32)
+        sp.requested_end = np.asarray(b, np.float32)
+        return [np.asarray(q, float) for q in sp.points] if pf.find_path(sp) else None
+
+    rows = [json.loads(x) for x in args.requests.read_text().splitlines() if x.strip()]
+    routes = plan_all(rows, get_pf, find_path, args.snap_m)
+    args.out.write_text(json.dumps(routes))
+    counts = Counter("ok" if v["reason"] is None else v["reason"] for v in routes.values())
+    print(f"{len(routes)} requests: {dict(counts)} -> {args.out}")
 
 
 if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: Run the tests to see them pass**
+- [ ] **Step 4: Rewrite the steering stages in `scripts/prepare_habitat_instr.py`**
 
-Run: `uv run pytest tests/test_navmesh_check.py -q`
-Expected: 3 passed.
+```python
+def _steer_init(names, fallback, kinds, routes):
+    _STEER.update(names=names, fallback=fallback, kinds=kinds, routes=routes)
 
-- [ ] **Step 5: Check it runs in the habitat env on the smoke candidates**
 
-```bash
-export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
-uv run scripts/prepare_habitat_instr.py steer --limit 20 --out-dir /tmp/claude-steer-smoke
-conda run -n habitat python scripts/navmesh_check.py --routes /tmp/claude-steer-smoke/candidates_eval.jsonl \
-    --out /tmp/claude-steer-smoke/navmesh_eval.json --cache /tmp/claude-steer-smoke/navmesh_cache
+def steer_frame(item):
+    """(candidate pairs, reason counts, error or None, recorded requests) for one eval frame
+    (pool worker). With no routes loaded the builders only record what to plan (steer-propose);
+    with routes they build pairs from them (steer)."""
+    reqs = {}
+    plan = (steering.recording_planner(reqs) if _STEER["routes"] is None
+            else steering.lookup_planner(_STEER["routes"]))
+    try:
+        pairs, reasons = frame_pairs(item["sample_dir"], item["start_uv"], _STEER["names"],
+                                     _STEER["fallback"], _STEER["kinds"], plan)
+    except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
+        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}", {}
+    floor_y = steering.floor_height(item["sample_dir"])
+    for p in pairs:
+        p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")},
+                 floor_y=floor_y)
+    return pairs, dict(reasons), None, reqs
+
+
+def _steer_names(args):
+    """(primary name rows, (names, fallback, kinds)): primary = d1 Gemma + steer Gemma rows."""
+    prim = _jsonl(args.names)
+    if args.steer_names.exists():
+        prim += _jsonl(args.steer_names)
+    else:
+        print(f"WARNING: {args.steer_names} missing — only d1's names (run STAGE=steer_names first)")
+    return prim, steering.load_names(prim, _jsonl(args.fallback_names))
+
+
+def _run_steer_pool(args, routes):
+    items = steering.steer_frames(json.loads(args.frames.read_text()))
+    if args.limit:
+        items = items[: args.limit]
+    prim, (names, fallback, kinds) = _steer_names(args)
+    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=(names, fallback, kinds, routes)) as pool:
+        return items, prim, pool.map(steer_frame, items, chunksize=8)
+
+
+def stage_steer_propose(args):
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    items, _, results = _run_steer_pool(args, None)
+    by_id = {i["sample_id"]: i for i in items}
+    rows = {}
+    for _, _, _, reqs in results:
+        for key, wps in reqs.items():
+            it = by_id[key.split("|")[0]]
+            rows[key] = {"key": key, "sample_id": it["sample_id"], "scene_id": it["scene_id"],
+                         "floor_y": steering.floor_height(it["sample_dir"]), "waypoints_xz": wps}
+    (out / "requests_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows.values()))
+    errors = [e for _, _, e, _ in results if e]
+    print(json.dumps({"frames": len(items), "requests": len(rows), "n_errors": len(errors), "errors": errors[:20]},
+                     indent=2))
 ```
 
-Expected: one `scene ...: ok` line per scene, then `N routes of M pairs: {'ok': ..., ...}`. Most routes should be `ok` (the planner already keeps 0.45 m clearance on the frame map); if most fail `off_navmesh`, stop and report — the floor height or the coordinate frame is wrong, not the routes. Delete `/tmp/claude-steer-smoke` afterwards.
+`stage_steer` keeps Task 5's body (candidates file, `steer_meta.json`, reason counts, errors) with these changes: it loads `routes = {k: v["route_xz"] for k, v in json.loads(args.routes.read_text()).items()}` (SystemExit with the `navmesh_plan.py` command when the file is missing), runs `_run_steer_pool(args, routes)`, unpacks 4-tuples, and also writes `out / "names_primary_eval.jsonl"` from the primary rows. Arguments of both stages: `--frames`, `--names` (d1 Gemma), `--steer-names` (default `D1_LABELS / "names_steer_gemma_d1.jsonl"`), `--fallback-names`, `--out-dir`, `--limit`; `steer` also `--routes` (default `STEER_DIR / "routes_eval.json"`). Add the `steer-propose` subparser and dispatch entry; update the steering docstring block to the A1 run order:
+
+```
+    uv run scripts/prepare_habitat_instr.py steer-objects
+    STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # GPU, Gemma
+    uv run scripts/prepare_habitat_instr.py steer-propose
+    ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py        # CPU, habitat env
+    uv run scripts/prepare_habitat_instr.py steer
+    uv run scripts/prepare_habitat_instr.py steer-select
+    # after STAGE=steer sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-steer
+```
+
+Remove the Task 6 `# replaced in Task 8` map-planner line.
+
+- [ ] **Step 5: Run the tests, then the whole chain on 40 real frames**
+
+Run: `uv run pytest tests/test_navmesh_plan.py tests/test_steering.py -q && uv run pytest -q`. Then, with `SM=<scratchpad>/steer-smoke`:
+
+```bash
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+uv run scripts/prepare_habitat_instr.py steer-propose --limit 40 --out-dir $SM
+OMP_NUM_THREADS=4 ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py --requests $SM/requests_eval.jsonl \
+    --out $SM/routes_eval.json --cache $SM/navmesh_cache
+uv run scripts/prepare_habitat_instr.py steer --limit 40 --out-dir $SM --routes $SM/routes_eval.json
+```
+
+Expected: no errors; the navmesh line shows mostly `ok` and some `off_navmesh`; `steer_meta.json` lists `side:kept` / `dest:kept` (without the steer Gemma names, few anchors exist — non-zero is the check, not the yield). Paste the three outputs into the report.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/navmesh_check.py tests/test_navmesh_check.py
-git commit -m "feat: navmesh_check — steering routes on a navmesh baked at 0.45 m (habitat env)
+git add scripts/navmesh_plan.py tests/test_navmesh_plan.py scripts/prepare_habitat_instr.py tests/test_steering.py
+git commit -m "feat: steer-propose -> navmesh_plan.py (habitat env) -> steer; routes from the scene navmesh
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 7: Selection — one pair per viewpoint per slice (`steer-select`)
+### Task 9: Selection — one pair per viewpoint per slice (`steer-select`)
 
 **Files:**
 - Modify: `src/rover_vlm/steering.py`
@@ -1509,9 +1997,9 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: candidate pair rows (Task 5), verdicts (Task 6); `route_events.EVENTS_SCHEMA`; `descriptions.desc_check`.
+- Consumes: candidate pair rows (Task 8); `route_events.EVENTS_SCHEMA`; `descriptions.desc_check`.
 - Produces:
-  - `select_pairs(candidates, verdicts) -> (list[pair], Counter)`
+  - `select_pairs(candidates) -> list[pair]` (sorted by `pair_id`)
   - `pair_rows(pair) -> [row, row]` — d1 events-row schema plus steering fields:
     `id, pair_id, sibling_id, slice, kind="steer", reason=None, sample_id, viewpoint, is_aug, scene_id, image, sample_dir, events, stop, goal_xz, pose_xz, heading_xz, route_len_m, route_xz, path, desc_check, anchor, anchor_event, side, template, namer, names, style_key, separation, outlines`
   - Files `steer/events_steer_eval.jsonl` and `steer/events_meta.json` (`{"schema": EVENTS_SCHEMA, ...}` so `check_events_schema` accepts it)
@@ -1530,18 +2018,14 @@ def _cand(pid, sl, vp, aug, sep, tags=("L", "R")):
 def test_select_pairs_one_per_viewpoint_original_first_then_separation():
     cands = [_cand("a1", "side", "v1", True, 0.5), _cand("a2", "side", "v1", False, 0.2),
              _cand("b1", "side", "v2", False, 0.2), _cand("b2", "side", "v2", False, 0.3),
-             _cand("c1", "dest", "v1", False, 0.4, ("A", "B")), _cand("d1", "side", "v3", False, 0.9)]
-    ok = {f"{c['pair_id']}_{r['tag']}": {"ok": True} for c in cands for r in c["routes"]}
-    ok["d1_R"] = {"ok": False, "reason": "off_navmesh"}
-    kept, reasons = st.select_pairs(cands, ok)
-    assert [p["pair_id"] for p in kept] == ["a2", "b2", "c1"]
-    assert reasons == {"side:navmesh": 1}
+             _cand("c1", "dest", "v1", False, 0.4, ("A", "B"))]
+    assert [p["pair_id"] for p in st.select_pairs(cands)] == ["a2", "b2", "c1"]
 
 
 def test_pair_rows_carry_the_d1_schema_and_steering_fields(tmp_path):
-    meta, frame, mask = _frame(tmp_path, _box(_state(), *BOX))
+    meta, frame, _ = _frame(tmp_path, _box(_state(), *BOX))
     blob = int(frame.lab[54, 50])
-    pair, _ = st.side_pair(frame, meta, mask, START, blob)
+    pair, _ = st.side_pair(frame, meta, START, blob, st.map_planner())
     st.name_pair(pair, {f"f:b{blob}": "armchair"}, None, {})
     pair.update(pair_id="steer_side_f_b1", sample_id="f", viewpoint="f", is_aug=False, scene_id="sc",
                 image="/x.png", sample_dir=str(tmp_path / "f"), floor_y=0.1)
@@ -1555,12 +2039,12 @@ def test_pair_rows_carry_the_d1_schema_and_steering_fields(tmp_path):
     json.dumps([a, b])
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/test_steering.py -q`
 Expected: FAIL — no attribute `select_pairs`.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Implement**
 
 Append to `src/rover_vlm/steering.py`:
 
@@ -1568,19 +2052,16 @@ Append to `src/rover_vlm/steering.py`:
 GATE0_MIN_PAIRS = 150
 
 
-def select_pairs(candidates, verdicts):
-    """One pair per (slice, viewpoint): every route navmesh-ok; the original frame before its
-    yaw variants, then the largest visible separation (pair_id breaks ties). Returns
-    (kept pairs sorted by pair_id, reasons)."""
-    reasons, best = Counter(), {}
+def select_pairs(candidates):
+    """One pair per (slice, viewpoint): the original frame before its yaw variants, then the
+    largest visible separation (pair_id breaks ties). Sorted by pair_id. (Routes come from the
+    navmesh, so every candidate is navigable — Addendum A1.)"""
+    best = {}
     for p in candidates:
-        if not all((verdicts.get(f"{p['pair_id']}_{r['tag']}") or {}).get("ok") for r in p["routes"]):
-            reasons[f"{p['slice']}:navmesh"] += 1
-            continue
         key, rank = (p["slice"], p["viewpoint"]), (bool(p["is_aug"]), -p["separation"], p["pair_id"])
         if key not in best or rank < best[key][0]:
             best[key] = (rank, p)
-    return sorted((v[1] for v in best.values()), key=lambda p: p["pair_id"]), reasons
+    return sorted((v[1] for v in best.values()), key=lambda p: p["pair_id"])
 
 
 def pair_rows(pair):
@@ -1604,21 +2085,18 @@ def pair_rows(pair):
     return rows
 ```
 
-In `scripts/prepare_habitat_instr.py` add the stage, its subparser and dispatch entry:
+In `scripts/prepare_habitat_instr.py`:
 
 ```python
 def stage_steer_select(args):
     d = args.out_dir
-    if not args.navmesh.exists():
-        raise SystemExit(f"{args.navmesh} missing — run: conda run -n habitat python scripts/navmesh_check.py")
     cands = [json.loads(x) for x in (d / "candidates_eval.jsonl").read_text().splitlines() if x.strip()]
-    kept, reasons = steering.select_pairs(cands, json.loads(args.navmesh.read_text()))
+    kept = steering.select_pairs(cands)
     rows = [row for p in kept for row in steering.pair_rows(p)]
     (d / "events_steer_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     per = Counter(p["slice"] for p in kept)
     meta = {"schema": EVENTS_SCHEMA, "candidates": len(cands), "pairs": dict(per), "routes": len(rows),
-            "originals": dict(Counter(p["slice"] for p in kept if not p["is_aug"])),
-            "dropped": dict(reasons)}
+            "originals": dict(Counter(p["slice"] for p in kept if not p["is_aug"]))}
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
     for sl in ("side", "dest"):
@@ -1628,28 +2106,29 @@ def stage_steer_select(args):
 ```
 
 ```python
-    n = sub.add_parser("steer-select", help="steering: navmesh filter + one pair per viewpoint per slice")
+    n = sub.add_parser("steer-select", help="steering: one pair per viewpoint per slice; Gate 0")
     n.add_argument("--out-dir", type=Path, default=STEER_DIR)
-    n.add_argument("--navmesh", type=Path, default=STEER_DIR / "navmesh_eval.json")
 ```
+
+and `"steer-select": stage_steer_select` in the dispatch dict.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/test_steering.py -q`
-Expected: all pass.
+Run: `uv run pytest tests/test_steering.py -q && uv run pytest -q`
+Expected: all pass. Then `uv run scripts/prepare_habitat_instr.py steer-select --out-dir <scratchpad>/steer-smoke` on Task 8's smoke output: prints the meta and two GATE 0 lines (FAIL is expected on 40 frames).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/rover_vlm/steering.py scripts/prepare_habitat_instr.py tests/test_steering.py
-git commit -m "feat: steer-select — navmesh filter, one pair per viewpoint, d1-schema rows, Gate 0
+git commit -m "feat: steer-select — one pair per viewpoint, d1-schema rows, Gate 0
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 ```
 
 ---
 
-### Task 8: Geometry audit page (`--mode steer`)
+### Task 10: Geometry audit page (`--mode steer`)
 
 **Files:**
 - Modify: `scripts/audit_instruction_labels.py`
@@ -1657,7 +2136,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: `steer/events_steer_eval.jsonl` rows (Task 7); `overlay.draw_polyline`; existing `_draw_badge`, `_font`, `TEMPLATE`, `jsonl`, `check_events_schema`.
+- Consumes: `steer/events_steer_eval.jsonl` rows (Task 9); `overlay.draw_polyline`; existing `_draw_badge`, `_font`, `TEMPLATE`, `jsonl`, `check_events_schema`.
 - Produces: `sample_steer(rows, n_per_slice, seed) -> (list[[row, row]], {"side": n, "dest": n})`, `steer_item(a, b) -> dict`, `VERDICTS["steer"]`; page `outputs/steer_audit.html` titled "Steering Pair Audit".
 
 - [ ] **Step 1: Write the failing tests**
@@ -1827,7 +2306,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 9: Composed text — shared style per pair, `STAGE=steer`
+### Task 11: Composed text — shared style per pair, `STAGE=steer`
 
 **Files:**
 - Modify: `src/rover_vlm/descriptions.py` (`label_route`)
@@ -1835,8 +2314,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_descriptions.py`, `tests/test_slurm_thread_caps.py`
 
 **Interfaces:**
-- Consumes: steering rows carry `style_key = pair_id` (Task 7).
-- Produces: `label_route` picks style and shape from `row.get("style_key") or row["id"]`; `STAGE=steer` composes `data/prepared_habitat_instr_v3/steer/events_steer_eval.jsonl` → `outputs/instr_labels_v3/desc_steer_eval_d1.jsonl` (Gemma names, Cosmos fallback names).
+- Consumes: steering rows carry `style_key = pair_id` (Task 9).
+- Produces: `label_route` picks style and shape from `row.get("style_key") or row["id"]`; `STAGE=steer` composes `data/prepared_habitat_instr_v3/steer/events_steer_eval.jsonl` → `outputs/instr_labels_v3/desc_steer_eval_d1.jsonl` with `--names steer/names_primary_eval.jsonl` (d1 Gemma + steer Gemma rows, written by the `steer` stage, Task 8) and `--fallback-names names_eval_d1.jsonl` (Cosmos).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1882,7 +2361,7 @@ In `slurm/label_descriptions.sbatch`:
 
 ```bash
 # STAGE=steer (2026-10-07, steering eval): compose only, for the steering rows from
-# `prepare_habitat_instr.py steer-select`, with the existing eval names (Gemma, Cosmos fallback);
+# `prepare_habitat_instr.py steer-select`, with the merged primary names (d1 + steer Gemma, from the steer stage) and the d1 Cosmos fallback;
 # no naming. ~800 calls, < 1 h. Then: uv run scripts/prepare_habitat_instr.py finalize-steer
 #     STAGE=steer sbatch slurm/label_descriptions.sbatch
 ```
@@ -1892,9 +2371,11 @@ In `slurm/label_descriptions.sbatch`:
 ```bash
 if [ "$STAGE" = "steer" ]; then
     SD=data/prepared_habitat_instr_v3/steer
-    [ -f "$SD/events_steer_eval.jsonl" ] || { echo "missing $SD/events_steer_eval.jsonl — run prepare_habitat_instr.py steer-select"; exit 1; }
+    for f in events_steer_eval.jsonl names_primary_eval.jsonl; do
+        [ -f "$SD/$f" ] || { echo "missing $SD/$f — run prepare_habitat_instr.py steer + steer-select"; exit 1; }
+    done
     serve "$COSMOS_MODEL"
-    steer_args=(--stage compose --events "$SD/events_steer_eval.jsonl" --names "$OUT/names_eval_gemma_d1.jsonl"
+    steer_args=(--stage compose --events "$SD/events_steer_eval.jsonl" --names "$SD/names_primary_eval.jsonl"
                 --fallback-names "$OUT/names_eval_d1.jsonl" --out "$OUT/desc_steer_eval_d1.jsonl"
                 --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== compose: steer (pass 1) ==============="
@@ -1924,7 +2405,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 10: The 8 eval files (`finalize-steer`)
+### Task 12: The 8 eval files (`finalize-steer`)
 
 **Files:**
 - Modify: `src/rover_vlm/steering.py`
@@ -1932,7 +2413,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/test_steering.py`
 
 **Interfaces:**
-- Consumes: d1 entry records (base per `sample_id`); steering rows (Task 7); compose rows `desc_steer_eval_d1.jsonl` (`id, passed, description, instruction_source`); `descriptions.with_description`; `habitat_data.format_answer_goal`.
+- Consumes: d1 entry records (base per `sample_id`); steering rows (Task 9); compose rows `desc_steer_eval_d1.jsonl` (`id, passed, description, instruction_source`); `descriptions.with_description`; `habitat_data.format_answer_goal`.
 - Produces:
   - `STEER_FILES` (8 stems), `steer_record(base, row, text, source, form) -> record`, `finalize_steer(base_by_sample, rows, desc_by_id) -> {"files": {stem: [records]}, "stats": dict}`
   - record `habitat_meta`: kept base fields + `pair_id, sibling_id, kind="steer", start_uv_norm, goal_uv_norm, goal_visible=1, steer={slice, anchor, anchor_event, side, viewpoint}` + `with_description`'s `instruction, instruction_source, prompt_form, desc_check, goal_in_prompt`. No `alt_path`.
@@ -2092,7 +2573,7 @@ def stage_finalize_steer(args):
     q.add_argument("--allow-missing", action="store_true")
 ```
 
-plus `"steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer` in the dispatch dict (if not added in Task 7 yet).
+plus `"steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer` in the dispatch dict (Task 9 already added `"steer-select"`; add `"finalize-steer"`).
 
 Add a stage test for Review Focus 5 — append to `tests/test_steering.py`:
 
@@ -2134,7 +2615,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 11: Steering metrics in `eval.py`; `SETS=steer` in the eval job
+### Task 13: Steering metrics in `eval.py`; `SETS=steer` in the eval job
 
 **Files:**
 - Modify: `src/rover_vlm/eval.py`
@@ -2422,15 +2903,18 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 12: Report script and README
+### Task 14: Report script and README
 
 **Files:**
 - Create: `scripts/visualize_steering.py`
+- Modify: `src/rover_vlm/overlay.py` (new `description_panel`, moved out of `render_desc_videos.py`)
+- Modify: `scripts/render_desc_videos.py` (`panel` becomes a thin wrapper; CLI and tests unchanged)
 - Modify: `README.md` (index-only commit — see Step 5)
-- Test: `tests/test_steering.py`
+- Test: `tests/test_steering.py`, `tests/test_render_desc_videos.py` (existing, must still pass)
 
 **Interfaces:**
-- Consumes: `outputs/eval_desc/eval_steer_*/<tag>/predictions.json`; `eval.aggregate_steering_metrics`; `overlay.{draw_polyline, GT_GREY}`; data files for images.
+- Consumes: `outputs/eval_desc/eval_steer_*/<tag>/predictions.json`; `eval.aggregate_steering_metrics`; data files for images.
+- Controller Ruling 1 (pre-flight): the tile drawing is NOT copied from `render_desc_videos._tile` (verbatim duplication); it moves to `overlay.description_panel(image_path, rows, px, text_h, max_lines) -> PIL.Image` (frame with GT path thick grey, prediction orange, each row's description underneath, tiles side by side). `render_desc_videos.panel(image_path, rows, px=448)` returns `description_panel(image_path, rows, px, TEXT_H, 5)`; its `_tile` is deleted.
 - Produces: `metric_cells(eval_dir, tags) -> list[dict]`, `pair_panel(image_path, a, b, px) -> PIL.Image`, page `outputs/steering_report.html`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2506,17 +2990,14 @@ import base64
 import html
 import io
 import json
-import textwrap
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
 
 from rover_vlm.eval import aggregate_steering_metrics
-from rover_vlm.overlay import GT_GREY, draw_polyline
+from rover_vlm.overlay import description_panel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CELLS = [(s, t, f) for s in ("side", "dest") for t in ("template", "composed") for f in ("entry", "goal")]
-PRED = (255, 140, 0)
 TEXT_H = 70
 
 
@@ -2535,27 +3016,9 @@ def metric_cells(eval_dir, tags):
     return out
 
 
-def _tile(image_path, row, px, font):
-    img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
-    d = ImageDraw.Draw(img)
-    draw_polyline(d, [(p[0], p[1]) for p in row["gt"]["path"]], GT_GREY, px, px, width=8)
-    if (row.get("parsed") or {}).get("path"):
-        draw_polyline(d, [(p[0], p[1]) for p in row["parsed"]["path"]], PRED, px, px, width=4)
-    tile = Image.new("RGB", (px, px + TEXT_H), (20, 20, 20))
-    tile.paste(img, (0, 0))
-    text = "\n".join(textwrap.wrap(row["habitat_meta"].get("instruction") or "", width=max(20, px // 8))[:4])
-    ImageDraw.Draw(tile).multiline_text((6, px + 4), text, fill=(235, 235, 235), font=font, spacing=2)
-    return tile
-
-
 def pair_panel(image_path, a, b, px=360):
     """Both routes of a pair side by side: GT grey, prediction orange, each text underneath."""
-    font = ImageFont.load_default()
-    tiles = [_tile(image_path, r, px, font) for r in (a, b)]
-    out = Image.new("RGB", (2 * px, px + TEXT_H))
-    for i, t in enumerate(tiles):
-        out.paste(t, (i * px, 0))
-    return out
+    return description_panel(image_path, [a, b], px, TEXT_H, 4)
 
 
 def _uri(img):
@@ -2650,9 +3113,34 @@ if __name__ == "__main__":
     main()
 ```
 
+Add to `src/rover_vlm/overlay.py` (imports: `import textwrap`, `ImageFont` from PIL) the function below — the body of `render_desc_videos._tile` / `panel`, parameterised — and in `scripts/render_desc_videos.py` replace `_tile` and `panel` with `def panel(image_path, rows, px=448): return description_panel(image_path, rows, px, TEXT_H, 5)` (drop the now-unused imports and `PRED`):
+
+```python
+DESC_PRED = (255, 140, 0)
+
+
+def description_panel(image_path, rows, px, text_h, max_lines):
+    """Prediction rows side by side, one tile each: the frame with the GT path (thick grey) and the
+    prediction (orange), the row's description underneath (render_desc_videos, visualize_steering)."""
+    font = ImageFont.load_default()
+    out = Image.new("RGB", (px * len(rows), px + text_h), (0, 0, 0))
+    for i, row in enumerate(rows):
+        img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
+        d = ImageDraw.Draw(img)
+        draw_polyline(d, [(p[0], p[1]) for p in row["gt"]["path"]], GT_GREY, px, px, width=8)
+        if (row.get("parsed") or {}).get("path"):
+            draw_polyline(d, [(p[0], p[1]) for p in row["parsed"]["path"]], DESC_PRED, px, px, width=4)
+        tile = Image.new("RGB", (px, px + text_h), (20, 20, 20))
+        tile.paste(img, (0, 0))
+        text = "\n".join(textwrap.wrap(row["habitat_meta"].get("instruction") or "", width=max(20, px // 8))[:max_lines])
+        ImageDraw.Draw(tile).multiline_text((6, px + 4), text, fill=(235, 235, 235), font=font, spacing=2)
+        out.paste(tile, (i * px, 0))
+    return out
+```
+
 - [ ] **Step 4: Run the tests**
 
-Run: `uv run pytest tests/test_steering.py -q && uv run pytest -q`
+Run: `uv run pytest tests/test_steering.py tests/test_render_desc_videos.py -q && uv run pytest -q`
 Expected: all pass.
 
 - [ ] **Step 5: README section, index-only**
@@ -2664,16 +3152,19 @@ The working-tree `README.md` holds the user's uncommitted edits; only our sectio
 
 Does d1 *steer* — does changing only the text change the route the way the text says? The d1
 pairs cannot tell (both routes end at the same goal and differ only behind obstacles). This
-eval-only set plans new routes on each eval frame's own map (known free floor in view, 0.45 m
-clear), re-checks them on the scene navmesh, and keeps pairs where each route fails the other's
-text. Spec: `docs/superpowers/specs/2026-10-07-steering-eval-design.md`.
+eval-only set names every visible object of the eval frames, plans new routes on each scene's navmesh
+(0.3 m clear), and keeps pairs where each route fails the other's text. Spec:
+`docs/superpowers/specs/2026-10-07-steering-eval-design.md` (Addendum A1: why not the frame's own map).
 
 - **side** slice: same entry and stop, pass one named object on opposite sides;
 - **destination** slice: same entry, "stop in front of" two different objects.
 
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-    uv run scripts/prepare_habitat_instr.py steer                       # candidates (CPU)
-    conda run -n habitat python scripts/navmesh_check.py                # navmesh verdicts (CPU, habitat env)
+    uv run scripts/prepare_habitat_instr.py steer-objects               # objects to name (CPU)
+    STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # Gemma names them (GPU)
+    uv run scripts/prepare_habitat_instr.py steer-propose               # what to plan (CPU)
+    ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py        # navmesh routes (CPU, habitat env; not `conda run`)
+    uv run scripts/prepare_habitat_instr.py steer                       # candidate pairs (CPU)
     uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150 / slice)
     uv run scripts/audit_instruction_labels.py --mode steer --n 50      # Gate 1 audit page (>= 90% true)
     STAGE=steer sbatch slurm/label_descriptions.sbatch                  # composed text (GPU, < 1 h)
@@ -2683,7 +3174,7 @@ text. Spec: `docs/superpowers/specs/2026-10-07-steering-eval-design.md`.
     uv run scripts/visualize_steering.py                                # outputs/steering_report.html
     uv run scripts/render_desc_videos.py --set eval_steer_side_template_entry --tag d1 --n 20
 
-Outputs: `data/prepared_habitat_instr_v3/steer/` (candidates, navmesh verdicts, rows, meta),
+Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, requests, navmesh routes, candidates, rows, meta),
 `data/prepared_habitat_instr_v3/eval_steer_{side,dest}_{template,composed}_{entry,goal}.json`,
 `outputs/eval_desc/eval_steer_*/<tag>/`. Headline: pair success per slice (text-blind = 0%).
 ```
@@ -2691,16 +3182,16 @@ Outputs: `data/prepared_habitat_instr_v3/steer/` (candidates, navmesh verdicts, 
 Commit only that hunk:
 
 ```bash
-SCR=/tmp/claude-1013/-nfs-home-bergia-Projects-SPACEITUP-spaceitup-qwen-fine-tuning/readme_idx
+SCR=<session scratchpad>/readme_idx      # controller Ruling 2: temp files under the scratchpad
 mkdir -p "$SCR"
 git show HEAD:README.md > "$SCR/README.head.md"
 # insert the same subsection into $SCR/README.head.md at the same place (after the d1 section), with the Edit tool
 git update-index --cacheinfo 100644,"$(git hash-object -w "$SCR/README.head.md")",README.md
 git diff --cached README.md     # read it: only the new subsection, none of the user's edits
-git add scripts/visualize_steering.py tests/test_steering.py
-git commit -m "feat: steering report script; README steering eval section
+git add scripts/visualize_steering.py src/rover_vlm/overlay.py scripts/render_desc_videos.py tests/test_steering.py
+git commit -m "feat: steering report script (shared description_panel); README steering eval section
 
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: <your model's trailer>"
 git diff --stat README.md       # the user's own edits are still unstaged
 rm -rf "$SCR"
 ```
@@ -2709,11 +3200,12 @@ rm -rf "$SCR"
 
 ## After the code: run order and gates (the user runs the GPU parts)
 
-1. **Candidates (CPU, here):** `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1; uv run scripts/prepare_habitat_instr.py steer` — read `steer/steer_meta.json` (reasons, errors). Long run → `setsid nohup ... > outputs/steer_stage.log 2>&1 &`.
-2. **Navmesh (CPU, here):** `export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4; conda run -n habitat python scripts/navmesh_check.py`.
-3. **Select + Gate 0:** `uv run scripts/prepare_habitat_instr.py steer-select`. If a slice has < 150 pairs, stop and bring the drop-reason counts to the user (no silent threshold change — spec risk note).
-4. **Gate 1 audit:** `uv run scripts/audit_instruction_labels.py --mode steer --n 50` → publish `outputs/steer_audit.html` as an artifact with a db `marks` capability (as earlier audits); ≥ 90% of pairs "true". Freeze thresholds.
-5. **Compose (user):** `STAGE=steer sbatch slurm/label_descriptions.sbatch`.
-6. **Finalize + Gate 2:** `uv run scripts/prepare_habitat_instr.py finalize-steer`.
-7. **Eval (user):** `SETS=steer sbatch slurm/eval_descriptions.sbatch`; `SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch` (≤ 3 SLURM jobs at once).
-8. **Report:** `uv run scripts/visualize_steering.py` (publish as an artifact) and `render_desc_videos.py` for `eval_steer_side_template_entry` and `eval_steer_dest_template_entry`, `--n 20`.
+1. **Objects (CPU, here):** `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1; uv run scripts/prepare_habitat_instr.py steer-objects`.
+2. **Names (user, GPU):** `STAGE=steer_names sbatch slurm/label_descriptions.sbatch` (Gemma).
+3. **Propose → navmesh → steer (CPU, here):** `uv run scripts/prepare_habitat_instr.py steer-propose`; `OMP_NUM_THREADS=4 ~/miniforge3/envs/habitat/bin/python scripts/navmesh_plan.py`; `uv run scripts/prepare_habitat_instr.py steer` — read `steer/steer_meta.json` (reasons, errors). Long runs → `setsid nohup ... > outputs/steer_stage.log 2>&1 &`.
+4. **Select + Gate 0:** `uv run scripts/prepare_habitat_instr.py steer-select`. If a slice has < 150 pairs, stop and bring the drop-reason counts to the user (no silent threshold change — spec risk note).
+5. **Gate 1 audit:** `uv run scripts/audit_instruction_labels.py --mode steer --n 50` → publish `outputs/steer_audit.html` as an artifact with a db `marks` capability (as earlier audits); ≥ 90% of pairs "true". Freeze thresholds.
+6. **Compose (user):** `STAGE=steer sbatch slurm/label_descriptions.sbatch`.
+7. **Finalize + Gate 2:** `uv run scripts/prepare_habitat_instr.py finalize-steer`.
+8. **Eval (user):** `SETS=steer sbatch slurm/eval_descriptions.sbatch`; `SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch` (≤ 3 SLURM jobs at once).
+9. **Report:** `uv run scripts/visualize_steering.py` (publish as an artifact) and `render_desc_videos.py` for `eval_steer_side_template_entry` and `eval_steer_dest_template_entry`, `--n 20`.
