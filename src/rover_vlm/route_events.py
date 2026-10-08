@@ -613,7 +613,13 @@ def describe_route(sample_dir, candidate_index):
     cm = meta.get("candidates", [])
     if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
         return _none("bad_candidate")
-    route = np.asarray(cm[candidate_index]["polyline_xz"], float)
+    return describe_xz(meta, frame, cm[candidate_index]["polyline_xz"])
+
+
+def describe_xz(meta, frame, route):
+    """The events + stop phrase for any route polyline (world xz) on a loaded frame
+    (steering pairs describe routes that are not candidates of the frame)."""
+    route = np.asarray(route, float)
     cands = candidates(frame, route)
     events = build_events(frame, cands)
     if not events and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:

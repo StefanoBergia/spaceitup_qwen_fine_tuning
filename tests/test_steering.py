@@ -76,3 +76,43 @@ def test_plan_route_keeps_its_via_point_and_needs_a_snap():
 def test_route_length():
     assert st.route_length([(0, 0), (3, 4), (3, 5)]) == pytest.approx(6.0)
     assert st.route_length([(1, 1)]) == 0.0
+
+
+def _desc(side, goal=(2.5, 3.0)):
+    """A hand-made describe_xz result: one pass of a post at x 2.5..2.55, z 2.0."""
+    return {"reason": None, "pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0], "goal_xz": list(goal),
+            "events": [{"type": "pass", "side": side, "objects": ["f:b1"], "arc_m": 1.0}],
+            "stop": {"type": "after_last", "relation": "just after", "amount": None, "distance_m": None,
+                     "object": None},
+            "objects": {"f:b1": {"cells_xz": [[2.5, 2.0], [2.55, 2.0]]}}}
+
+
+L_XZ = [(2.5, 1.0), (3.3, 2.0), (2.5, 3.0)]        # bows to +x: the rover's left
+R_XZ = [(2.5, 1.0), (1.7, 2.0), (2.5, 3.0)]
+
+
+def test_entry_floor_inverts_the_camera():
+    meta = {"pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0]}
+    assert st.entry_floor(meta, [0.5, 1.0]) == pytest.approx([2.5, 1.0])
+    assert st.entry_floor(meta, [0.5, 0.4]) is None             # at or above the horizon
+
+
+def test_answer_path_projects_a_fully_visible_floor_route():
+    path = st.answer_path(CAM, L_XZ)
+    assert path[0][:2] == pytest.approx([0.5, 1.0], abs=1e-3)
+    assert all(w[2] == 1 for w in path) and 3 <= len(path) <= 12
+    assert path[1][0] < 0.5                                      # +x is image-left
+
+
+def test_separation():
+    a, b = st.answer_path(CAM, L_XZ), st.answer_path(CAM, R_XZ)
+    assert st.separation(a, a) == 0.0
+    assert st.separation(a, b) > 0.1
+
+
+def test_exclusive_needs_each_route_to_fail_the_other_text():
+    rl = {"path": st.answer_path(CAM, L_XZ), "desc": _desc("left")}
+    rr = {"path": st.answer_path(CAM, R_XZ), "desc": _desc("right")}
+    assert st.exclusive(rl, rr)
+    assert not st.exclusive(rl, {**rr, "desc": _desc("left")})     # R fails its own text
+    assert not st.exclusive(rl, {**rl, "desc": _desc("left")})     # one route satisfies both

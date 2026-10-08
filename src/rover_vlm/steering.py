@@ -17,6 +17,9 @@ import math
 
 import numpy as np
 
+from .descriptions import desc_check
+from .eval import description_follow, image_to_floor, resample_polyline
+from .habitat_data import clip_polyline_unit, resample_with_transitions
 from .landmarks import FREE, OCC, Camera
 
 CLEAR_M = 0.45      # d1 / round-4 GT routes keep 0.44-0.51 m from map obstacles (p10-p75)
@@ -134,3 +137,39 @@ def plan_route(grid, mask, waypoints_xz):
 def route_length(xz):
     xz = np.asarray(xz, float)
     return float(np.linalg.norm(np.diff(xz, axis=0), axis=1).sum()) if len(xz) > 1 else 0.0
+
+
+SEP_POINTS = 50     # resampling for the visible-separation test
+
+
+def entry_floor(meta, start_uv):
+    """Floor xz of the frame's entry point (level camera), or None at/above the horizon."""
+    xz = image_to_floor([[start_uv[0], start_uv[1], 1]], meta["pose_xz"], meta["heading_xz"])
+    return xz[0] if len(xz) else None
+
+
+def answer_path(cam, route_xz):
+    """[x, y, 1] waypoints of a fully visible floor route, built as the d1 answers are (clip to
+    the unit square, resample with transitions). Floor lines project to image lines, so the
+    route's corners are enough."""
+    uv, _ = cam.uv(np.asarray(route_xz, float))
+    clipped = clip_polyline_unit([(float(u), float(v), False) for u, v in uv])
+    return [list(w) for w in resample_with_transitions(clipped)]
+
+
+def separation(path_a, path_b):
+    """Largest image distance between the two paths, both resampled by arclength."""
+    a = resample_polyline(np.array([p[:2] for p in path_a], float), SEP_POINTS)
+    b = resample_polyline(np.array([p[:2] for p in path_b], float), SEP_POINTS)
+    return float(np.linalg.norm(a - b, axis=1).max())
+
+
+def exclusive(ra, rb):
+    """Each route follows its own description and fails the other's (eval.description_follow,
+    stop judged against each description's own route end)."""
+    ca, cb = desc_check(ra["desc"], ra["desc"]["objects"]), desc_check(rb["desc"], rb["desc"]["objects"])
+    ea, eb = ra["path"][-1], rb["path"][-1]
+    return (description_follow(ra["path"], ca, ea)["follows"] == 1
+            and description_follow(rb["path"], cb, eb)["follows"] == 1
+            and description_follow(ra["path"], cb, eb)["follows"] == 0
+            and description_follow(rb["path"], ca, ea)["follows"] == 0)

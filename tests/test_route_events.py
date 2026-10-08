@@ -264,7 +264,7 @@ def test_poor_fit_falls_back(tmp_path):
 
 
 from rover_vlm.route_events import (  # noqa: E402
-    MAX_EVENTS, build_events, collect_objects, describe_route, stop_phrase,
+    MAX_EVENTS, build_events, collect_objects, describe_route, describe_xz, stop_phrase,
 )
 
 
@@ -936,3 +936,9 @@ def test_finalize_descriptions_desc_suffix(monkeypatch, tmp_path, argv, stem):
     monkeypatch.setattr("sys.argv", ["prep", "finalize-descriptions", *argv])
     prepare_instr.main()
     assert prepare_instr.desc_path(seen["labels"], "eval", seen["desc_suffix"]).name == stem.format("eval")
+
+
+def test_describe_xz_matches_describe_route(tmp_path):
+    sd = write_sample(tmp_path / "s", _stop_state(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    assert describe_xz(meta, frame, np.array(STOP_ROUTE)) == describe_route(sd, 0)
