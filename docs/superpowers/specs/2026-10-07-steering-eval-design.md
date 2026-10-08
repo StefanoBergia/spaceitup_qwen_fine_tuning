@@ -219,8 +219,8 @@ stop rules (open question 2 in NOTES.md — this set measures the stop, it does 
 ## Addendum A1 (2026-10-08): routes on the scene navmesh at 0.3 m, every visible object named
 
 **Why.** Built as specified (plan Tasks 1–5, commit ff1c8ba), the frame-map planner kept **0 pairs** on
-all 2,105 eval frames (no errors). Throwaway probes on 200 original frames
-(`.superpowers/sdd/2026-10-07-steering-eval/progress.md`):
+all 2,105 eval frames (no errors). Throwaway probes on 200 original frames (scripts not kept; the
+numbers below are the record):
 - the known-free floor piece the entry connects to is median 3.1 m² (p10 0.05 m²), and floor behind an
   object is never seen, so "a shared stop beyond O on known floor" almost never exists — 0 pairs even with
   every blob named and no minimum distance;
@@ -271,8 +271,8 @@ routes; destination: named objects < 1 m from the entry, so the stop point falls
 `MIN_AHEAD_M` to 0.5 changes nothing. The generator's own two-detour pairs (d1's 231 eval pairs) have a
 mapped object between the two routes in only 15 cases (1 with exactly one named object). What does work:
 **cutting one ground-truth route at two points with different stop phrases** — 111 / 200 original frames
-(55%), ends a median 0.18 apart in the image, each route failing the other's text. Probes:
-`.superpowers/sdd/2026-10-07-steering-eval/progress.md`.
+(55%), ends a median 0.18 apart in the image, each route failing the other's text (throwaway probes;
+the numbers here are the record).
 
 **Decisions (user, 2026-10-08).** The set has one slice, **stop**: same entry, same route, two stop points
 whose texts differ (in the stop phrase, and in the events the longer route adds). The side slice is dropped
