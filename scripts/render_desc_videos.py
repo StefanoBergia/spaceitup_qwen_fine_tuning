@@ -1,0 +1,89 @@
+"""Render predicted vs ground-truth paths on d1 eval frames as one mp4 per set and tag.
+
+CPU only, login node, after slurm/eval_descriptions.sbatch. Each video frame shows one image
+(both routes of a pair side by side): ground truth thick grey, prediction orange, the
+description under each tile; every frame is held HOLD_S seconds.
+
+    uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag d1
+    uv run scripts/render_desc_videos.py --set eval_desc_entry --tag d1 --n 40
+
+Writes outputs/eval_desc/<set>/<tag>/paths.mp4.
+"""
+
+import argparse
+import json
+import subprocess
+from pathlib import Path
+
+from PIL import Image
+
+from rover_vlm.overlay import description_panel
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOLD_S = 3
+FPS = 2
+TEXT_H = 90
+
+
+def pick_frames(rows, n):
+    """Up to n frames: pairs first (both routes together), then single routes, input order."""
+    pairs, singles, seen = {}, [], []
+    for r in rows:
+        pid = (r.get("habitat_meta") or {}).get("pair_id")
+        if pid:
+            if pid not in pairs:
+                seen.append(pid)
+            pairs.setdefault(pid, []).append(r)
+        else:
+            singles.append([r])
+    frames = [pairs[p] for p in seen if len(pairs[p]) == 2] + singles
+    return frames[:n]
+
+
+def missing_images(frames, images):
+    """Ids of picked rows that have no image in the eval data file, in order."""
+    return [r["id"] for f in frames for r in f if r["id"] not in images]
+
+
+def panel(image_path, rows, px=448):
+    return description_panel(image_path, rows, px, TEXT_H, 5)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--set", required=True)
+    p.add_argument("--tag", required=True)
+    p.add_argument("--n", type=int, default=40)
+    p.add_argument("--eval-dir", type=Path, default=REPO_ROOT / "outputs" / "eval_desc")
+    p.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data" / "prepared_habitat_instr_v3")
+    args = p.parse_args()
+    run = args.eval_dir / args.set / args.tag
+    rows = json.loads((run / "predictions.json").read_text())
+    images = {r["id"]: r["image"][0] for r in json.loads((args.data_dir / f"{args.set}.json").read_text())}
+    frames = pick_frames(rows, args.n)
+    if not frames:
+        raise SystemExit(f"no predictions in {run}")
+    data_file = args.data_dir / f"{args.set}.json"
+    missing = missing_images(frames, images)
+    if missing:
+        raise SystemExit(f"{len(missing)} prediction ids not in {data_file}, e.g. {missing[:3]}")
+    width = max(len(f) for f in frames) * 448
+    height = 448 + TEXT_H
+    out = run / "paths.mp4"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+           "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    for f in frames:
+        img = panel(images[f[0]["id"]], f)
+        canvas = Image.new("RGB", (width, height), (0, 0, 0))
+        canvas.paste(img, (0, 0))
+        for _ in range(HOLD_S * FPS):
+            proc.stdin.write(canvas.tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise SystemExit("ffmpeg failed")
+    print(f"{len(frames)} frames -> {out}")
+
+
+if __name__ == "__main__":
+    main()

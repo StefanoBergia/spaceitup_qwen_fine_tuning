@@ -20,8 +20,8 @@ import collections
 import json
 from pathlib import Path
 
+from rover_vlm.habitat_data import DATASET_ROOTS, sample_dirs_by_id
 from rover_vlm.habitat_choice import (
-    DATASET_ROOT,
     build_choice_record,
     drawable_candidates,
     render_choice_image,
@@ -30,10 +30,6 @@ from rover_vlm.habitat_choice import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_SPLITS = REPO_ROOT / "data" / "prepared_habitat"
 OUT_DIR = REPO_ROOT / "data" / "prepared_habitat_choice"
-
-
-def sample_dirs_by_id(root: Path) -> dict[str, Path]:
-    return {d.name: d for d in root.glob("*/samples/*/") if d.is_dir()}
 
 
 def split_names(src_splits: Path) -> list[str]:
@@ -49,7 +45,7 @@ def split_names(src_splits: Path) -> list[str]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--dataset-root", type=Path, nargs="*", default=list(DATASET_ROOTS))
     p.add_argument("--src-splits", type=Path, default=SRC_SPLITS,
                    help="regression splits whose membership we mirror")
     p.add_argument("--out-dir", type=Path, default=OUT_DIR)

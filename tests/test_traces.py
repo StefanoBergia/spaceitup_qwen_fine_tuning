@@ -126,6 +126,69 @@ def test_path_prompt_says_so_when_nothing_is_occluded():
     assert "From waypoint" not in p
 
 
+# --- v7: endpoints framing (round-4 records carry a path-only answer) ----------------
+
+
+def _endpoints_record(path):
+    """A data/prepared_habitat_v4 record: the answer is {"path": ...} with no "goal" field."""
+    return {
+        "id": "scene_c000",
+        "image": ["/nfs/x.png"],
+        "conversations": [{"from": "human", "value": "<image>\n..."},
+                          {"from": "gpt", "value": json.dumps({"path": path})}],
+    }
+
+
+def test_prompt_version_is_v7():
+    from rover_vlm.traces import PROMPT_VERSION
+    assert PROMPT_VERSION == "v7"
+
+
+def test_path_prompt_accepts_a_path_only_answer_and_uses_its_last_waypoint_as_goal():
+    p = path_trace_prompt(_endpoints_record([[0.229, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.616, 0]]))
+    assert "[0.5, 0.616]" in p
+    answer_block = re.search(r"<answer>(.*?)</answer>", p, re.S).group(1)
+    assert '"goal": [0.5, 0.616, 0]' in answer_block
+
+
+def test_path_prompt_hands_over_both_endpoints_with_their_visibility():
+    """At inference Qwen is told the entry point and the goal, so the trace may use them."""
+    p = path_trace_prompt(_endpoints_record([[0.229, 1.0, 1], [0.4, 0.7, 1], [0.5, 0.616, 0]]))
+    assert "enters the frame at [0.229, 1.0]" in p
+    assert "goal at [0.5, 0.616]" in p
+    assert "hidden" in p.split("goal at [0.5, 0.616]")[1][:80]
+
+
+@pytest.mark.parametrize("start, edge", [
+    ([0.229, 1.0, 1], "bottom edge"),
+    ([0.0, 0.806, 0], "left edge"),
+    ([1.0, 0.75, 1], "right edge"),
+])
+def test_path_prompt_names_the_actual_entry_edge(start, edge):
+    """v6 claimed every route "starts at the bottom of the frame"; side entries do not."""
+    p = path_trace_prompt(_endpoints_record([start, [0.5, 0.6, 1]]))
+    assert edge in p
+    assert "bottom of the frame" not in p
+
+
+def test_path_prompt_forbids_handed_route_language():
+    """The v6 full run leaked on ~5% of traces via "the planned path"; v7 bans it up front."""
+    p = path_trace_prompt(_endpoints_record([[0.5, 1.0, 1], [0.5, 0.6, 1]]))
+    assert "has decided nothing" in p
+    assert "planned" in p
+
+
+def test_path_prompt_still_works_on_a_legacy_record_with_a_goal_field():
+    p = path_trace_prompt(_path_record([[0.5, 1.0, 1], [0.5, 0.8, 1]], [0.5, 0.7, 1]))
+    assert "goal at [0.5, 0.7]" in p
+
+
+def test_answer_matches_path_falls_back_to_the_last_waypoint_without_a_goal_field():
+    rec = _endpoints_record([[0.5, 1.0, 1], [0.5, 0.8, 0], [0.5, 0.7, 0]])
+    assert answer_matches("path", json.dumps({"reasoning": "x", "goal": [0.5, 0.7, 0]}), rec) is True
+    assert answer_matches("path", json.dumps({"reasoning": "x", "goal": [0.5, 0.8, 0]}), rec) is False
+
+
 # --- parsing ------------------------------------------------------------------------
 
 
@@ -519,6 +582,22 @@ def test_filter_drop_priority_and_non_destructive(tmp_path):
     assert not [r for r in out if r["keep"] and leakage_spans(r["trace"])]
 
 
+def test_filter_gate_flags_leak_rate_and_keep_rate():
+    """The n=200 gate that fronts label_full_path.sbatch: fail on leaks or on a low keep rate."""
+    fm = _filter_mod()
+    counts = {"error": 0, "no-trace": 0, "truncated": 0, "leak": 0, "drift": 0}
+    assert fm.gate_failures(n=200, kept=198, counts={**counts, "leak": 2},
+                            max_leak_rate=0.01, min_keep_rate=0.95) == []
+    leaky = fm.gate_failures(n=200, kept=194, counts={**counts, "leak": 6},
+                             max_leak_rate=0.01, min_keep_rate=0.95)
+    assert len(leaky) == 1 and "leak" in leaky[0]
+    lossy = fm.gate_failures(n=200, kept=180, counts={**counts, "no-trace": 20},
+                             max_leak_rate=0.01, min_keep_rate=0.95)
+    assert len(lossy) == 1 and "keep" in lossy[0]
+    assert fm.gate_failures(n=0, kept=0, counts=counts,
+                            max_leak_rate=0.01, min_keep_rate=0.95) == ["no rows"]
+
+
 # --- the traced 2B-vs-0.8B report (scripts/visualize_traced_comparison.py) -----------
 
 
@@ -704,3 +783,113 @@ def test_generator_end_to_end_and_escapes_script(tmp_path, monkeypatch):
     assert any("plain SFT vs traced" in t["title"] for t in d["tests"])
     # no judge files were written -> judges is present and empty (never a crash / missing key)
     assert d["traceQuality"]["judges"] == []
+
+
+def _write_seed(d, tag, seed, records, decoding=None):
+    sd = d / tag / "seeds" / f"seed{seed}"
+    sd.mkdir(parents=True)
+    (sd / "predictions.json").write_text(json.dumps(records))
+    (sd / "metrics.json").write_text(json.dumps(
+        {"num_samples": len(records), "parse_rate": 1.0,
+         "decoding": decoding or {"seed": seed, "do_sample": True, "temperature": 0.7,
+                                  "top_p": 0.8, "top_k": 20}}))
+
+
+def _srec(i, dx, err):
+    return {"id": f"s{i}", "generated": "",
+            "parsed": {"path": [[0.5 + dx, 0.9, 1], [0.5 + dx, 0.5, 1]], "goal": [0.5 + dx, 0.4, 1]},
+            "gt": {"path": [[0.5, 0.9, 1], [0.5, 0.5, 1]], "goal": [0.5, 0.4, 1]},
+            "metrics": {"mean_point_error": err, "frechet": err, "path_visibility_acc": 1.0,
+                        "goal_visibility_correct": True}}
+
+
+def test_load_seeds_finds_seed_dirs_in_order(tmp_path):
+    tv = _traced_viz()
+    tag = "habitat_train_full"
+    _write_seed(tmp_path, tag, 10, [_srec(0, 0.0, 0.1)])
+    _write_seed(tmp_path, tag, 2, [_srec(0, 0.1, 0.1)])
+    seeds = tv.load_seeds(tmp_path, tag)
+    assert [s["seed"] for s in seeds] == [2, 10]                 # numeric, not lexical
+    assert set(seeds[0]["preds"]) == {"s0"}
+    assert seeds[0]["decoding"]["temperature"] == 0.7
+    assert tv.load_seeds(tmp_path, "no_such_tag") == []
+
+
+def test_consistency_block_compares_plain_and_traced(tmp_path):
+    """Per size: aggregate spread for plain and traced, and a paired test on path_spread over
+    the images both have a spread for. Traced draws here are wider, so plain must win."""
+    tv = _traced_viz()
+    pd_, td = tmp_path / "plain", tmp_path / "traced"
+    ids = range(6)
+    # greedy runs first (they own the tag dir), so greedy_err / the spread-vs-error
+    # correlation are populated
+    _write_run(pd_, "habitat_train_full", "m", 0.1, [_srec(i, 0.0, 0.1 * (i + 1)) for i in ids])
+    _write_run(td, "habitat_train_full_traced", "m", 0.1, [_srec(i, 0.0, 0.1 * (i + 1)) for i in ids])
+    for seed, dx_p, dx_t in ((1, 0.0, 0.0), (2, 0.02, 0.2)):
+        _write_seed(pd_, "habitat_train_full", seed, [_srec(i, dx_p, 0.1) for i in ids])
+        _write_seed(td, "habitat_train_full_traced", seed, [_srec(i, dx_t, 0.1) for i in ids])
+    blk = tv.consistency_block(pd_, "habitat_train_full", td, "habitat_train_full_traced")
+    assert blk["nSeeds"] == 2 and blk["decoding"]["temperature"] == 0.7
+    assert blk["plain"]["path_spread_median"] == pytest.approx(0.02)
+    assert blk["traced"]["path_spread_median"] == pytest.approx(0.2)
+    assert blk["plain"]["num_images"] == 6
+    t = blk["test"]
+    assert t["n"] == 6 and t["better"] == "plain SFT" and t["significant"]
+    # per-image spread is exposed per side so gallery cards can quote it
+    assert blk["perImagePlain"]["s0"]["path_spread"] == pytest.approx(0.02)
+    assert blk["perImageTraced"]["s0"]["path_spread"] == pytest.approx(0.2)
+
+
+def test_consistency_block_is_none_without_seeds(tmp_path):
+    tv = _traced_viz()
+    assert tv.consistency_block(tmp_path / "p", "habitat_train_full",
+                                tmp_path / "t", "habitat_train_full_traced") is None
+
+
+def test_consistency_block_with_only_traced_seeds(tmp_path):
+    tv = _traced_viz()
+    td = tmp_path / "traced"
+    for seed in (1, 2):
+        _write_seed(td, "habitat_train_full_traced", seed, [_srec(0, 0.05 * seed, 0.1)])
+    blk = tv.consistency_block(tmp_path / "p", "habitat_train_full", td, "habitat_train_full_traced")
+    assert blk["plain"] is None and blk["traced"]["num_with_spread"] == 1 and blk["test"] is None
+
+
+def test_generator_end_to_end_with_seeds(tmp_path, monkeypatch):
+    """Seed dirs under the A traced + plain runs -> the payload carries a consistency block
+    for A and None for B, and A's gallery cards quote the per-image spread."""
+    from PIL import Image
+    tv = _traced_viz()
+    img = tmp_path / "f.png"
+    Image.new("RGB", (32, 32), "gray").save(img)
+    recs = [_srec(i, 0.0, 0.1 * (i + 1)) for i in range(3)]
+    a_dir, b_dir, a_plain, b_plain = (tmp_path / n for n in ("a", "b", "ap", "bp"))
+    for d, tag, mid in ((a_dir, "habitat_base", "A"), (a_dir, "habitat_train_full_traced", "A"),
+                        (b_dir, "habitat_base", "B"), (b_dir, "habitat_train_full_traced", "B"),
+                        (a_plain, "habitat_train_full", "A"), (b_plain, "habitat_train_full", "B")):
+        _write_run(d, tag, mid, 0.1, recs)
+    for seed, dx in ((1, 0.0), (2, 0.1), (3, 0.2)):
+        _write_seed(a_dir, "habitat_train_full_traced", seed, [_srec(i, dx, 0.1) for i in range(3)])
+        _write_seed(a_plain, "habitat_train_full", seed, [_srec(i, dx / 2, 0.1) for i in range(3)])
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(json.dumps([{"id": f"s{i}", "image": [str(img)]} for i in range(3)]))
+    out = tmp_path / "report.html"
+    monkeypatch.setattr(sys, "argv", ["x", "--a-dir", str(a_dir), "--b-dir", str(b_dir),
+                                      "--a-plain-dir", str(a_plain), "--b-plain-dir", str(b_plain),
+                                      "--eval-file", str(eval_file), "--out", str(out),
+                                      "--per-bucket", "1"])
+    tv.main()
+    html = out.read_text()
+    payload = re.search(r"const D = (\{.*?\});\nconst \$", html, re.S).group(1).replace("<\\/", "</")
+    d = json.loads(payload)
+    assert d["consistency"]["b"] is None
+    a = d["consistency"]["a"]
+    # draws at x, x+0.1, x+0.2 -> pairwise 0.1, 0.2, 0.1 -> mean spread 0.1333 (plain: half)
+    assert a["nSeeds"] == 3 and a["traced"]["path_spread_median"] == pytest.approx(0.1333, abs=1e-3)
+    assert a["plain"]["path_spread_median"] == pytest.approx(0.0667, abs=1e-3)
+    assert a["test"]["better"] == "plain SFT"
+    assert "perImage" not in a                      # per-image detail stays out of the payload
+    card = d["gallery"][0]
+    assert card["a"]["spread"] == pytest.approx(0.133) and card["a"]["nDraws"] == 3
+    assert card["b"]["spread"] is None
+    assert "consistency" in html.lower()

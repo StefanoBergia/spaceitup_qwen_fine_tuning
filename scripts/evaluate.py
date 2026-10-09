@@ -11,6 +11,15 @@ Writes to outputs/eval/<tag>/:
     predictions.json — per-sample: prompt id, generated text, parsed waypoints, metrics
     metrics.json     — aggregate: parse rate, in-range rate, waypoint errors (mean/median)
 
+Decoding is greedy by default (deterministic; the canonical result). Pass --seed to draw ONE
+sampled answer per image (temperature/top-p/top-k below) — the run then lands in
+<tag>/seeds/seed<k>/ so the greedy result stays untouched, and several seeds can be compared
+with rover_vlm.consistency to measure how much the output moves for the same image:
+    uv run scripts/evaluate.py --task habitat --tag habitat_train_full --adapter ... --seed 1
+
+Instruction-conditioned sets (data/prepared_habitat_instr_v1/eval_*.json) get an "instruction"
+block in metrics.json: pair success (both instructions of a frame followed) and follow rate.
+
 All models are evaluated on the same fixed eval split (data/prepared/eval.json), so
 tags are directly comparable; scripts/compare_evals.py builds the scaling table/plot.
 """
@@ -28,6 +37,8 @@ from rover_vlm.eval import (
     aggregate_choice_metrics,
     aggregate_metrics,
     aggregate_habitat_metrics,
+    aggregate_instruction_metrics,
+    wrong_side_metrics,
     choice_metrics,
     habitat_metrics,
     normalize_prediction,
@@ -61,7 +72,30 @@ def parse_args() -> argparse.Namespace:
                         "an adapter trained by scripts/prepare_habitat_traces.py; leave off "
                         "for plain (answer-only) adapters and the base model.")
     p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None,
+                   help="draw a SAMPLED answer with this RNG seed (implies do_sample) and write "
+                        "to <tag>/seeds/seed<k>/. Omit for greedy decoding at <tag>/.")
+    # Qwen's recommended non-thinking sampling settings; applied identically to traced and
+    # plain adapters so a spread comparison between them is fair.
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--top-p", type=float, default=0.8)
+    p.add_argument("--top-k", type=int, default=20)
     return p.parse_args()
+
+
+def run_out_dir(out_dir: Path, tag: str, seed: int | None) -> Path:
+    """Greedy runs own <out-dir>/<tag>/; seeded draws nest under it so they never clobber."""
+    base = out_dir / tag
+    return base if seed is None else base / "seeds" / f"seed{seed}"
+
+
+def generation_kwargs(seed, temperature, top_p, top_k) -> dict:
+    """generate() decoding args: greedy unless a seed is given, then sampling."""
+    if seed is None:
+        return {"do_sample": False}
+    if temperature <= 0:
+        raise ValueError("--seed draws a sample, which needs --temperature > 0")
+    return {"do_sample": True, "temperature": temperature, "top_p": top_p, "top_k": top_k}
 
 
 def build_messages(prompt: str, image: Image.Image) -> list[dict]:
@@ -81,7 +115,9 @@ def main() -> None:
     use_cuda = torch.cuda.is_available()
     dtype = torch.bfloat16 if use_cuda else torch.float32
     device = "cuda" if use_cuda else "cpu"
-    print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device}")
+    gen_kwargs = generation_kwargs(args.seed, args.temperature, args.top_p, args.top_k)
+    print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device} "
+          f"seed={args.seed} decoding={gen_kwargs}")
 
     processor = AutoProcessor.from_pretrained(args.model_id)
     processor.tokenizer.padding_side = "left"  # decoder-only batched generation
@@ -115,12 +151,21 @@ def main() -> None:
             # choice scoring needs the accepted set, which the answer string can't carry
             if args.task == "choice":
                 gts.append(rec["choice_meta"])
+            elif args.task == "habitat":
+                # through the same parser as the prediction, so a round-3 answer (path
+                # only, goal = path[-1]) and a round-1/2 one (explicit goal key) both
+                # arrive as {"path", "goal"} and every metric stays field-for-field
+                gts.append(parse_path_answer(rec["conversations"][1]["value"]))
             else:
                 gts.append(json.loads(rec["conversations"][1]["value"]))
 
         batch = processor(text=texts, images=images, padding=True, return_tensors="pt").to(device)
         with torch.no_grad():
-            out = model.generate(**batch, max_new_tokens=args.max_new_tokens, do_sample=False)
+            if args.seed is not None:
+                # seed per batch (not once per run) so a draw for a given image does not
+                # depend on how many batches ran before it
+                torch.manual_seed(args.seed * 1_000_003 + start)
+            out = model.generate(**batch, max_new_tokens=args.max_new_tokens, **gen_kwargs)
         new_tokens = out[:, batch["input_ids"].shape[1] :]
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)
 
@@ -144,16 +189,18 @@ def main() -> None:
                     metrics = trajectory_metrics(scored, gt)
                 else:
                     metrics, rescaled = None, False
-            results.append(
-                {
-                    "id": rec["id"],
-                    "generated": text,
-                    "parsed": parsed,
-                    "rescaled": rescaled,
-                    "gt": gt,
-                    "metrics": metrics,
-                }
-            )
+            row = {
+                "id": rec["id"],
+                "generated": text,
+                "parsed": parsed,
+                "rescaled": rescaled,
+                "gt": gt,
+                "metrics": metrics,
+            }
+            # carried through so results can be sliced by source/scene downstream
+            if "habitat_meta" in rec:
+                row["habitat_meta"] = rec["habitat_meta"]
+            results.append(row)
         done = start + len(chunk)
         print(f"  {done}/{len(records_in)} ({(time.time() - t0) / done:.2f}s/sample)", flush=True)
 
@@ -163,11 +210,21 @@ def main() -> None:
         "sharerobot": aggregate_metrics,
     }
     summary = aggregators[args.task](results)
+    if args.task == "habitat":
+        # instruction-conditioned eval sets (prepare_habitat_instr.py) carry the other
+        # side's route; score whether the model followed the instruction it was given
+        instr = aggregate_instruction_metrics(results)
+        if instr is not None:
+            summary["instruction"] = instr
+        probe = wrong_side_metrics(results)
+        if probe is not None:
+            summary["wrong_side"] = probe
     summary["tag"] = args.tag
     summary["model_id"] = args.model_id
     summary["adapter"] = str(args.adapter) if args.adapter else None
+    summary["decoding"] = {"seed": args.seed, **gen_kwargs}
 
-    out_dir = args.out_dir / args.tag
+    out_dir = run_out_dir(args.out_dir, args.tag, args.seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "predictions.json").write_text(json.dumps(results, indent=1))
     (out_dir / "metrics.json").write_text(json.dumps(summary, indent=2))

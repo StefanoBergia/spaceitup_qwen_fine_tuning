@@ -13,6 +13,8 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 mkdir -p outputs/slurm
 export HF_HUB_OFFLINE=1
+# thread caps (CLAUDE.md: shared machines; uncapped torch spawns ~96 OMP threads)
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
 UV=~/.local/bin/uv
 
 TRAIN_FILE="${1:-data/prepared_habitat/train_full.json}"

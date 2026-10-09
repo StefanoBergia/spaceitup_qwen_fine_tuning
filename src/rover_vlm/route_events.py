@@ -1,0 +1,691 @@
+"""Route descriptions (prompt d1): what a route passes, in order, and where it stops.
+
+The i4 spot check (2026-09-30) showed one geometry-chosen landmark per route is often the
+wrong one — the straight entry->goal line grazes a wall while the route bends round a pillar —
+and one landmark under-specifies a path once the goal point leaves the prompt. Here every
+salient obstacle the route passes is a candidate; the best three become events (pass of one or
+two objects / wall the route runs alongside / between / through -- Addendum A merges adjacent
+opposite passes into between), a stop phrase says where the route ends (coarse amounts: just /
+a little / well), and each outline is trimmed with the frame's depth so it does not swallow what stands behind. Cosmos later only
+names the objects and phrases the sentence (rover_vlm.descriptions).
+
+A blob the route runs through (closest distance < TOUCH_M) has no defined side: candidates() marks it "touch" and build_events lets it join only a through event (a doorway jamb), never a pass / wall / between (Addendum A2).
+
+Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
+"""
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from .landmarks import (
+    CAM_HEIGHT_M, FREE, OBJECT_TOP_M, OCC, Camera, Grid, _dilate, _poly_area, column_in_frame, components,
+    convex_hull, densify,
+)
+
+PASS_M = 0.7              # an obstacle this close to the route is something it passes
+# Gate 1 r2 (2026-10-02): a blob the route runs *through* (closest distance ~0.01 m, vs the planner's
+# ~0.45-0.5 m clearance everywhere else) has no defined side at the closest point -- left/right is a
+# coin flip (8% of routes, 64/67 of them walls; bimodal: <0.05 m or >=0.2 m). Not a candidate.
+TOUCH_M = 0.2
+START_SKIP_M = 0.3        # ignore what the route passes in its first metres (the rover's own spot)
+# The rover's start pose is collision-free for its footprint (objects.json rover.radius_m = 0.5), so
+# occupied cells this close to the camera are map artefacts or things below the lens, never occluders
+# or landmarks. 00372 (2026-09-30): a 2 m wide strip 0.22-0.45 m ahead blocked every ray at 0.35.
+NEAR_CAMERA_M = 0.5
+MIN_VISIBLE_CELLS = 4
+MIN_AREA = 0.005          # outline area as a fraction of the image (tight floor-free outlines of thin posts are ~0.01)
+KEEP_NEAR_ROUTE_M = 1.5   # outline only the part of a long blob (a wall) near the route
+MAX_VIS_SAMPLES = 200     # visibility rays per blob (each ray is a python loop)
+OFFSET_FLOOR_M = 0.1      # score floor so obstacles near the start still count
+ROUTE_STEP_M = 0.05
+CROP_MARGIN = 0.15        # naming crop = outline box + this fraction of its size
+MIN_GAP_M = 0.5           # narrowest opening the route can thread (the rover's radius)
+MAX_GAP_PAIRS = 2000      # closest wall-cell pairs tried per blob when looking for a crossing gap
+PAIR_ARC_M = 0.5          # two wall blobs on opposite sides this close along the route may flank an opening
+ALONG_MIN_M = 1.0         # route length within PASS_M of a long blob for it to be a wall the route runs alongside
+WALL_KEEP_M = 0.8         # a wall's cells / outline cover only the stretch this close to the route
+MERGE_ARC_M = 3.0         # adjacent events at most this far apart along the route may merge (between / two-object pass)
+AMOUNT_STEPS = ((1.5, "just"), (3.0, "a little"), (float("inf"), "well"))   # coarse stop amounts (Gate 1)
+
+
+@dataclass
+class Frame:
+    name: str
+    grid: Grid
+    cam: Camera
+    lab: np.ndarray                  # gap-merged blob label per occupied cell, 0 elsewhere
+    depth: np.ndarray | None         # depth.png as float (0-255, per-frame min-max), or None
+    depth_fit: tuple | None = None   # (scale, offset, resid_m): metres = scale * pixel + offset
+    blob_cells: dict | None = None   # label -> (cells_rc, world xz); built on first use
+
+
+def load_frame(sample_dir):
+    """(meta, Frame) for one sample dir. Blobs one empty cell apart are one obstacle."""
+    sd = Path(sample_dir)
+    meta = json.loads((sd / "meta.json").read_text())
+    grid = Grid.load(sd / "state.npz")
+    occ = grid.s == OCC
+    merged, _ = components(_dilate(occ))
+    dp = sd / "depth.png"
+    depth = np.asarray(Image.open(dp), dtype=float) if dp.exists() else None
+    frame = Frame(sd.name, grid, Camera(meta["pose_xz"], meta["heading_xz"]),
+                  np.where(occ, merged, 0), depth)
+    if depth is not None:
+        frame.depth_fit = calibrate_depth(depth, frame.cam, grid)
+    return meta, frame
+
+
+def first_blocker(frame, xz):
+    """Blob label of the first occupied cell between the camera and xz, or None.
+
+    Cells within NEAR_CAMERA_M of the camera are skipped (see NEAR_CAMERA_M)."""
+    for p in densify(np.array([frame.cam.pos, xz], float), frame.grid.mpp / 2)[1:]:
+        if np.linalg.norm(p - frame.cam.pos) <= NEAR_CAMERA_M:
+            continue
+        r, c = (int(round(v)) for v in frame.grid.rc(p)[0])
+        if frame.grid.cell((r, c)) == OCC:
+            return int(frame.lab[r, c])
+    return None
+
+
+def visible_cells(frame, cells_rc, label):
+    """World xz of the cells of blob `label` the camera sees (column in frame, not hidden)."""
+    cells_rc = np.asarray(cells_rc)
+    if len(cells_rc) > MAX_VIS_SAMPLES:
+        cells_rc = cells_rc[np.linspace(0, len(cells_rc) - 1, MAX_VIS_SAMPLES).astype(int)]
+    xz = frame.grid.xz(cells_rc)
+    ok = column_in_frame(frame.cam, xz) & (np.linalg.norm(xz - frame.cam.pos, axis=1) > NEAR_CAMERA_M)
+    vis = [q for q, k in zip(xz, ok) if k and first_blocker(frame, q) in (None, label)]
+    return np.array(vis, float).reshape(-1, 2)
+
+
+def route_geometry(route_xz):
+    """Resampled route: points, arclength, right-of-travel normals, offset from entry->goal line."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    d = np.gradient(pts, axis=0)
+    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
+    right = np.stack([-d[:, 1], d[:, 0]], 1)        # Camera.right's handedness
+    a, g = pts[0], pts[-1]
+    ch = (g - a) / max(np.linalg.norm(g - a), 1e-9)
+    offset = np.abs((pts - a) @ np.array([-ch[1], ch[0]]))
+    return {"pts": pts, "arc": arc, "right": right, "offset": offset}
+
+
+def crop_box(bbox, margin=CROP_MARGIN):
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    m = margin * max(w, h, 0.05)
+    return [max(0.0, bbox[0] - m), max(0.0, bbox[1] - m), min(1.0, bbox[2] + m), min(1.0, bbox[3] + m)]
+
+
+def outline_dict(poly, depth_fallback):
+    poly = [[float(np.clip(u, 0, 1)), float(np.clip(v, 0, 1))] for u, v in poly]
+    if len(poly) < 3:
+        return {"polygon": poly, "bbox": None, "crop_box": None, "area": 0.0, "depth_fallback": depth_fallback}
+    us, vs = zip(*poly)
+    bbox = [min(us), min(vs), max(us), max(vs)]
+    return {"polygon": poly, "bbox": bbox, "crop_box": crop_box(bbox),
+            "area": round(_poly_area(poly), 5), "depth_fallback": depth_fallback}
+
+
+def column_outline(frame, vis_xz, top=OBJECT_TOP_M):
+    """i4's outline: hull of the visible cells' floor-to-`top` columns (no depth)."""
+    pts = np.vstack([frame.cam.uv(vis_xz)[0], frame.cam.uv(vis_xz, top)[0]])
+    return outline_dict(convex_hull(pts), depth_fallback=True)
+
+
+DEPTH_BAND_M = 0.3            # object pixels lie within its own depth range +- this
+DEPTH_FIT_MAX_RESID_M = 0.3   # worse fit -> column outline, flagged depth_fallback
+FIT_MAX_M = 8.0               # floor pixels farther than this are too coarse to fit on
+MIN_MASK_PX = 20
+
+
+def calibrate_depth(depth, cam, grid, step=8):
+    """(scale, offset, resid_m) with metres = scale * pixel + offset, or None.
+
+    depth.png is min-max normalised per frame and the range is not stored
+    (spaceitup-habitat/src/roverbench/dataset/writer.py:_depth_png). A floor pixel's planar
+    depth is known from the camera height alone, so the range is re-fitted on pixels whose
+    floor point is a FREE map cell. Pixels showing an object in front of free floor are
+    outliers; two trimmed refits drop them. resid_m is measured over ALL candidate pixels, not
+    the kept inliers: a residual on the fit's own inliers cannot detect a bad fit (noise passed).
+    None when the fitted scale is not positive."""
+    H, W = depth.shape
+    vals, metres = [], []
+    for r in range(int(H * 0.55), H, max(1, H // 64)):
+        v = (r + 0.5) / H
+        fwd = 0.5 * CAM_HEIGHT_M / (v - 0.5)
+        if fwd > FIT_MAX_M:
+            continue
+        for c in range(0, W, max(1, W // 64)):
+            u = (c + 0.5) / W
+            xz = cam.pos + fwd * cam.h + (u - 0.5) * 2 * fwd * cam.right
+            if depth[r, c] > 0 and grid.cell(grid.rc(xz)[0]) == FREE:
+                vals.append(depth[r, c])
+                metres.append(fwd)
+    if len(vals) < 50:
+        return None
+    x0, y0 = np.array(vals), np.array(metres)
+    x, y = x0, y0
+    for _ in range(2):
+        a, b = np.polyfit(x, y, 1)
+        res = np.abs(a * x + b - y)
+        keep = res <= max(DEPTH_BAND_M, np.percentile(res, 80))
+        if keep.sum() < 20:
+            break
+        x, y = x[keep], y[keep]
+    a, b = np.polyfit(x, y, 1)
+    if a <= 0:
+        return None
+    return float(a), float(b), float(np.median(np.abs(a * x0 + b - y0)))
+
+
+def object_outline(frame, vis_xz, top=OBJECT_TOP_M):
+    """The column outline trimmed to pixels at the object's own depth (group B: the column
+    of a coffee table also covered the sofa behind it, and Cosmos named the sofa)."""
+    col = column_outline(frame, vis_xz, top)
+    fit = frame.depth_fit
+    if frame.depth is None or fit is None or fit[2] > DEPTH_FIT_MAX_RESID_M or len(col["polygon"]) < 3:
+        return col
+    H, W = frame.depth.shape
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).polygon([(u * W, v * H) for u, v in col["polygon"]], fill=1)
+    metres = fit[0] * frame.depth + fit[1]
+    fwd = (np.asarray(vis_xz) - frame.cam.pos) @ frame.cam.h
+    keep = (np.asarray(mask, bool) & (frame.depth > 0)
+            & (metres >= fwd.min() - DEPTH_BAND_M) & (metres <= fwd.max() + DEPTH_BAND_M))
+    if keep.sum() < MIN_MASK_PX:
+        return col
+    keep, seeded = _seeded_pieces(frame, keep, metres, vis_xz, top)
+    # no seeded piece: hull the floor-free band itself; the column outline (the group-B shape) only
+    # when nothing but floor was at the object's depth (final review I2: low objects, no visible top)
+    if not seeded and keep.sum() < MIN_MASK_PX:
+        return col
+    ys, xs = np.nonzero(keep)
+    pts = np.stack([(xs + 0.5) / W, (ys + 0.5) / H], 1)[:: max(1, len(xs) // 4000)]
+    return outline_dict(convex_hull(pts), depth_fallback=False)
+
+
+FLOOR_TOL_M = 0.2    # floor at the object's depth would join neighbouring objects into one piece
+PIECE_MAX_PX = 128   # the connected-pieces labelling runs on a mask at most this many px on its long side
+LOW_SEED_M = 0.25    # extra seed height: an object lower than top/2 still holds a seed (final review I2)
+
+
+def _seeded_pieces(frame, keep, metres, vis_xz, top):
+    """(keep', True) with `keep` cut to its 8-connected pieces that hold a seed pixel (the cells'
+    projections at heights min(top, 0.25), top/2, top -- the low seed catches objects shorter than
+    top/2; height 0 lands on floor); floor pixels are removed first;
+    (floor-free keep, False) when no piece holds one. Gate 1: a hull over
+    several things at one depth (two chairs and a doorway) made Cosmos name the wrong object."""
+    H, W = keep.shape
+    v = (np.arange(H)[:, None] + 0.5) / H
+    floor = 0.5 * CAM_HEIGHT_M / np.maximum(v - 0.5, 1e-6)
+    keep = keep & ~((v > 0.5) & (np.abs(metres - floor) < FLOOR_TOL_M))
+    st = max(1, -(-max(H, W) // PIECE_MAX_PX))
+    small = keep[::st, ::st]
+    lab, _ = components(small)
+    ids = set()
+    for h in (min(top, LOW_SEED_M), top / 2, top):
+        uv, fwd = frame.cam.uv(np.asarray(vis_xz), h)
+        uv = np.nan_to_num(uv[fwd > 1e-6], nan=0.0, posinf=1.0, neginf=0.0)
+        c = np.clip((uv[:, 0] * W).astype(int), 0, W - 1) // st
+        r = np.clip((uv[:, 1] * H).astype(int), 0, H - 1) // st
+        ids.update(int(i) for i in lab[np.minimum(r, lab.shape[0] - 1), np.minimum(c, lab.shape[1] - 1)] if i)
+    if not ids:
+        return keep, False
+    full = np.isin(np.kron(lab, np.ones((st, st), int))[:H, :W], list(ids)) & keep
+    return full, bool(full.any())
+
+
+def candidates(frame, route_xz, outline=None):
+    """Every salient obstacle the route passes, in route order (see module docstring)."""
+    outline = outline or object_outline
+    rg = route_geometry(route_xz)
+    usable = np.nonzero(rg["arc"] > START_SKIP_M)[0]
+    if not len(usable):
+        return []
+    pts = rg["pts"][usable]
+    step = np.gradient(rg["arc"][usable]) if len(usable) > 1 else np.zeros(1)
+    out = []
+    for b in np.unique(frame.lab[frame.lab > 0]):
+        cells = np.argwhere(frame.lab == b)
+        xz = frame.grid.xz(cells)
+        dist = np.linalg.norm(xz[:, None] - pts[None], axis=2)
+        j, k = np.unravel_index(dist.argmin(), dist.shape)
+        if dist[j, k] > PASS_M:
+            continue
+        gap = _threaded_gap(xz, dist, usable, rg)
+        ext = xz.max(0) - xz.min(0)
+        is_doorway = gap is not None and float(np.hypot(*ext)) >= WALL_EXTENT_M
+        touch = bool(dist[j, k] < TOUCH_M and not is_doorway)   # the route runs through it: no side (Addendum A2)
+        alongside = dist.min(0) <= PASS_M
+        along = float(step[alongside].sum())
+        along_end = float(rg["arc"][usable][alongside].max())   # where the route leaves the blob
+        wall = bool(np.hypot(*ext) >= WALL_EXTENT_M and along >= ALONG_MIN_M)
+        near = dist.min(1) <= (WALL_KEEP_M if wall else KEEP_NEAR_ROUTE_M)
+        vis = visible_cells(frame, cells[near], int(b))
+        if len(vis) < MIN_VISIBLE_CELLS:
+            continue
+        o = outline(frame, vis)
+        if o["area"] < MIN_AREA:
+            continue
+        i = usable[k]
+        on_right = (xz[j] - rg["pts"][i]) @ rg["right"][i] > 0
+        out.append({
+            "blob": int(b), "pass_m": float(dist[j, k]), "arc_m": float(rg["arc"][i]),
+            "side": "left" if on_right else "right",
+            "offset_m": float(rg["offset"][i]), "extent_m": float(np.hypot(*ext)),
+            "wall": wall, "touch": touch, "along_m": along, "along_end_arc_m": along_end,
+            "gap": gap, "vis_xz": vis, "outline": o, "route_pts": rg["pts"],
+            "score": float(np.sqrt(o["area"]) * max(rg["offset"][i], OFFSET_FLOOR_M)),
+        })
+    return sorted(out, key=lambda c: c["arc_m"])
+
+
+def _crosses(p, q, pts):
+    """True when segment p-q intersects the polyline `pts` (2-D)."""
+    a, b = pts[:-1], pts[1:]
+    r = q - p
+
+    def cr(u, v):
+        return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+    d1, d2 = cr(r, a - p), cr(r, b - p)
+    d3, d4 = cr(b - a, p - a), cr(b - a, q - a)
+    return bool(np.any((d1 * d2 <= 0) & (d3 * d4 <= 0)))
+
+
+def _crossing_pair(P, Q, pts, ok=None):
+    """(p, q): the closest cell pair, one from each of P and Q, whose segment crosses the route
+    polyline `pts` (and satisfies the optional mask `ok`) -- the opening the route threads --
+    or None when there is none or that opening is narrower than MIN_GAP_M."""
+    d = np.linalg.norm(P[:, None] - Q[None], axis=2)
+    idx = np.argwhere(d >= 0 if ok is None else ok)
+    if not len(idx):
+        return None
+    order = np.argsort(d[tuple(idx.T)])[:MAX_GAP_PAIRS]
+    for i, j in idx[order]:
+        if _crosses(P[i], Q[j], pts):
+            return (P[i], Q[j]) if d[i, j] >= MIN_GAP_M else None
+    return None
+
+
+def _threaded_gap(xz, dist, usable, rg):
+    """(p, q) when the route threads through this blob: cells within PASS_M on both sides at
+    about the same arclength, at least MIN_GAP_M apart, with the segment between them crossing
+    the route (a doorway in one connected wall), else None."""
+    close = np.nonzero(dist.min(1) <= PASS_M)[0]
+    if not len(close):
+        return None
+    k = dist[close].argmin(1)
+    i = usable[k]
+    s = np.einsum("ij,ij->i", xz[close] - rg["pts"][i], rg["right"][i])
+    left, right = close[s < 0], close[s > 0]
+    if not (len(left) and len(right)):
+        return None
+    arc = rg["arc"][i]
+    al, ar = arc[s < 0], arc[s > 0]
+    return _crossing_pair(xz[left], xz[right], rg["pts"], np.abs(al[:, None] - ar[None]) <= PAIR_ARC_M)
+
+
+MAX_EVENTS = 3
+WALL_EXTENT_M = 1.5        # two blobs this long on both sides of the route = an opening
+OPENING_TOP_M = 2.0        # an opening's outline reaches this high (a door)
+STOP_NEAR_M = 1.0
+AFTER_LAST_M = 1.5
+STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
+APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
+STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": its max offset from entry->goal must be within this
+REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "no_events_bent", "error")
+CHECK_CELLS = 40           # cells per object kept for the eval's follow check
+
+
+def opening_outline(frame, p, q):
+    """Floor-to-OPENING_TOP_M quad between the two cells flanking a gap."""
+    ends = np.array([p, q], float)
+    lo, _ = frame.cam.uv(ends)
+    hi, _ = frame.cam.uv(ends, OPENING_TOP_M)
+    o = outline_dict(convex_hull(np.vstack([lo, hi])), depth_fallback=True)
+    o["gap_xz"] = [[round(float(v), 3) for v in p], [round(float(v), 3) for v in q]]
+    return o
+
+
+OTHER_SIDE = {"left": "right", "right": "left"}
+
+
+def _end_arc(c):
+    """Where the route is done with a candidate: a wall where the route leaves it, else its closest approach."""
+    return c["along_end_arc_m"] if c["wall"] else c["arc_m"]
+
+
+def _event(kind, side, members, cands, **extra):
+    """An event row; arc_m = where it starts, end_arc_m = where the route is done with its last member.
+
+    A through event is done at its crossing (arc_m): its members are usually wall-flagged, and with
+    gap-merged blobs the walls beyond the door are the same blob, so along_end_arc_m would put the
+    end far past the door (final review I1: "stop just after the doorway" 3.5 m past it)."""
+    arc = min(cands[m]["arc_m"] for m in members)
+    end = arc if kind == "through" else max(_end_arc(cands[m]) for m in members)
+    return {"type": kind, "side": side, "members": list(members), "arc_m": arc, "end_arc_m": end,
+            "score": sum(cands[m]["score"] for m in members), **extra}
+
+
+def _obstacle_side(e):
+    """The route side the obstacle of a pass/wall event is on: a wall's side IS that side (the
+    rover's own side), a pass's side is the side the route passes on, so the obstacle is opposite."""
+    return e["side"] if e["type"] == "wall" else OTHER_SIDE[e["side"]]
+
+
+def _merge(frame, a, b, cands):
+    """One event for two adjacent ones (Addendum A 3), or None when they stay apart: obstacles on
+    opposite sides -> between (two wall-long blobs flanking a crossing opening -> through, as before);
+    two objects on the same side -> one pass of both. Never with a through event, never one blob twice,
+    never farther apart along the route than MERGE_ARC_M (from a's end -- a wall's end is where the route
+    leaves it -- to b's start). build_events pairs greedily left to right; each event merges at most once."""
+    if "through" in (a["type"], b["type"]) or b["arc_m"] - a["end_arc_m"] > MERGE_ARC_M:
+        return None
+    members = a["members"] + b["members"]
+    if len({cands[m]["blob"] for m in members}) < len(members):
+        return None
+    touching = any(cands[m]["touch"] for m in members)   # a touching blob's side is undefined: only a through can use it
+    if touching or _obstacle_side(a) != _obstacle_side(b):
+        ca, cb = cands[a["members"][0]], cands[b["members"][0]]
+        if (ca["extent_m"] >= WALL_EXTENT_M and cb["extent_m"] >= WALL_EXTENT_M
+                and abs(cb["arc_m"] - ca["arc_m"]) <= PAIR_ARC_M):
+            pq = _crossing_pair(ca["vis_xz"], cb["vis_xz"], ca["route_pts"])
+            if pq is not None:
+                return _event("through", None, members, cands, opening=opening_outline(frame, *pq))
+        return None if touching else _event("between", None, members, cands)
+    if a["type"] == b["type"] == "pass":
+        return _event("pass", a["side"], members, cands)
+    return None
+
+
+def build_events(frame, cands):
+    """Top-MAX_EVENTS events by score, returned in route order.
+
+    Each candidate is classified first: a crossing gap in a wall-long blob -> through (wins over
+    wall, Review Focus 1); a wall the route runs alongside -> wall (side = the rover's side of it);
+    anything else -> pass. Then adjacent single events merge left to right (see _merge)."""
+    single = []
+    for k, a in enumerate(cands):
+        if a["gap"] is not None and a["extent_m"] >= WALL_EXTENT_M:
+            single.append(_event("through", None, [k], cands, opening=opening_outline(frame, *a["gap"])))
+        elif a["wall"]:
+            single.append(_event("wall", OTHER_SIDE[a["side"]], [k], cands))
+        else:
+            single.append(_event("pass", a["side"], [k], cands))
+    touch = [cands[e["members"][0]]["touch"] for e in single]
+    # A touching blob (the route runs through it, Addendum A2) has no side: it may only be one half of a
+    # through (a doorway jamb). Pair those first; every other touching single is dropped from the sequence,
+    # so its clear neighbours still merge exactly as they did before the rule.
+    seq, i = [], 0
+    while i < len(single):
+        m = None
+        if i + 1 < len(single) and (touch[i] or touch[i + 1]):
+            m = _merge(frame, single[i], single[i + 1], cands)
+            m = m if m and m["type"] == "through" else None
+        if m:
+            seq.append(m)
+            i += 2
+        else:
+            if not touch[i]:
+                seq.append(single[i])
+            i += 1
+    events, i = [], 0
+    while i < len(seq):
+        m = _merge(frame, seq[i], seq[i + 1], cands) if i + 1 < len(seq) else None
+        events.append(m or seq[i])
+        i += 2 if m else 1
+    top = sorted(events, key=lambda e: -e["score"])[:MAX_EVENTS]
+    return sorted(top, key=lambda e: e["arc_m"])
+
+
+def _blob_cells(frame):
+    """label -> (cells_rc, world xz) for every blob; one pass over the grid, cached on the frame."""
+    if frame.blob_cells is None and not (frame.lab > 0).any():
+        frame.blob_cells = {}
+    if frame.blob_cells is None:
+        rc = np.argwhere(frame.lab > 0)
+        lab = frame.lab[rc[:, 0], rc[:, 1]]
+        order = np.argsort(lab, kind="stable")
+        rc, lab = rc[order], lab[order]
+        cuts = np.nonzero(np.diff(lab))[0] + 1
+        frame.blob_cells = {int(g[0]): (c, frame.grid.xz(c))
+                            for g, c in zip(np.split(lab, cuts), np.split(rc, cuts))}
+    return frame.blob_cells
+
+
+def _anchor(frame, blob, goal, cells, xz, d):
+    """The stop anchor for one blob (visible part within STOP_FAR_M of the goal), or None."""
+    vis = visible_cells(frame, cells[d <= STOP_FAR_M + KEEP_NEAR_ROUTE_M], blob)
+    if len(vis) < MIN_VISIBLE_CELLS:
+        return None
+    o = object_outline(frame, vis)
+    if o["area"] < MIN_AREA:
+        return None
+    return {"blob": blob, "near_xz": xz[d.argmin()], "dist": float(d.min()), "vis_xz": vis, "outline": o}
+
+
+def _blobs_near(frame, goal, max_dist):
+    """(blob, cells, xz, d-to-goal) for the blobs with a cell within max_dist of the goal."""
+    out = []
+    for b, (cells, xz) in _blob_cells(frame).items():
+        d = np.linalg.norm(xz - goal, axis=1)
+        if d.min() <= max_dist:
+            out.append((b, cells, xz, d))
+    return out
+
+
+def amount(metres):
+    """The coarse stop amount for a distance: "just" / "a little" / "well" (AMOUNT_STEPS)."""
+    return next(word for limit, word in AMOUNT_STEPS if metres < limit)
+
+
+def _wall_like(xz):
+    return float(np.hypot(*np.ptp(np.asarray(xz), axis=0))) >= WALL_EXTENT_M
+
+
+def _event_anchor(event, cands, route_len):
+    """(anchor, arc_m) standing for an event in a "past" stop, or None.
+
+    A through event -> its opening. Otherwise the member passed last that can be stopped past:
+    an object from its closest approach (arc_m); a wall-like member (extent >= WALL_EXTENT_M, Review
+    Focus 3) only once the route has left it -- from the last route point within PASS_M of it
+    (along_end_arc_m), and only when more than AFTER_LAST_M of route follows (controller ruling)."""
+    if event["type"] == "through":
+        blobs = [cands[m]["blob"] for m in event["members"]]
+        gap = event["opening"]["gap_xz"]
+        return {"blob": blobs[0], "vis_xz": gap, "outline": event["opening"],
+                "key": _gap_key(blobs, gap), "kind": "opening"}, event["arc_m"]
+    ok = []
+    for m in event["members"]:
+        c = cands[m]
+        if c["extent_m"] < WALL_EXTENT_M:
+            ok.append((c["arc_m"], c))
+        elif route_len - c["along_end_arc_m"] > AFTER_LAST_M:
+            ok.append((c["along_end_arc_m"], c))
+    if not ok:
+        return None
+    arc, c = max(ok, key=lambda t: t[0])
+    return {"blob": c["blob"], "vis_xz": c["vis_xz"], "outline": c["outline"],
+            "kind": "wall" if c["wall"] else "object"}, arc
+
+
+def _just_after(event, cands, route_len):
+    """At most AFTER_LAST_M of route after the event; when its last member is a wall, the goal must
+    also be past the wall's end (a goal still beside the wall is not "just after" it). Never for a
+    through event: it ends at its crossing, whatever its members' wall flags (final review I1)."""
+    remaining = route_len - event["end_arc_m"]
+    last = None if cands is None or event["type"] == "through" else \
+        max((cands[m] for m in event["members"]), key=_end_arc)
+    return remaining <= AFTER_LAST_M and (remaining > 1e-6 or last is None or not last["wall"])
+
+
+def _distance(relation, metres, anchor):
+    return {"type": "distance", "relation": relation, "amount": amount(metres),
+            "distance_m": round(float(metres), 1), "anchor": anchor}
+
+
+def stop_phrase(frame, route_xz, events, cands=None):
+    """Where the route ends, first rule that fits (Addendum A 1):
+    1. near: the nearest blob within STOP_NEAR_M the goal is clearly in front of / just past
+       (a blob mostly beside the goal is skipped -- "next to" is gone -- and a wall-like blob,
+       extent >= WALL_EXTENT_M, only takes "in front of"); the next-nearest is tried in turn;
+    2. after_last: at most AFTER_LAST_M of route after the last event;
+    3. distance past the last event's anchor, any remaining length, as a coarse amount; a wall-like
+       member only counts once the route has left it (see _event_anchor); when the last event has
+       no such anchor, the latest earlier event that has one;
+    4. distance before / past the nearest blob on the line of approach (within STOP_FAR_M);
+       a wall-like blob only "before" (it is ahead: in front of, at a distance).
+    None when nothing fits (the route is dropped). Visibility and outlines (the expensive part)
+    are only computed for the blobs a rule actually tries, nearest first."""
+    rg = route_geometry(route_xz)
+    goal = rg["pts"][-1]
+    back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal
+    head = goal - back
+    head /= max(np.linalg.norm(head), 1e-9)
+    right = np.array([-head[1], head[0]])
+    blobs = sorted(_blobs_near(frame, goal, STOP_FAR_M), key=lambda t: t[3].min())
+    for b, cells, xz, d in blobs:
+        if d.min() > STOP_NEAR_M:
+            break
+        v = xz[d.argmin()] - goal
+        along, lat = float(v @ head), float(v @ right)
+        rel = "in front of" if along > abs(lat) else "just past" if along < -abs(lat) else None
+        if rel is None or (rel != "in front of" and _wall_like(xz)):
+            continue
+        x = _anchor(frame, b, goal, cells, xz, d)
+        if x is not None:
+            if _wall_like(xz):
+                x["kind"] = "wall"
+            return {"type": "near", "relation": rel, "anchor": x}
+    if events and _just_after(events[-1], cands, rg["arc"][-1]):
+        return {"type": "after_last", "relation": "just after", "anchor": None}
+    # how far past the last thing passed, when nothing visible is near the goal
+    last = next((a for a in (_event_anchor(e, cands, rg["arc"][-1]) for e in reversed(events)) if a), None) \
+        if cands is not None else None
+    if last is not None:
+        return _distance("past", rg["arc"][-1] - last[1], last[0])
+    for b, cells, xz, d in blobs:
+        v = xz[d.argmin()] - goal
+        if abs(v @ head) / max(np.linalg.norm(v), 1e-9) < APPROACH_COS:
+            continue
+        ahead = bool(v @ head > 0)
+        if not ahead and _wall_like(xz):
+            continue
+        x = _anchor(frame, b, goal, cells, xz, d)
+        if x is not None:
+            return _distance("before" if ahead else "past", x["dist"], x)
+    return None
+
+
+def _none(reason, **diag):
+    return {"reason": reason, "events": [], "stop": None, "objects": {}, "diag": diag}
+
+
+def _cells(xz, n=CHECK_CELLS):
+    xz = np.asarray(xz, float)
+    if len(xz) > n:
+        xz = xz[np.linspace(0, len(xz) - 1, n).astype(int)]
+    return [[round(float(a), 3), round(float(b), 3)] for a, b in xz]
+
+
+def _gap_key(blobs, gap_xz):
+    """Object-id suffix of an opening. One blob can hold several doorways and gap_xz depends on
+    the route, so a single-blob gap is named by its midpoint; a pair by its sorted blob ids."""
+    if len(blobs) == 1:
+        mx, mz = np.mean(gap_xz, axis=0)
+        return f"gap{blobs[0]}@{mx:.1f},{mz:.1f}"
+    return "gap" + "-".join(str(b) for b in sorted(blobs))
+
+
+def describe_route(sample_dir, candidate_index):
+    """The events + stop phrase for one candidate route of one frame (see module docstring)."""
+    sd = Path(sample_dir)
+    if not (sd / "state.npz").exists():
+        return _none("no_state")
+    meta, frame = load_frame(sd)
+    cm = meta.get("candidates", [])
+    if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
+        return _none("bad_candidate")
+    return describe_xz(meta, frame, cm[candidate_index]["polyline_xz"])
+
+
+def describe_xz(meta, frame, route):
+    """The events + stop phrase for any route polyline (world xz) on a loaded frame
+    (steering pairs describe routes that are not candidates of the frame)."""
+    route = np.asarray(route, float)
+    cands = candidates(frame, route)
+    events = build_events(frame, cands)
+    if not events and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:
+        return _none("no_events_bent")                   # "go straight ahead" would be false
+    stop = stop_phrase(frame, route, events, cands)
+    if stop is None:
+        return _none("no_stop_anchor", n_events=len(events))
+    # Object rows in two explicit passes. Events first: an event member's kind_hint is its event role
+    # (pass member -> "object", wall member -> "wall", opening -> "opening"). Then the stop anchor:
+    # it reuses an event's object row unchanged, and sets kind_hint / outline only for a new object.
+    objects = {}
+
+    def add(key, kind, outline, cells):
+        oid = f"{frame.name}:{key}"
+        if oid not in objects:
+            objects[oid] = {"object_id": oid, "kind_hint": kind,
+                            **{k: outline[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")},
+                            "cells_xz": _cells(cells)}
+        return oid
+
+    rows = []
+    for e in events:
+        blobs = [cands[m]["blob"] for m in e["members"]]
+        if e["type"] == "through":
+            ids = [add(_gap_key(blobs, e["opening"]["gap_xz"]), "opening", e["opening"], e["opening"]["gap_xz"])]
+        else:
+            ids = [add(f"b{cands[m]['blob']}", "wall" if cands[m]["wall"] else "object",
+                       cands[m]["outline"], cands[m]["vis_xz"]) for m in e["members"]]
+        row = {"type": e["type"], "side": e["side"], "objects": ids, "arc_m": round(e["arc_m"], 2)}
+        if e["type"] == "through":
+            row["gap_xz"] = e["opening"]["gap_xz"]
+        rows.append(row)
+    st = {"type": stop["type"], "relation": stop["relation"], "amount": stop.get("amount"),
+          "distance_m": stop.get("distance_m"), "object": None}
+    if stop["anchor"] is not None:                       # after every event row (see above)
+        a = stop["anchor"]
+        st["object"] = add(a.get("key", f"b{a['blob']}"), a.get("kind", "object"), a["outline"], a["vis_xz"])
+    return {"reason": None, "events": rows, "stop": st, "objects": objects,
+            "goal_xz": [round(float(v), 3) for v in route[-1]],
+            "pose_xz": [float(v) for v in meta["pose_xz"]], "heading_xz": [float(v) for v in meta["heading_xz"]],
+            "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
+
+
+EVENTS_SCHEMA = "d1-addendumA2"  # stamped into events_meta.json by prepare_habitat_instr.py events
+
+
+def check_events_schema(events_path):
+    """SystemExit unless the events_meta.json next to `events_path` carries EVENTS_SCHEMA: events
+    rows from before Addendum A have distance stops without amounts and no wall / between events."""
+    mp = Path(events_path).parent / "events_meta.json"
+    try:
+        schema = json.loads(mp.read_text()).get("schema")
+    except (OSError, ValueError):
+        schema = None
+    if schema != EVENTS_SCHEMA:
+        raise SystemExit(f"events files predate Addendum A — rerun prepare_habitat_instr.py events "
+                         f"({mp}: schema {schema!r}, want {EVENTS_SCHEMA!r})")
+
+
+def collect_objects(rows):
+    """(rows without their "objects", one object row per id). Both routes of a pair share
+    their frame's objects; the first route's outline wins (its name serves both)."""
+    objects, kept = {}, []
+    for r in rows:
+        r = dict(r)
+        for oid, o in (r.pop("objects", None) or {}).items():
+            objects.setdefault(oid, {**o, "image": r["image"]})
+        kept.append(r)
+    return kept, list(objects.values())

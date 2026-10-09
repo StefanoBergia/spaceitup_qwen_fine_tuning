@@ -3,8 +3,8 @@ import json
 import pytest
 
 from rover_vlm.eval import aggregate_choice_metrics, choice_metrics, parse_choice_answer
+from rover_vlm.habitat_data import sample_dirs_by_id
 from rover_vlm.habitat_choice import (
-    DATASET_ROOT,
     badge_positions,
     build_choice_record,
     candidate_polylines,
@@ -257,9 +257,10 @@ def test_aggregate_breakdowns_present():
 
 
 def test_live_sample_indices_align():
-    if not DATASET_ROOT.exists():
+    live = sample_dirs_by_id()
+    if not live:
         pytest.skip("dataset not mounted")
-    sample = next(DATASET_ROOT.glob("*/samples/*/"))
+    sample = live[min(live)]
     meta = json.loads((sample / "meta.json").read_text())
     fpv = json.loads((sample / "fpv_paths.json").read_text())
     assert len(fpv["candidates"]) == len(meta["candidates"])

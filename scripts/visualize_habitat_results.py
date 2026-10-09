@@ -21,7 +21,8 @@ import json
 import re
 from pathlib import Path
 
-from rover_vlm.eval import goal_visibility_confusion
+from rover_vlm.consistency import start_edge
+from rover_vlm.eval import goal_visibility_confusion, to_goal_error, trivial_baselines
 from rover_vlm.overlay import embed_jpeg, render_pair
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -72,6 +73,104 @@ def load(eval_dir, data_dir):
     if not runs:
         raise SystemExit(f"no metrics under {eval_dir}/<tag>/metrics.json — run the evals first")
     return meta, runs
+
+
+EDGE_ORDER = [("bottom", "Bottom — the rover's own position"),
+              ("left", "Left edge — rover off-frame"),
+              ("right", "Right edge — rover off-frame")]
+
+
+def build_baselines(run):
+    """What an image-blind predictor scores, and how often the model actually beats it.
+
+    Once the goal is handed over in the prompt, `to_goal` -- the straight line to that
+    goal -- is the only honest floor, and the per-sample win rate is the only honest
+    summary: a handful of catastrophic misses drag the set mean above a baseline the
+    model beats on most frames.
+    """
+    scored = [r for r in run["preds"].values() if r.get("metrics") and r.get("gt")]
+    if not scored:
+        return None
+    base = trivial_baselines([r["gt"] for r in scored])
+    wins = [r["metrics"]["mean_point_error"] < to_goal_error(r["gt"]) for r in scored]
+    return {
+        "n": len(scored),
+        "winRate": sum(wins) / len(wins),
+        "modelMean": sum(r["metrics"]["mean_point_error"] for r in scored) / len(scored),
+        "modelMedian": sorted(r["metrics"]["mean_point_error"] for r in scored)[len(scored) // 2],
+        "floors": [{"key": k, "mean": base[k]["mean_point_error_mean"],
+                    "median": base[k]["mean_point_error_median"]}
+                   for k in ("to_goal", "straight", "constant") if k in base],
+    }
+
+
+def build_edges(run):
+    """Error split by which frame border the route enters from.
+
+    The edge comes from the *ground truth* path (rover_vlm.consistency.start_edge), not
+    the prepared sidecar, so this works for every round including the ones prepared
+    before entry_edge was recorded.
+    """
+    groups = {}
+    for r in run["preds"].values():
+        if not (r.get("metrics") and r.get("gt")):
+            continue
+        e = start_edge(r["gt"])
+        if e not in dict(EDGE_ORDER):
+            continue
+        g = groups.setdefault(e, {"err": [], "tg": [], "wrong": 0})
+        g["err"].append(r["metrics"]["mean_point_error"])
+        g["tg"].append(to_goal_error(r["gt"]))
+        if r.get("parsed") and start_edge(r["parsed"]) != e:
+            g["wrong"] += 1
+    if not groups:
+        return None
+    total = sum(len(g["err"]) for g in groups.values())
+    out = []
+    for key, title in EDGE_ORDER:
+        g = groups.get(key)
+        if not g:
+            continue
+        n = len(g["err"])
+        out.append({
+            "key": key, "title": title, "n": n, "share": n / total,
+            "mean": sum(g["err"]) / n,
+            "median": sorted(g["err"])[n // 2],
+            "toGoal": sum(g["tg"]) / n,
+            "wrongEdge": g["wrong"] / n,
+            "winRate": sum(a < b for a, b in zip(g["err"], g["tg"])) / n,
+        })
+    return out
+
+
+def build_wrong_edge_gallery(base_run, full_run, eval_records, limit, max_px):
+    """Frames where the model started the route from the wrong border.
+
+    The single most expensive failure in round 3 and the reason round 4 hands the entry
+    point over: the shape is usually fine, it is simply drawn from the opposite side.
+    """
+    by_id = {r["id"]: r for r in eval_records}
+    cands = []
+    for sid, r in full_run["preds"].items():
+        if not (r.get("metrics") and r.get("parsed") and sid in by_id):
+            continue
+        gt_e, pred_e = start_edge(r["gt"]), start_edge(r["parsed"])
+        if gt_e in dict(EDGE_ORDER) and pred_e != gt_e:
+            cands.append((-r["metrics"]["mean_point_error"], sid, gt_e, pred_e))
+    cands.sort()
+    out = []
+    for negerr, sid, gt_e, pred_e in cands[:limit]:
+        path = Path(by_id[sid]["image"][0])
+        if not path.exists():
+            continue
+        fr = full_run["preds"][sid]
+        br = base_run["preds"].get(sid) if base_run else None
+        img = render_pair(path, fr["gt"], br.get("parsed") if br else None,
+                          fr.get("parsed"), COLOR_BASE, COLOR_LORA)
+        out.append({"id": sid, "img": embed_jpeg(img, max_px * 2),
+                    "err": round(-negerr, 3), "gtEdge": gt_e, "predEdge": pred_e,
+                    "toGoal": round(to_goal_error(fr["gt"]), 3)})
+    return out
 
 
 def build_gallery(base_run, full_run, eval_records, per_bucket, max_px):
@@ -128,6 +227,11 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--per-bucket", type=int, default=4)
     p.add_argument("--max-image-px", type=int, default=380)
+    p.add_argument("--title", default=None,
+                   help="page <title>, which is what names the published artifact; "
+                        "defaults to model + split sizes so two rounds stay distinguishable")
+    p.add_argument("--wrong-edge", type=int, default=4,
+                   help="frames to show in the wrong-start-edge gallery (0 to omit)")
     args = p.parse_args()
 
     meta, runs = load(args.eval_dir, args.data_dir)
@@ -139,6 +243,9 @@ def main() -> None:
 
     data = {
         "label": args.label,
+        # what the prompt handed over; older preps recorded goal_in_prompt or nothing.
+        # The floors section reads differently when the model had to infer the goal.
+        "framing": meta.get("framing") or ("goal" if meta.get("goal_in_prompt") else "legacy"),
         "nEval": full["metrics"]["num_samples"],
         "trainFull": meta["splits"]["train_full"],
         "metrics": [{"key": k, "name": n, "unit": u, "better": b} for k, n, u, b in METRICS],
@@ -152,6 +259,12 @@ def main() -> None:
         "gallery": build_gallery(base, full, eval_records, args.per_bucket, args.max_image_px),
         "baseMetrics": base["metrics"] if base else None,
         "fullMetrics": full["metrics"],
+        "baselines": build_baselines(full),
+        "baseBaselines": build_baselines(base) if base else None,
+        "edges": build_edges(full),
+        "wrongEdge": (build_wrong_edge_gallery(base, full, eval_records,
+                                               args.wrong_edge, args.max_image_px)
+                      if args.wrong_edge else []),
     }
 
     out = args.out or (args.eval_dir / "habitat_results.html")
@@ -160,10 +273,9 @@ def main() -> None:
     html = html.replace("/*__DATA__*/null", json.dumps(data))
     # the <title> must name the model in the file itself, not just at runtime: it is what
     # names the published artifact, and two models' reports are otherwise indistinguishable
-    html = re.sub(r"<title>.*?</title>",
-                  f"<title>Habitat rover path + visibility — {data['label']} LoRA "
-                  f"({data['trainFull']:,} train / {data['nEval']:,} eval)</title>",
-                  html, count=1)
+    title = args.title or (f"Habitat rover path + visibility — {data['label']} LoRA "
+                           f"({data['trainFull']:,} train / {data['nEval']:,} eval)")
+    html = re.sub(r"<title>.*?</title>", f"<title>{title}</title>", html, count=1)
     out.write_text(html)
     print(f"wrote {out}  ({out.stat().st_size / 1024:.0f} KB, {len(data['gallery'])} gallery frames)")
 

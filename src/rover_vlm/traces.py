@@ -47,7 +47,15 @@ from .habitat_choice import CANDIDATE_COLORS
 # v6 demands one JSON object in <answer>. Shortening the scratch made Cosmos skip the
 # JSON envelope and write bare prose on 19 of 30 choice samples — the trace survived via
 # salvage but the echoed answer, our only drift check, did not.
-PROMPT_VERSION = "v6"
+#
+# v7 (path only) matches the round-4 "endpoints" framing of data/prepared_habitat_v4: at
+# inference Qwen is told where the route enters the frame and where the goal is, so the
+# prompt hands Cosmos the same two facts and lets the trace use them. It derives the goal
+# from the last waypoint when the answer carries no "goal" field (v4 answers are path-only),
+# names the real entry edge instead of v6's "starts at the bottom of the frame" (false for
+# side entries), and bans the handed-route family up front — the v6 full run leaked on ~5%
+# of traces via "the planned path", which only the filter caught afterwards.
+PROMPT_VERSION = "v7"
 
 # Parallel to habitat_choice.CANDIDATE_COLORS — Cosmos sees colours, not RGB tuples, and
 # naming them lets it refer to a candidate the way the image actually presents it.
@@ -169,14 +177,35 @@ def path_summary(path, goal):
     }
 
 
+def _vis_phrase(wp):
+    return "visible" if len(wp) > 2 and wp[2] else "hidden behind an obstacle"
+
+
+def entry_edge(start):
+    """Which frame edge a route enters from, as a phrase — or 'inside the frame'."""
+    x, y = start[0], start[1]
+    if y >= 0.999:
+        return "bottom edge"
+    if x <= 0.001:
+        return "left edge"
+    if x >= 0.999:
+        return "right edge"
+    if y <= 0.001:
+        return "top edge"
+    return "inside the frame"
+
+
 def path_trace_prompt(record):
     """Prompt asking Cosmos to justify the ground-truth route of a regression sample.
 
     Regression records carry no metadata sidecar, so the facts are derived from the
-    answer JSON in conversations[1] via path_summary().
+    answer JSON in conversations[1] via path_summary(). Round-4 answers are path-only,
+    with the goal as their last waypoint; legacy answers carry an explicit "goal".
     """
     gt = json.loads(record["conversations"][1]["value"])
-    path, goal = gt["path"], gt["goal"]
+    path = gt["path"]
+    goal = gt.get("goal") or path[-1]
+    start = path[0]
     s = path_summary(path, goal)
 
     heading = {
@@ -194,24 +223,34 @@ def path_trace_prompt(record):
     else:
         occlusion = "The entire route stays on visible, unobstructed floor."
 
+    edge = entry_edge(start)
+    where = f"on the {edge}" if edge != "inside the frame" else "inside the frame"
+
     return f"""{SCENE_INTRO}
 
-The rover must reach a goal ahead of it. The route it should take, as normalized image
-coordinates where x runs right and y runs down and both lie in [0,1], is:
+The rover enters the frame at [{start[0]}, {start[1]}], {where}, where it is
+{_vis_phrase(start)}, and must reach the goal at [{goal[0]}, {goal[1]}], where it is
+{_vis_phrase(goal)}. Coordinates are normalized image coordinates, x running right and y
+running down, both in [0,1]. Those two points are all the rover knows.
+
+The route it ends up driving between them, as [x, y, v] waypoints where v is 1 when the
+point lies on visible unobstructed ground and 0 when it is hidden behind an obstacle, is:
 
 {json.dumps(gt)}
 
-Each waypoint is [x, y, v], where v is 1 when the point lies on visible unobstructed
-ground and 0 when it is hidden behind an obstacle.
+It {heading}. {occlusion}
 
-This route starts at the bottom of the frame, at the rover's own position, and {heading}.
-{occlusion}
-
-Produce the rover's reasoning for taking this route. It should cover three things and
+Produce the rover's reasoning for driving this route. It should cover three things and
 nothing else: what makes the floor along it actually drivable, what obstacle or piece of
 furniture forces it into the shape it has, and what it passes behind where it stops being
 visible. Do not inventory the room — mention an object only when it explains the route.
 Do not restate the coordinates.
+
+One rule specific to this task: the rover has decided nothing yet and has been handed no
+route. It knows where it enters and where the goal is, and is choosing where to drive
+right now from what it sees. So never call the route planned, pre-planned, designated,
+prescribed, given, known, computed or intended, and never say it follows, trusts or sticks
+to one — it is deciding, not complying.
 
 {NO_LEAK_RULES}
 
@@ -383,7 +422,9 @@ def answer_matches(task, answer, record):
     # Path echoes only the goal: re-emitting the whole waypoint list cost ~200 tokens,
     # pushed Cosmos into pretty-printed fenced JSON (which lost the <answer> tags), and
     # verified nothing extra. Three numbers catch the same drift.
-    return parsed.get("goal") == truth.get("goal")
+    # Round-4 answers are path-only: the goal is the last waypoint.
+    truth_goal = truth.get("goal") or (truth.get("path") or [None])[-1]
+    return parsed.get("goal") == truth_goal
 
 
 def build_prompt(task, record):
@@ -399,6 +440,7 @@ __all__ = [
     "CANDIDATE_COLOR_NAMES",
     "KIND_PHRASES",
     "PROMPT_VERSION",
+    "entry_edge",
     "answer_matches",
     "answer_payload",
     "build_prompt",

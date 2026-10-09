@@ -22,13 +22,14 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from rover_vlm.habitat_data import DATASET_ROOTS, sample_dirs_by_id
 from rover_vlm.compare import (
     load_metrics,
     load_predictions,
     mcnemar_exact,
     paired_bootstrap,
 )
-from rover_vlm.habitat_choice import CANDIDATE_COLORS, DATASET_ROOT, render_choice_image
+from rover_vlm.habitat_choice import CANDIDATE_COLORS, render_choice_image
 from rover_vlm.overlay import draw_path, draw_polyline, embed_jpeg
 
 # must match the --s1 / --s2 series tokens in _comparison_report.html
@@ -200,7 +201,7 @@ def main() -> None:
     p.add_argument("--b-label", default="Qwen3.5-0.8B")
     p.add_argument("--meta", type=Path, default=REPO_ROOT / "data/prepared_habitat/meta.json")
     p.add_argument("--out", type=Path, default=OUT)
-    p.add_argument("--dataset-root", type=Path, default=DATASET_ROOT)
+    p.add_argument("--dataset-root", type=Path, nargs="*", default=list(DATASET_ROOTS))
     p.add_argument("--per-side", type=int, default=3,
                    help="gallery samples per direction (each model winning)")
     p.add_argument("--max-image-px", type=int, default=480)
@@ -223,7 +224,7 @@ def main() -> None:
     if reg_a and reg_b:
         reg_samples = reg_gallery(reg_a, reg_b, reg_eval, args.per_side, args.max_image_px)
     if ch_a and ch_b:
-        dirs = {d.name: d for d in args.dataset_root.glob("*/samples/*/")}
+        dirs = sample_dirs_by_id(args.dataset_root)
         with tempfile.TemporaryDirectory() as tmp:
             choice_samples = choice_gallery(ch_a, ch_b, choice_eval, dirs,
                                             args.per_side, args.max_image_px, Path(tmp))

@@ -9,13 +9,16 @@ that point visible, hollow = obstructed. That keeps the colour channel free to m
 
 import base64
 import io
+import textwrap
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 WHITE = (255, 255, 255)
 VIS_GREEN = (0, 160, 0)
 OBS_RED = (208, 59, 59)
 GT_GREY = (105, 105, 105)
+VIS_BLUE = (42, 120, 214)   # ground-truth waypoint, visible
+OBS_ORANGE = (214, 74, 42)  # ground-truth waypoint, obstructed
 
 
 def embed_jpeg(img, max_px=480, quality=80):
@@ -60,6 +63,26 @@ def draw_goal(draw, goal, W, H, r=9):
                  fill=VIS_GREEN if goal[2] == 1 else OBS_RED, outline=WHITE, width=2)
 
 
+def draw_label(img, obj, r=5, width=3):
+    """Draw a ground-truth label {"path": [[x,y,v],...], "goal": [x,y,v]} onto `img`.
+
+    One grey polyline with markers coloured by *label* visibility (blue visible, orange
+    obstructed) -- unlike `draw_path`, which encodes a model's *predicted* visibility by
+    fill so colour can mean "which model". Shared by the still contact sheets
+    (scripts/inspect_real_eval.py) and the ground-truth videos
+    (scripts/render_real_video.py) so the two can never drift apart.
+    """
+    W, H = img.size
+    d = ImageDraw.Draw(img)
+    pts = obj["path"]
+    draw_path(d, [[x, y, 1] for x, y, _ in pts], GT_GREY, W, H, r=0, width=width)
+    for x, y, v in pts:
+        d.ellipse([x * W - r, y * H - r, x * W + r, y * H + r],
+                  fill=VIS_BLUE if v == 1 else OBS_ORANGE, outline=WHITE, width=1)
+    draw_goal(d, obj["goal"], W, H)
+    return img
+
+
 def side_by_side(left, right, gap=8):
     """Join two equal-height panels with a light gutter."""
     h = max(left.height, right.height)
@@ -69,20 +92,36 @@ def side_by_side(left, right, gap=8):
     return out
 
 
-def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, max_px=520):
+def faint(color, mix=0.55):
+    """The model's colour blended towards white — for sampled draws behind the greedy path."""
+    return tuple(int(c + (255 - c) * mix) for c in color)
+
+
+def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, max_px=520,
+                samples_left=None, samples_right=None):
     """One frame rendered twice — ground truth plus each model's prediction — joined.
 
     Returns a PIL image. `pred_*` may be None (the model produced nothing parseable),
     in which case that panel shows ground truth alone rather than being dropped, so the
     failure stays visible instead of silently vanishing from the gallery.
+
+    `samples_*` (optional) are parsed predictions from sampled draws of the same model;
+    they are drawn as thin, faint lines UNDER the greedy path so the panel shows how much
+    the answer moves between draws. None entries (unparseable draws) are skipped.
     """
     panels = []
-    for pred, color in ((pred_left, color_left), (pred_right, color_right)):
+    for pred, color, samples in ((pred_left, color_left, samples_left),
+                                 (pred_right, color_right, samples_right)):
         img = Image.open(image_path).convert("RGB")
         W, H = img.size
         d = ImageDraw.Draw(img)
         if gt and gt.get("path"):
             draw_polyline(d, [(p[0], p[1]) for p in gt["path"]], GT_GREY, W, H, width=9)
+        for s in samples or ():
+            pts = (s.get("path") or [s["goal"]]) if s else None
+            if pts:
+                draw_polyline(d, [(p[0], p[1]) for p in pts], faint(color), W, H,
+                              width=2, underlay=False)
         if pred and pred.get("path"):
             draw_path(d, pred["path"], color, W, H)
         if pred and pred.get("goal"):
@@ -91,3 +130,25 @@ def render_pair(image_path, gt, pred_left, pred_right, color_left, color_right, 
             img.thumbnail((max_px, max_px), Image.LANCZOS)
         panels.append(img)
     return side_by_side(*panels)
+
+
+DESC_PRED = (255, 140, 0)
+
+
+def description_panel(image_path, rows, px, text_h, max_lines):
+    """Prediction rows side by side, one tile each: the frame with the GT path (thick grey) and the
+    prediction (orange), the row's description underneath (render_desc_videos, visualize_steering)."""
+    font = ImageFont.load_default()
+    out = Image.new("RGB", (px * len(rows), px + text_h), (0, 0, 0))
+    for i, row in enumerate(rows):
+        img = Image.open(image_path).convert("RGB").resize((px, px), Image.LANCZOS)
+        d = ImageDraw.Draw(img)
+        draw_polyline(d, [(p[0], p[1]) for p in row["gt"]["path"]], GT_GREY, px, px, width=8)
+        if (row.get("parsed") or {}).get("path"):
+            draw_polyline(d, [(p[0], p[1]) for p in row["parsed"]["path"]], DESC_PRED, px, px, width=4)
+        tile = Image.new("RGB", (px, px + text_h), (20, 20, 20))
+        tile.paste(img, (0, 0))
+        text = "\n".join(textwrap.wrap(row["habitat_meta"].get("instruction") or "", width=max(20, px // 8))[:max_lines])
+        ImageDraw.Draw(tile).multiline_text((6, px + 4), text, fill=(235, 235, 235), font=font, spacing=2)
+        out.paste(tile, (i * px, 0))
+    return out

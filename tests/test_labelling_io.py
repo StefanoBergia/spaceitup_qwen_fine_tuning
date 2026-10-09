@@ -1,0 +1,68 @@
+import json
+
+import pytest
+
+from rover_vlm.labelling_io import prepare_output
+
+
+def test_prepare_output_new_file(tmp_path):
+    assert prepare_output(tmp_path / "x.jsonl", resume=False, overwrite=False) == (set(), "w")
+
+
+def test_prepare_output_refuses_to_clobber(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"id": "a"}\n')
+    with pytest.raises(SystemExit):
+        prepare_output(p, resume=False, overwrite=False)
+    assert prepare_output(p, resume=False, overwrite=True) == (set(), "w")
+
+
+def test_prepare_output_resume_retries_errors_only(tmp_path):
+    p = tmp_path / "x.jsonl"
+    rows = [{"id": "a", "passed": False}, {"id": "b", "error": "Timeout"}, {"id": "c", "passed": True}]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    done, mode = prepare_output(p, resume=True, overwrite=False)
+    assert done == {"a", "c"} and mode == "a"
+    assert [json.loads(l)["id"] for l in p.read_text().splitlines()] == ["a", "c"]
+
+
+from rover_vlm.labelling_io import image_url
+
+
+def test_image_url_path_and_bytes(tmp_path):
+    p = tmp_path / "x.jpg"
+    p.write_bytes(b"\xff\xd8xx")
+    assert image_url(p).startswith("file://")
+    assert image_url(b"\xff\xd8xx") == "data:image/jpeg;base64,/9h4eA=="
+
+
+def test_chat_text_sends_a_plain_text_message():
+    from types import SimpleNamespace
+    from rover_vlm.labelling_io import chat_text
+    seen = {}
+
+    class Completions:
+        def create(self, **kw):
+            seen.update(kw)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hi"), finish_reason="stop")])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    assert chat_text(client, "m", "hello", max_tokens=5, seed=1) == ("hi", "stop")
+    assert seen["messages"] == [{"role": "user", "content": "hello"}] and seen["seed"] == 1
+
+
+def test_prepare_output_drops_a_truncated_last_line(tmp_path, capsys):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"id": "a", "passed": true}\n{"id": "b", "passed": tr')   # killed mid-write
+    done, mode = prepare_output(p, resume=True, overwrite=False)
+    assert done == {"a"} and mode == "a"
+    assert p.read_text() == '{"id": "a", "passed": true}\n'
+    assert "unparseable" in capsys.readouterr().out
+
+
+def test_prepare_output_refuses_a_corrupt_middle_line(tmp_path):
+    p = tmp_path / "x.jsonl"
+    original = '{"id": "a"}\n{"id": "b", "pa\n{"id": "c"}\n'
+    p.write_text(original)
+    with pytest.raises(SystemExit, match="line 2"):
+        prepare_output(p, resume=True, overwrite=False)
+    assert p.read_text() == original                                      # left untouched

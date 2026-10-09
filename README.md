@@ -320,6 +320,145 @@ resubmitting. Results land in `outputs/runs_v2{,_0.8b}/` and
 > to isolate the effect of more data" experiment — cross-round numbers are *different
 > test sets, each valid on its own*, not a controlled comparison.
 
+> **Rounds 1 and 2 were also scene-leaked**, which was only noticed when round 3 arrived
+> with a scene-disjoint split: **392 of v2's 397 eval scenes are also in its train split**.
+> `make_splits` shuffles *samples*, and a scene contributes many samples, so the same room
+> lands on both sides. Every pre-v3 Habitat accuracy is therefore optimistic by an unknown
+> margin, and v3's numbers are the first honest ones — not comparable to either earlier
+> round, in either direction.
+
+## Round 3 — the yaw-augmented dataset and the goal-conditioned prompt
+
+Round 3 exists to fix the endpoint collapse written up in `docs/endpoint_collapse.md`: the
+generator used to yaw the camera onto the goal, so `goal.uv[0] == 256.0` on every 512-wide
+render and all 9,140 v2 samples had `path[-1][0] == 0.5`, sd 0.00000. LoRA learned that
+pin perfectly (base `pred_end_x_sd` 0.2951 → fine-tuned 0.0000) and no real route ending
+off-axis was reachable. Two things changed:
+
+**1. The generator re-rendered with camera-yaw jitter** and now ships its own manifests at
+`/nfs/projects/spaceitup/rover_navigation/data/manifest_{train,val}.jsonl`. Each original
+sample gets 1–2 children yawed by up to ±37°, solved to land the goal at a sampled
+`meta.aug.goal_x_target`; the renders live in a second tree, `habitat_generated_aug/`.
+
+| | train | val |
+|---|---|---|
+| manifest rows | 24,303 | 2,654 |
+| prepared (after the `correct_path_in_fov` filter) | 23,770 | 2,591 |
+| scenes | 651 | 79, **disjoint from train** |
+| original (yaw 0) / augmented | 8,958 / 14,812 | 998 / 1,593 |
+| path terminus x sd | 0.141 overall, **0.179 augmented**, 0.000 original | 0.140 |
+
+0.179 is wider than the real-TUM ground-truth sd of 0.129, so the training distribution
+now covers the real one. The `direct` shortcut also drops to 0.2% of samples, which
+removes the ~0.50 chance floor the classification task used to have.
+
+**2. The goal is handed to the model instead of asserted to be straight ahead.**
+`HABITAT_PROMPT` claimed *"the goal is located straight ahead"* — true of the old renders,
+false for 61% of the new ones. `HABITAT_PROMPT_GOAL` names the goal as `[x, y, v]` and
+asks only for the route to it; the answer drops the `"goal"` key and its **final waypoint
+is that goal**. This is lossless: the correct candidate's polyline already terminates
+exactly at `goal.uv` (verified on the whole dataset), and the prep asserts it.
+
+`HABITAT_PROMPT` is kept verbatim rather than edited, because `src/rover_vlm/real_data.py`
+imports it and every record in `data/prepared_real/` and every prediction under
+`outputs/eval_real*` was built with it — editing in place would silently reinterpret those
+artifacts. `parse_path_answer` accepts both shapes (no `"goal"` key ⇒ `goal = path[-1]`),
+so old prediction files re-aggregate identically.
+
+Prep is manifest-driven — **no split is invented here**, and three properties are asserted
+before anything is written: eval/train share no sample id, no *scene*, and no augmented
+sample is separated from the parent it was yawed from.
+
+```bash
+uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v3 --goal-in-prompt
+uv run scripts/inspect_habitat.py --num 12 --split data/prepared_habitat_v3/eval.json \
+    --out-dir outputs/inspection_habitat_v3
+
+VERSION=_v3 SIZES=train_full sbatch slurm/run_all_habitat.sbatch 2b
+```
+
+Results land in `outputs/runs_v3/` and `outputs/eval_habitat_v3/`.
+
+> **`to_goal` is the number that matters.** Once the goal is in the prompt, a blind
+> predictor gets the endpoint for free, so `straight` (centre line) and `constant` (the
+> set's mean path) stop being honest floors — the bar is a straight line from the rover to
+> the *given* goal. `trivial_baselines` computes it as `to_goal`, and `comparison.md`
+> prints all three. A model that does not beat `to_goal` has not used the image at all,
+> whatever its absolute error looks like. `goal_point_error`, `goal_visibility_accuracy`
+> and the new `goal_copy_rate` no longer measure inference either — they are a
+> copy-fidelity check on the endpoint the model was handed.
+
+`comparison.md` also slices error by `habitat_meta["source"]`. 38% of the round-3 training
+mix is still yaw-0 originals whose goal sits at x=0.5 exactly; if that pinned mode costs
+the model anything, the augmented slice scores worse than the original one, and the
+follow-up is an augmented-only rerun.
+
+## Results — round 3 (job 91272, 2026-09-10, 8h01m)
+
+| | base | LoRA (23,770) |
+|---|---|---|
+| parse rate | 0.955 | **1.000** |
+| mean point err | 0.359 | 0.072 |
+| median point err | 0.338 | **0.025** |
+| visibility acc | 0.726 | **0.923** |
+| `shape_correlation` | +0.124 | **+0.730** |
+| `endpoint_spread` pred sd | 0.231 | **0.1396** (gt 0.1396) |
+| beats `to_goal` | 0.3% | **53.0%** |
+
+**The collapse is fixed.** Predicted endpoint spread now matches the ground truth's
+(was sd 0.0000, 100% at x=0.5), and `shape_correlation` +0.730 is the first real evidence
+a model here reads the image — the pinned models scored −0.017 overall and −0.114 on the
+curve clips, i.e. bending *against* the true route.
+
+> **Read the win rate, not the mean.** The set mean (0.072) is above the `to_goal` floor
+> (0.044), which reads as "the model lost". It didn't: it beats the straight line on 53.0%
+> of samples and its median error (0.025) is well under the floor's (0.042). The mean is
+> carried by a small number of catastrophic misses — the worst 10% of samples hold **59.4%**
+> of all error. `win_vs_to_goal` in `comparison.md` is the honest summary.
+
+Sliced by `consistency.start_edge`, the whole story is the route's *start*:
+
+| gt entry edge | n | model mean | model median | `to_goal` | model wins | wrong edge |
+|---|---|---|---|---|---|---|
+| bottom | 2,013 (77.7%) | 0.0507 | 0.0240 | 0.0529 | **63.4%** | 7.1% |
+| left | 294 (11.3%) | 0.1211 | 0.0302 | 0.0146 | 20.1% | 27.9% |
+| right | 284 (11.0%) | 0.1684 | 0.0407 | 0.0130 | 13.4% | **48.6%** |
+
+On the 77.7% of routes that start where the rover actually is, **the model beats the
+image-blind baseline** on mean *and* win rate. All of the apparent loss comes from the
+22.3% of routes clipped to enter from a side edge, where a straight line is nearly exact
+(0.013) and the model picks the wrong edge up to half the time, at ~0.5–0.6 per miss.
+
+## Round 4 — hand over the route's start as well
+
+The side-entry failure is an ambiguity, not a training failure. Train and eval entry-edge
+distributions match (75.3% / 75.9% bottom) and left ≈ right in training (12.0% / 12.8%),
+so nothing in the labels teaches a side preference — but for a side-entry route the
+rover's own position is off-frame, and the prompt never said where it was. Same class of
+under-specification as "the goal is located straight ahead".
+
+`HABITAT_PROMPT_ENDPOINTS` names both ends; the model supplies only the route between them.
+Framings are now explicit (`FRAMINGS = legacy | goal | endpoints`), with `--goal-in-prompt`
+kept as an alias so round 3 still reproduces.
+
+```bash
+uv run scripts/prepare_habitat.py --out-dir data/prepared_habitat_v4 --framing endpoints
+uv run scripts/inspect_habitat.py --num 12 --split data/prepared_habitat_v4/eval.json \
+    --out-dir outputs/inspection_habitat_v4
+VERSION=_v4 SIZES=train_full sbatch slurm/run_all_habitat.sbatch 2b
+```
+
+> **Headroom is thin, so pick the metric first.** With both ends given, `to_goal` *is* the
+> connect-the-dots answer. Round 4 passes if `win_vs_to_goal` rises above round 3's 53.0%
+> and the entry-edge slice flattens (side-entry mean down from 0.144, wrong-edge rate down
+> from 27.9% / 48.6%). If instead the win rate sits near 50% with mean ≈ `to_goal`, handing
+> over both endpoints has saturated the task, and the next move is a *coarser* goal cue — a
+> bearing or a quadrant — rather than exact coordinates.
+
+Round 3 peaked at 30 GB RSS against a 64 GB request, so `run_all_habitat.sbatch` now asks
+for 40 GB: on a shared box where a single 900 GB job can block the partition, over-reserving
+delays your own job behind other users.
+
 ## Results — round 1 vs. round 2
 
 Round 1: 3,660 train / 500 eval (jobs 87428, 87657, 87773, 87794).
@@ -566,8 +705,11 @@ v6 cleared the gate, so the whole path-regression dataset gets labelled with it 
 `train_full` + 1,000 `eval` = **9,140 samples**:
 
 ```bash
-sbatch slurm/label_full_path.sbatch
+DATA=data/prepared_habitat_v2 VERSION=v6 sbatch slurm/label_full_path.sbatch
 ```
+
+(The sbatch now defaults to the round-4 relabel, `DATA=data/prepared_habitat_v4 VERSION=v7`
+— see below; the two variables reproduce this run.)
 
 One job serves the model *and* runs the client against localhost, so there is no second
 terminal to keep alive — the 2026-07-22 server was started under `srun` and died with its
@@ -688,14 +830,50 @@ with removing the illustrative furniture example, but the diffs show that landed
 one run later — so the v2 *and* v3 labels were both produced with `"the sofa and the
 kitchen counter"` still in the prompt.
 
+#### Round-4 relabel (prompt v7, `data/prepared_habitat_v4`)
+
+Round 4 moved Qwen to the *endpoints* framing (entry point and goal named in the prompt,
+path-only answer) and 62% of its 23,770 training records are yaw-augmented frames the v6
+run never saw — only 7,613 v4 train ids carry a v6 trace. So the whole v4 dataset is
+relabelled with **v7** (`PROMPT_VERSION` in `src/rover_vlm/traces.py`), which:
+
+- hands Cosmos the same two facts Qwen will see at inference — where the route enters the
+  frame and where the goal is, each with its visibility — so the trace may reason from them;
+- names the real entry edge (bottom / left / right) instead of v6's "starts at the bottom of
+  the frame", which was false for side entries;
+- derives the goal from the last waypoint when the answer has no `"goal"` field (v4 answers
+  are path-only; legacy v2 records still work);
+- bans the handed-route vocabulary up front ("planned / designated / given route", "follows
+  / trusts / sticks to") — the family the v6 run leaked on and only the filter caught.
+
+The v6 files (`path_v6_*`) stay untouched. **One job does the gate and the full run**:
+
+```bash
+sbatch slurm/label_full_path.sbatch
+```
+
+Stage 0 labels `GATE_N` (default 200) eval samples into `outputs/traces/path_v7_gate.jsonl`
+and scores them with `scripts/filter_traces.py --max-leak-rate 0.01 --min-keep-rate 0.95`
+under the current detector. The n=20 gate missed a 5% leak last time, which is why this one
+is 200 and why it runs unattended in front of the full run: a failing gate exits the job
+before any full-run sample is spent (`GATE_N=0` skips it for a prompt that already passed).
+Then 23,770 `train_full` + 2,591 `eval` = **26,361 samples**, ~10–11 h at the measured 43/min,
+`--time` 16 h, resumable, into `outputs/traces_full/path_v7_{train_full,eval}.jsonl`. After it:
+
+```bash
+uv run scripts/filter_traces.py                   # both path_v7 splits -> *.filtered.jsonl
+uv run scripts/prepare_habitat_traces.py          # -> data/prepared_habitat_v4/train_full_traced.json
+```
+
 #### Training on the traces (`<think>` block)
 
 The kept traces are wired into training as Qwen3.5's native reasoning. Two steps:
 
 ```bash
-# 1. Merge kept traces into the prepared split (CPU, no GPU)
+# 1. Merge kept traces into the prepared split (CPU, no GPU). Defaults are now v4 + v7;
+#    the round-2 set was built with --prepared/--traces/--out pointed at v2 + v6.
 uv run scripts/prepare_habitat_traces.py
-#    -> data/prepared_habitat_v2/train_full_traced.json   (7,768 records)
+#    -> data/prepared_habitat_v4/train_full_traced.json
 
 # 2. Fine-tune BOTH sizes (2B + 0.8B) and eval each, in one GPU job (recommended).
 #    Sequential on one 3g.40gb slice, idempotent/resumable; evals pass --enable-thinking.
@@ -805,6 +983,572 @@ accuracy" is not one thing and lexical overlap is a weak proxy for it:
   JUDGE=google/gemma-3-12b-it sbatch slurm/judge_traces.sbatch
   ```
 
+### Sampling consistency — how much does the answer move for the same image?
+
+Every eval above decodes **greedily**, which yields one answer per image and says nothing
+about how *sure* the model is. `scripts/evaluate.py --seed <k>` instead draws ONE sampled
+answer per image (`--temperature 0.7 --top-p 0.8 --top-k 20` by default — Qwen's recommended
+non-thinking settings, applied identically to plain and traced adapters so the comparison is
+fair) and writes it to `<eval-dir>/<tag>/seeds/seed<k>/` so the greedy result stays the
+canonical one. Several seeds of the same run are then compared per image by
+`src/rover_vlm/consistency.py`:
+
+- **path spread** — mean pairwise distance between the draws' paths, on the same 10-point
+  resampling as the waypoint error, so spread and error share a scale (lower = more stable);
+- **goal spread** and **goal-visibility agreement** (fraction of draws siding with the majority);
+- **route-flip rate** — fraction of images whose draws do not all enter from the same image
+  border (bottom / left / right). The dominant way draws disagree is a switch between two
+  routes (left-edge entry vs right-edge entry), which plain spread blurs with jitter;
+- **error std across draws**, **parse rate over all draws**;
+- **spread ↔ greedy error** — Spearman correlation between an image's spread and the greedy
+  run's error on it. Positive = the model is least consistent exactly where it is wrong, i.e.
+  spread works as a confidence signal.
+
+Run the four configurations (plain / traced × 2B / 0.8B; the base model is skipped — it parses
+only ~63% of the time, so its spread would measure garbage), 5 seeds each (~2.5 h per config).
+One job does all four in sequence; the job skips seeds that already have a `metrics.json`, so
+resubmit after a failure or time limit. The job runs a snapshot of the *committed* `scripts/`
+and `src/`, so commit first — switching branches on the login node mid-job is then safe:
+
+```bash
+sbatch slurm/eval_seeds.sbatch                                          # all four, one job (~10 h)
+for c in plain2b plain0.8b traced2b traced0.8b; do sbatch slurm/eval_seeds.sbatch $c; done  # or parallel
+SEEDS="1 2 3" TEMPERATURE=0.5 sbatch slurm/eval_seeds.sbatch traced2b   # override
+uv run scripts/visualize_traced_comparison.py                           # login node
+```
+
+The traced report gains a **Sampling consistency** section (per size: plain vs traced table
+plus a paired bootstrap on path spread), and each gallery card draws the sampled paths as
+faint thin lines under the greedy one and quotes that frame's spread. Both stay hidden until
+seed dirs exist.
+
+## Real-image eval (does the Habitat training overfit the renderer?)
+
+Scores every Habitat-path model on **real** forward-facing robot frames whose labels come
+from the robot's own future trajectory: for a frame at time *t* the positions the robot
+went on to occupy (until the path is L m long) are dropped onto the floor plane,
+projected into the frame, occlusion-tested against depth where available, and pushed
+through the same clip/resample/format code as the Habitat labels
+(`src/rover_vlm/real_data.py`, geometry in `src/rover_vlm/projection.py`). The eval
+script runs unchanged (`--task habitat --eval-file data/prepared_real/<set>/eval.json`).
+Asset survey and why these two datasets: `docs/real_eval_assets.md`.
+
+| Set | Source | Frames | Camera | Visibility labels |
+|---|---|---|---|---|
+| `tum_pioneer` | TUM RGB-D fr2 `pioneer_{360,slam,slam2,slam3}` (Pioneer robot, Kinect, mocap camera poses) | 91 | 0.60 m (fitted from depth), 63° HFOV, 640×480 | depth occlusion test |
+| `gnd_campus` | GND `GMU_1_2_jcScEn_chunk01` + `GTown2_chunk01` (Jackal, ZED2 rectified, EKF odometry) | 502 | **0.45 m assumed** (not in the bags), 101° HFOV, 640×360 | none (all visible) |
+
+Habitat renders are 0.8 m / 90° / 512×512, so both sets shift geometry as well as
+appearance; the report puts each model's real numbers under its own Habitat numbers.
+
+```bash
+# 1. download (login node): TUM tgz (~5.5 GB) and GND bag chunks (~3 GB each, CC0)
+uv run scripts/download_real_eval.py --tum
+uv run scripts/download_real_eval.py --gnd-list
+uv run scripts/download_real_eval.py --gnd GMU_1_2_jcScEn_chunk01.bag GTown2_chunk01.bag
+
+# 2. label (CPU). TUM drives are short and loopy -> 2-6 m horizons; GND takes the Habitat 3-12 m.
+uv run scripts/prepare_real_eval.py --dataset tum --name tum_pioneer \
+    --source data/real/tum/rgbd_dataset_freiburg2_pioneer_{slam,slam2,slam3,360} \
+    --min-len 2 --max-len 6 --max-window-s 90 --stride-s 0.5
+uv run scripts/prepare_real_eval.py --dataset gnd --name gnd_campus --cam-height 0.45 --stride-s 1.5 \
+    --source data/real/gnd/GMU_1_2_jcScEn_chunk01.bag data/real/gnd/GTown2_chunk01.bag
+
+# 3. look before spending GPU time: outputs/inspection_real/<set>/sheet.png
+uv run scripts/inspect_real_eval.py --set tum_pioneer --num 16
+
+# 3b. watch the labels move: one mp4 per source in outputs/videos/ (CPU, ~30 min in parallel)
+uv run scripts/render_real_video.py --dataset tum --horizon-m 5 --max-window-s 90 \
+    --source data/real/tum/rgbd_dataset_freiburg2_pioneer_{slam,slam2,slam3,360}
+uv run scripts/render_real_video.py --dataset gnd --horizon-m 5 --max-window-s 40 --cam-height 0.45 \
+    --source data/real/gnd/GMU_1_2_jcScEn_chunk01.bag data/real/gnd/GTown2_chunk01.bag
+
+# 4. GPU: base 2B + plain 2B/0.8B + traced 2B/0.8B on one set (idempotent, ~1 h)
+sbatch slurm/run_all_real.sbatch tum_pioneer
+sbatch slurm/run_all_real.sbatch gnd_campus
+#    or a single model: [THINK=1] [MODEL_ID=...] sbatch slurm/eval_real.sbatch <set> <tag> [adapter]
+
+# 5. report (CPU): outputs/eval_real/{comparison.md,real_eval.html}
+uv run scripts/visualize_real_eval.py
+```
+
+### More GND: 172 chunk bags, not 2
+
+The Dataverse holds **172 chunk bags across 25 campus sites (860 GB)** — `AU`, `CUA`,
+`GMU_1_1..2_3`, `GTown`, `GTown2`, `GWU`, `Marymount`, `NOVA`, `UDC`, 12 `UMD_map*`.
+Each chunk is ~420 s / ~6,300 frames of the same Jackal + ZED2 rig, so a new site needs
+**no code** — just `--source data/real/gnd/<site>_chunk01.bag --cam-height 0.45`.
+
+Only chunk01 of a recording carries `/tf_static`, but the ZED does not move on its mount
+mid-recording, so **chunk02..NN can borrow chunk01's tree**: pass
+`--tf-static-from data/real/gnd/<same recording>_chunk01.bag`
+(`GndBag.read_tf_static`). Verified on `GMU_1_2_jcScEn_chunk02`, which was previously
+unusable and yields 3,834 labels. `real_meta.plane_source` records the borrow.
+
+Measured yield at a fixed 5 m horizon (every frame, `render_real_video.py`):
+
+| Bag | Frames | Labelled | Dominant rejects |
+|---|---:|---:|---|
+| `GMU_1_2_jcScEn_chunk01` | 6,282 | 98.4 % | track_too_short 56 |
+| `NOVA_chunk01` | 6,276 | 96.7 % | endpoint_off_axis 105 |
+| `GMU_1_1_jcMuInEn_chunk01` | 6,299 | 96.3 % | endpoint_off_axis 69 |
+| `GWU_chunk01` | 6,264 | 92.5 % | endpoint_off_axis 278 |
+| `GTown2_chunk01` | 6,258 | 88.9 % | endpoint_off_axis 471 |
+| `Marymount_chunk01` | 6,264 | 88.9 % | endpoint_off_axis 366 |
+| `GMU_1_2_jcScEn_chunk02` | 6,367 | 60.2 % | **too_slow 1,935** (robot idles) |
+
+**Read this table backwards before using it.** A high label yield means the robot drove
+straight, which is the degeneracy that let an image-blind constant path beat every
+fine-tuned model on `gnd_campus` (0.024 vs 0.179 median point error). The bags near the
+bottom — more `endpoint_off_axis`, more turning — carry more usable geometry per frame
+than the ones near the top, even though they label less of the video.
+
+### Benchmark clips: the manoeuvres, not the straight bits
+
+Seven minutes of mostly-straight driving is not a benchmark. `scripts/find_clips.py`
+scores every labelled frame, groups qualifying frames into contiguous runs (merged across
+a momentary straightening, padded for approach context, minimum length enforced), and
+writes both short .mp4s to watch and the eval set to score.
+
+```bash
+# 1. index each sequence once -- one JSONL line per frame, carrying its full label
+uv run scripts/render_real_video.py --dataset gnd --source data/real/gnd/NOVA_chunk01.bag \
+    --cam-height 0.45 --horizon-m 5 --max-window-s 40 --min-horizon-m 3 \
+    --goal-from-path --max-goal-angle 15 --min-goal-dist-m 3.0 --goal-tail-m 1.0 --index
+# 2. cut clips + build the eval set (never re-reads a bag)
+uv run scripts/find_clips.py --per-criterion 8 --per-sequence 3 --min-seconds 1.5 \
+    --merge-gap-s 1.5 --eval-stride-s 0 --name real_clips
+```
+
+The goal flags are not optional decoration -- without them the label contradicts the prompt
+(see *The goal must be a point on the route* above) and the `goal_*` metrics are noise.
+`--allow-offscreen` is their opposite and must **not** be combined with them: it switches off
+the goal-angle and initial-heading filters that the rule depends on.
+
+Criteria (`src/rover_vlm/clips.py`):
+
+| Criterion | Picks | Available on |
+|---|---|---|
+| `curve` | path bends hard in image space (`eval._signed_lateral`), goal still on screen, rover driving not spinning | all |
+| `occluded` | goal hidden behind geometry, from the depth test | **TUM only** |
+| `out_of_view` | goal *just* past the frame edge, route still visibly leading to it | **retired** |
+
+Three things that are easy to get wrong here:
+
+- **`occluded` is TUM-only and thin.** GND has no depth and no usable LiDAR extrinsic
+  (`velodyne` appears in neither `/tf_static` nor `/tf`, and the GND repo publishes
+  calibration *method* but no matrices), so every GND goal is labelled visible **by
+  construction**. On TUM only 289 frames have a hidden goal *and* forward motion, and the
+  episodes are brief — the goal ducks behind a pillar for under a second — so 3 clips is
+  the realistic ceiling, not a tuning failure.
+- **`out_of_view` is retired.** It was built before the goal-selection bug was found. A
+  goal past the frame edge is exactly what `--goal-from-path` excludes, and no checkpoint
+  trained on the current prompt (which asserts the goal is straight ahead) can express one
+  -- both 2B adapters emit `goal_x = 0.5` on ~100 % of frames. The eight clips it produced
+  measured an impossible task. Kept in `clips.py` for the record; it selects nothing once
+  the goal is chosen from the route. Its historical ranking note: rank off-screen goals by
+  overshoot, not bearing.
+- **(historical) Rank off-screen goals by overshoot, not bearing.** Bearing picks the 95th percentile:
+  goal 85° off axis, projecting ten frame-widths out, with no route left in view.
+  `clips.goal_overshoot` favours a goal barely past the edge and rejects anything beyond
+  `MAX_OVERSHOOT` frame-widths.
+- **The index and the video must be built in one pass.** `--allow-offscreen` changes which
+  frames get labels; indexing with it while the video was rendered without it cuts clips
+  out of dimmed `REJECTED` footage. Pass `--index` to the same run that encodes.
+
+`--allow-offscreen` also relaxes the initial-heading filter, so spin-in-place frames reach
+the index; every criterion gates on forward motion to keep them out. It raises TUM's
+labelled share from ~7 % to ~51 % and GND's to 94–99 %.
+
+Outputs: `outputs/clips/<criterion>/<sequence>_<start>-<end>.mp4`,
+`outputs/clips/manifest.json`, and `data/prepared_real/<name>/eval.json` — standard
+records, so `scripts/evaluate.py --task habitat --eval-file ...` runs on it unchanged.
+Eval records are thinned to `--eval-stride-s` (default 0.5 s) because consecutive 15 Hz
+frames are near-duplicates that inflate n without adding information; the clip video stays
+full rate.
+
+### Scoring the clips and watching the models drive them
+
+```bash
+sbatch slurm/eval_clips.sbatch real_clips        # GPU: plain_2b + traced_2b, ~70 min
+uv run scripts/render_clip_predictions.py --set real_clips   # CPU, ~8 min
+```
+
+The job runs only the two 2B adapters (the traced one with `--enable-thinking`, so its
+`<think>` text is kept in `predictions.json`'s `generated` field) and is idempotent per
+stage. The renderer then joins each clip's frames with both models' predictions and writes
+`outputs/clips/predictions/<criterion>/<clip>.mp4`:
+
+```
+[ ground truth + plain_2b ] [ ground truth + traced_2b ] [ traced_2b's reasoning ]
+ <frame id>   plain_2b err=0.094   traced_2b err=0.155
+```
+
+Ground truth is the thick grey line in **both** panels so the models are compared against
+the same reference; each model has its own colour. The reasoning column is sized once per
+clip to the longest trace in it (ffmpeg needs a fixed frame size), and every frame's trace
+is also written verbatim to `<clip>.traces.jsonl` next to the video -- grep beats reading
+off a video frame.
+
+Eval records carry **absolute** image paths (`find_clips.resolve_image`). This is not
+cosmetic: `scripts/evaluate.py` opens `IMAGE_ROOT / rec["image"][0]` following the
+ShareRobot convention, so a relative path silently resolves under
+`data/sharerobot/trajectory` and the job dies on its first sample. `find_clips.py` now
+refuses to write an eval set whose images do not exist, so that failure costs seconds of
+CPU instead of a GPU queue slot.
+
+GND bags outside the `data/prepared_real/gnd_campus/images/` cache decode to
+`outputs/videos/_frames/` (1.5 GB, gitignored). 494 of the 1,452 `real_clips` images live
+there — **do not clear it while that eval set is in use.**
+
+`find_clips.py` keeps **one record per frame but every clip membership**
+(`real_meta.clips` / `real_meta.criteria`): a frame near a corner is often both `curve`
+and `occluded`, and deduplicating it to the first criterion silently emptied one of the
+three `occluded` clips. 116 of the 1,452 frames sit in two clips.
+
+### Label recovery: which rejects are real
+
+Prepare drops most TUM frames (625 labelled of 8,803 at every frame). Grouping the
+rejects shows what is actually missing:
+
+| Share of rejects | Group | Recoverable? |
+|---:|---|---|
+| 16 % | `no_depth`, `no_gt` | **yes** — association tolerances, not missing data |
+| 18 % | `track_too_short` | **yes** — an artefact of asking a fixed horizon of a finite drive |
+| 5 % | `gt_gap` | partly — mocap really lost the robot |
+| **62 %** | `endpoint_off_axis`, `endpoint_behind`, `initial_off_axis`, `endpoint_out_of_frame` | **no** — the robot is turning or reversing; the trajectory is fully known, there is just no path-to-a-goal-ahead to project |
+
+Three flags recover the first two groups. **All default to off**, so the commands above
+rebuild `tum_pioneer` / `gnd_campus` byte-identically and the eval results attached to
+them stay valid; recovered labels go in a separate `_v2` set.
+
+- `--depth-tol-s 0.08` — a frame with no depth image inside the 20 ms association window
+  uses the nearest one instead. Every TUM colour frame has depth within **0.07 s**, so
+  nothing is genuinely missing and this recovers all 1,174 `no_depth` frames. If none is
+  within tolerance the last fitted floor plane is carried forward and the frame is
+  labelled all-visible (`real_meta.depth_source` records which happened).
+- `--interp-pose` — interpolates the trajectory at the frame timestamp (lerp position,
+  slerp rotation, `projection.interpolate_pose`) instead of requiring a sample inside the
+  tolerance. TUM mocap runs at 300 Hz, so the true pose is bracketed on both sides.
+  Refused across a gap wider than `--max-gap-s`, so real dropouts still reject.
+- `--min-horizon-m 1.5` — keeps a window that ends before `--horizon-m` provided it runs
+  at least this far, instead of discarding the last metres of every drive.
+  `real_meta.horizon_actual_m` records what was achieved.
+
+```bash
+uv run scripts/prepare_real_eval.py --dataset tum --name tum_pioneer_v2 \
+    --source data/real/tum/rgbd_dataset_freiburg2_pioneer_{slam,slam2,slam3,360} \
+    --min-len 2 --max-len 6 --stride-s 0.5 --max-window-s 90 \
+    --depth-tol-s 0.08 --interp-pose --min-horizon-m 1.5
+```
+
+`gt_gap` is deliberately left alone: TUM ships `accelerometer.txt` with **3-axis
+accelerometer only, no gyroscope**, so dead reckoning cannot bridge a mocap dropout, and
+depth/visual odometry would put an unvalidated error source into labels whose whole value
+is that they come from mocap. The 62 % group is a task-design question, not an
+engineering one — labelling it means accepting off-screen goals, which is exactly what
+`--max-goal-angle` exists to prevent.
+
+### The goal must be a point on the route (`--goal-from-path`)
+
+The training prompt is a constant string ending "The goal is located straight ahead", and
+the Habitat generator makes that literally true: it yaws the camera onto the goal before
+rendering, so `goal[0] == 0.500` in **100 % of all 8,140 training samples and all 1,000 eval
+samples**. Both 2B adapters learned it exactly -- on real frames they emit `goal_x = 0.5`
+in 100 % / 99.9 % of predictions, predicted std 0.000, against a real spread of 0.391.
+
+That is not a hallucination, it is the correct answer to the question as asked. The bug is
+on the label side: taking a fixed `--horizon-m` of driving and calling wherever the robot
+ended up "the goal" puts it a **median 37 deg off axis** (85.7 % of frames beyond 15 deg,
+41 % clamped to the frame edge), so the label contradicts the prompt and the goal metric
+scores that contradiction rather than the model. It also explains the sub-chance path-bend
+sign on curved clips: the true path bends toward the goal (corr **+0.78** with goal
+bearing) while the prediction cannot (corr +0.10 / +0.02), because nothing in the input
+says where the goal is.
+
+`--goal-from-path` selects the goal *from the recorded route* instead. A route point
+qualifies when it is ahead of the camera, within `--max-goal-angle` of the optical axis,
+projects **inside the frame**, and lies at least `--min-goal-dist-m` along the track. The
+path is truncated at the chosen point.
+
+Occlusion is deliberately **not** part of the test. Habitat's goals are on screen in 100 %
+of samples but unoccluded in only 23 %, so a goal hidden behind an obstacle is the normal
+case, not a reject -- the goal must be *in frame*, not *in sight*.
+
+Selection is by position along the route, never by euclidean distance: the last qualifying
+point is the one furthest along the drive, which is not necessarily the one furthest away.
+Taking the last qualifying point rather than stopping at the first violation is what lets a
+route swerve around an obstacle and return to the axis with its bend intact -- precisely
+the Habitat case (A* detours, the goal stays centred), and the only kind of curved label
+both correct under the prompt and out of reach of an image-blind baseline. Frames whose
+route never comes back on axis are rejected as `no_on_axis_goal`.
+
+`--goal-tail-m` draws the goal uniformly from the qualifying points within that many metres
+of the last one, seeded by `--seed`, so the set gets a spread of goal ranges instead of
+every label ending in the same place. The tail is measured in **metres, not samples**,
+because the sources differ by an order of magnitude in rate (TUM mocap ~300 Hz, GND
+odometry far slower) and "the last few samples" would mean centimetres on one and metres
+on the other.
+
+The flag is off by default, so existing sets rebuild unchanged. Note it is incompatible in
+spirit with the `out_of_view` benchmark criterion: a goal past the frame edge is exactly
+what this rule excludes, and no checkpoint trained on the current prompt can express one.
+
+**Step 3b is the temporal check on the geometry.** The stills say whether a path looks
+plausible; only the video says whether it is *attached to the floor* — driven at the
+sequence's own frame rate, a correct path stays welded to the same floor features as the
+robot rolls over them, while a wrong camera height or floor tilt makes it slide or float.
+It walks every frame rather than one every `--stride-s`, at a fixed `--horizon-m` (a random
+per-frame length flickers), and keeps the frames the filters reject — dimmed, with the
+reason in the status strip — so the video also shows what the eval set is discarding. Both
+scripts share one frame walk (`rover_vlm.real_data.iter_{tum,gnd}_frames`), so what the
+video shows is what `prepare_real_eval.py` would have written for that frame.
+
+Prepare prints a skip histogram; the filters that matter are `endpoint_off_axis` /
+`initial_off_axis` (the goal must be within 45° of the optical axis and the first metre
+of travel within 30°, so the label distribution matches Habitat's "goal ahead, path from
+the rover"), and for TUM `track_too_short` / `too_slow` (mocap coverage ends, or the
+robot idles). `meta.json` records the fitted camera height per set — TUM's 0.60 ± 0.01 m
+agrees with the mocap z, which is the check that the depth-fitted floor plane is right.
+
+Known limits: GND has no depth, so its visibility columns are not meaningful and its
+camera height is an estimate (±0.1 m scales the path rows by ~±10 %); only the first
+chunk of a GND recording carries `tf_static`. OpenLORIS-Scene (indoor service robot at
+~1 m with depth, form-gated) is the planned next indoor set.
+
+## Instruction-conditioned paths (2026-09-24)
+
+The route instruction becomes an *input*: the round-4 prompt (entry point + goal) plus one
+sentence such as "pass left of the grey sofa", and the answer is the path that obeys it.
+Only frames with a feasible left AND right route entering the frame at the same point are
+used, so the instruction alone decides the side — with the entry point and goal handed over,
+any other frame's path is already pinned and the instruction would be ignorable. Spec:
+`docs/superpowers/specs/2026-09-24-instruction-conditioned-paths-design.md`.
+
+Two arms on identical frames: `template` ("Go around to the left.") and `cosmos`
+(Cosmos3-Nano is told the side — known exactly from the metadata — and names the landmark the
+route passes; kept only if the text states the correct side, not the opposite one, names
+something, and never mentions the drawing). Prompt i1 also had Cosmos verify each instruction;
+its gate showed Cosmos cannot judge left vs right on drawn routes (63% even for the template
+instruction), so i2 dropped that call. Headline metric: **pair success** — both instructions of a
+frame followed; an instruction-blind model scores 0 by construction.
+
+1. Pairs + overlays (CPU, ~10 min): `uv run scripts/prepare_habitat_instr.py pairs` →
+   `data/prepared_habitat_instr_v1/pairs_{train,eval}.json`, `overlays/`, `pairs_meta.json`
+2. Cosmos endpoint: `sbatch slurm/serve_cosmos3.sbatch`, wait for READY
+3. Gate (100 eval pairs; exits 2 on failure — drawing references must be 0, pair survival ≥ 0.8):
+   `uv run scripts/label_instructions.py --split data/prepared_habitat_instr_v1/pairs_eval.json --limit-pairs 100 --out outputs/instr_labels/gate_i2.jsonl --concurrency 8 --gate`
+   (`--rescore` re-judges a finished file with the current rules, no requests)
+4. Full labels (`--resume` safe): the same script on `pairs_train.json` → `outputs/instr_labels/train_i2.jsonl`
+   and on `pairs_eval.json` → `outputs/instr_labels/eval_i2.jsonl`
+5. Finalize: `uv run scripts/prepare_habitat_instr.py finalize --instructions outputs/instr_labels/train_i2.jsonl outputs/instr_labels/eval_i2.jsonl`
+   → `{train,eval}_{template,cosmos}.json` (same ids in both arms)
+6. Train both arms (~1.3 h each):
+   `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v1/train_template.json outputs/runs_instr_v1/template --epochs 3`
+   and the same with `train_cosmos.json` → `outputs/runs_instr_v1/cosmos`
+7. Eval every cell: `sbatch slurm/eval_instruction.sbatch` → `outputs/eval_instr_v1/<set>/<tag>/metrics.json`
+   (`instruction.pair_success`, `follow_rate`, `follow_rate_by_side`, `identical_output_rate`)
+8. Report: `uv run scripts/visualize_instruction_results.py` → `outputs/instruction_results.html`
+
+## General instruction model (v2, 2026-09-25)
+
+One adapter trained on **every** round-4 frame (original and yaw-augmented) twice: once with
+round 4's plain prompt, once with a Cosmos instruction for its correct route, plus the opposite
+instruction on frames with a feasible route on each side. Goal: plan like round 4 when told
+nothing, follow the instruction when told something. Spec:
+`docs/superpowers/specs/2026-09-25-instruction-general-model-design.md`.
+
+1. Build (CPU, ~15 min): `uv run scripts/prepare_habitat_instr.py general` →
+   `data/prepared_habitat_instr_v2/{plain,labelset}_{train,eval}.json`, `probe_wrong_side.json`,
+   `handwritten_pairs.json`, `general_meta.json` (25,985 train + 2,866 eval records to label)
+2. Label (GPU, unattended, ~4–6 h): `sbatch slurm/label_instructions.sbatch` — Cosmos server and
+   client in one job; 200-record gate (accept ≥ 0.9, no drawing references), full run, one retry
+   of rejected rows (prompt i3: a grey alternative is drawn only when a real opposite-side
+   route exists; finalize-general refuses > 1% unlabelled records unless `--allow-missing`) → `outputs/instr_labels_v2/{gate,eval,train}_i3.jsonl`
+3. Assemble: `uv run scripts/prepare_habitat_instr.py finalize-general --instructions outputs/instr_labels_v2/train_i3.jsonl outputs/instr_labels_v2/eval_i3.jsonl`
+   → `train_general.json` (~49.8k), `eval_plain.json`, `eval_instructed.json`, `eval_pairs.json`,
+   `probe_handwritten.json` (from `configs/instructions_handwritten_v2.json`)
+4. Train (~7–10 h, 1 epoch, resumable):
+   `sbatch --time=14:00:00 slurm/train_habitat.sbatch data/prepared_habitat_instr_v2/train_general.json outputs/runs_instr_v2/general --epochs 1 --save-steps 500 --resume`
+   (after a timeout, re-submit the same command)
+5. Eval: `sbatch slurm/eval_instruction_v2.sbatch` → `outputs/eval_instr_v2/<set>/<tag>/metrics.json`
+6. Report: `uv run scripts/visualize_instruction_general.py` → `outputs/instruction_general.html`
+
+Pass criteria: plain prompt median error ≤ 0.013 and beats to_goal ≥ 69% (round 4: 0.011 / 71.6%);
+instructed prompt not worse; pair success ≥ 75% and not significantly below the v1 Cosmos model.
+The blocked-side probe (`probe_wrong_side`) tells single-route frames to take the side where
+Habitat has no route and reports which way the prediction bends (`metrics.json` → `wrong_side`).
+
+### Grounded landmarks (i4, 2026-09-28)
+
+A 100-label human audit of the i3 labels found ~20% wrong (75% on pairs' second route): Cosmos
+names real objects well but not the one the route goes around. i4 lets **geometry pick the
+target** — the visible obstacle the route passes closest to on the side its label says
+(objects only; a first version that also used doorways failed its audit) — on the rover's
+own occupancy map, and Cosmos only **names** it. Records with no such obstacle in view get
+no instruction (reason-coded; their plain copy stays). Spec: `docs/superpowers/specs/2026-09-28-grounded-landmarks-design.md`.
+
+1. Targets (CPU, ~45 min, 4 workers):
+   `OMP_NUM_THREADS=1 uv run scripts/prepare_habitat_instr.py landmarks` →
+   `data/prepared_habitat_instr_v2/landmarks_{train,eval}.jsonl`, `landmarks_meta.json` (reason counts)
+2. Geometry audit (human, gate ≥ 95% right):
+   `uv run scripts/audit_instruction_labels.py --mode geometry --landmarks data/prepared_habitat_instr_v2/landmarks_train.jsonl`
+   → `outputs/instr_geometry_audit.html` (publish as an artifact with the `db` capability; marks in collection `marks`)
+3. HM3D semantic frames (full A100, habitat conda env, resumable): `sbatch slurm/render_semantic_frames.sbatch`
+   → `outputs/landmark_semantics/<sample>.npz`
+4. i4 gate (100 eval pairs + 100 single-route records, then the job stops): `sbatch slurm/label_instructions.sbatch`
+   → `outputs/instr_labels_v2/gate_i4.jsonl`
+5. Checks on the gate — HM3D name agreement:
+   `uv run scripts/audit_instruction_labels.py --mode semantic --labels outputs/instr_labels_v2/gate_i4.jsonl --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl`
+   → `outputs/landmark_name_check.json`, `outputs/landmark_name_mismatches.jsonl`;
+   human audit (gate < 5% wrong overall and on pairs):
+   `uv run scripts/audit_instruction_labels.py --labels outputs/instr_labels_v2/gate_i4.jsonl --landmarks data/prepared_habitat_instr_v2/landmarks_eval.jsonl`
+   → `outputs/instr_i4_audit.html`
+6. Full run (~8 h): `STAGE=full sbatch slurm/label_instructions.sbatch` → `outputs/instr_labels_v2/{eval,train}_i4.jsonl`,
+   then `finalize-general --instructions outputs/instr_labels_v2/train_i4.jsonl outputs/instr_labels_v2/eval_i4.jsonl`
+   (kept records carry `habitat_meta.instruction_source` = `cosmos` paraphrase or `template`)
+
+### Route descriptions (d1, 2026-09-30)
+
+A 100-label spot check of the i4 labels (84 correct) put the failures in four groups: the
+crossing rule picked the wrong obstacle among several (A), the outline also covered what stands
+behind so Cosmos named that (B), occupied cells beside the rover hid everything (C), nothing
+clear to name (D, kept). The end goal is a VLM that **generates a path from a text description**,
+and one landmark per route under-specifies a path while the goal point pins it (the text barely
+matters). d1 therefore describes the **whole route**: up to 3 events along it plus a stop
+phrase, for the ground-truth route and the second feasible route of the same frame. Geometry
+decides what is true; Cosmos only names objects (one call per object, on its own crop) and then
+phrases the sentence (a text-only call). Training mixes 70% "image + entry + description" with
+30% "image + entry + goal + description". Spec: `docs/superpowers/specs/2026-09-30-route-descriptions-design.md`.
+
+Geometry rules (`src/rover_vlm/route_events.py`; Addendum A of the spec, after the Gate 1 audit
+found 72% true):
+- Occupied cells within `NEAR_CAMERA_M = 0.5` m (the rover radius) of the camera are neither
+  occluders nor candidates (group C).
+- Outlines are tight: the object's depth band (own depth range +- 0.3 m) with floor pixels
+  removed, keeping only the connected pieces that hold the object's projected cells (poor depth
+  fit falls back to the column outline). A wall's outline covers only the stretch within 0.8 m
+  of the route. `MIN_AREA = 0.005` of the image.
+- Events (the 3 highest-scoring, sqrt outline area x route offset from the entry-goal line, are
+  kept, in route order):
+  - `pass`: 1 or 2 same-side objects within 0.7 m of the route, side = the side the route passes
+    on ("go right of the table", "go left of the A and the B").
+  - `wall`: a long blob the route runs alongside; the side is the **rover's own** ("keep the white
+    wall on your left"), the opposite of a pass. A wall event's blob is never also a `pass` object;
+    a long blob the route only comes near (not alongside for 1 m) stays a `pass` object. "Wall"
+    means anything long the rover runs alongside, so it includes long furniture (sofas, counters,
+    beds), and the naming prompt says so. Only the "on/to your left|right" form may say a side for
+    a wall; for objects "your left/right" is rejected.
+  - `between`: consecutive opposite-side passes or walls with nothing in between and at most 3 m
+    of route apart merge ("go between the A and the B").
+  - `through`: two wall-like blobs with a gap of at least 0.5 m that the route crosses (doorways).
+    A through event ends at the crossing, even when the wall beyond the door is the same blob.
+- Stop phrase, first rule that fits: `near` (salient visible object within 1 m of the goal:
+  "in front of" | "just past"; there is no "next to" any more, and a wall only takes "in front of"),
+  `after_last` ("just after it", goal within 1.5 m of route after the last event; for a wall
+  measured from where the route leaves the wall), `distance` (coarse amounts instead of metres:
+  "stop just / a little / well past (or before) X"; just < 1.5 m, a little 1.5-3 m, well > 3 m;
+  "past the end of the wall" when the anchor is a wall; a wall ahead on the line of approach can
+  be "stop just / a little before the wall"). The distance past the last obstacle has no upper
+  limit, so long routes are described and no longer dropped (94–98% described in smoke probes);
+  only a route with no anchor at all is dropped (`no_stop_anchor`).
+- An outline with no seeded piece (a low object whose top is not visible) is the hull of its
+  floor-free depth band; only when nothing but floor is at its depth does it fall back to the
+  column outline (`depth_fallback`).
+
+1. Events (CPU, 4 workers; smoke run first):
+   `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`
+   `uv run scripts/prepare_habitat_instr.py events --limit 200`, then without `--limit` →
+   `data/prepared_habitat_instr_v2/{events,objects}_{train,eval}.jsonl`, `events_meta.json`
+   (drop reasons: `no_state`, `bad_candidate`, `no_stop_anchor`, `no_events_bent`). `events_meta.json` carries
+   `"schema": "d1-addendumA2"`; `label_descriptions.py` and the events/d1 audit refuse events files
+   without it (rerun this step). A2 rule: a blob the route runs through (closest distance < 0.2 m,
+   `TOUCH_M`) can only be part of a `through` (doorway jamb), never a pass / wall / between. A route with no events must be straight (max offset from its
+   entry->goal line <= 0.3 m, `STRAIGHT_MAX_M`) or it is dropped as `no_events_bent`.
+2. Geometry audit (human, gate >= 90% true; thresholds are frozen after it):
+   `uv run scripts/audit_instruction_labels.py --mode events --events data/prepared_habitat_instr_v2/events_train.jsonl --objects data/prepared_habitat_instr_v2/objects_train.jsonl`
+   → `outputs/instr_events_audit.html` (publish with the `db` capability)
+3. Label gate (GPU, unattended: Cosmos server + name stage + compose stage in one job, 300
+   eval routes, then the job stops): `sbatch slurm/label_descriptions.sbatch` →
+   `outputs/instr_labels_v3/{names,desc}_*_d1.jsonl`. Per split the job runs name pass 1 and 2
+   (report-only: read their summary in the log, a weak name pass never blocks compose), then
+   compose pass 1 and 2; only **compose pass 2** carries `--gate`, so one transient HTTP error
+   cannot fail the job. After a prompt fix restart the gate from scratch with
+   `OVERWRITE=1 sbatch slurm/label_descriptions.sbatch` (applies to the first pass of each stage;
+   the retry passes always resume). The same stages by hand:
+   `uv run scripts/label_descriptions.py --stage name ...` (run once per split), then
+   `--stage compose ...` (see the script's docstring; `--gate` exits 2 below accept 0.9 or above
+   0.1 template fallback). Gate r1 fixes (2026-10-02): compose prompt d2 (direction words copied
+   as written), `--max-tokens` default 4096, name rules N1 (doors/windows in a wall) and N2 ("shelving unit").
+   **`NAMER=gemma`** (A/B vs the default `NAMER=cosmos`): the job serves `google/gemma-3-12b-it`
+   for the two name passes, stops it, then serves Cosmos3-Nano for the compose passes
+   (`NAMER=gemma sbatch slurm/label_descriptions.sbatch`; combinable with `STAGE=full`;
+   `OVERWRITE=1` is for gate re-runs only, never on a full run). Outputs carry a `_gemma` suffix (`names_gate_gemma_d1.jsonl`,
+   `desc_gate_gemma_d1.jsonl`), so the Cosmos files are never touched; audit them by passing
+   `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl`.
+   **`NAMER=mix`** (Addendum A5, the full-run setup): Gemma names every split
+   (`names_<tag>_gemma_d1.jsonl`), the job switches to Cosmos once, Cosmos names
+   (`names_<tag>_d1.jsonl`; only the objects of routes the Gemma names cannot serve, eval split first), then composes with the Gemma names and falls back to the Cosmos names
+   for routes where Gemma named two different objects the same (`name:clash`) →
+   `desc_<tag>_mix_d1.jsonl`. Full run:
+   `NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch` (re-submit the same line after a
+   TIMEOUT; never `OVERWRITE=1` on a full run). Finalize it with `--desc-suffix _mix` (step 6).
+4. Label audit (human, gate >= 90% correct, i4 baseline 84%):
+   `uv run scripts/audit_instruction_labels.py --mode d1 --events data/prepared_habitat_instr_v2/events_eval.jsonl --objects data/prepared_habitat_instr_v2/objects_eval.jsonl --desc outputs/instr_labels_v3/desc_gate_d1.jsonl`
+   → `outputs/instr_d1_audit.html` (Gemma run: `--desc outputs/instr_labels_v3/desc_gate_gemma_d1.jsonl --out outputs/instr_d1_audit_gemma.html`; the page title carries the desc file stem)
+   (`--ids FILE`, one route id per line, audits exactly those passed routes instead of a random sample — re-audit the same routes for an A/B)
+5. Full run (train + eval, resumable; re-submit after a TIMEOUT): `STAGE=full sbatch slurm/label_descriptions.sbatch`
+6. Finalize (CPU): `uv run scripts/prepare_habitat_instr.py finalize-descriptions` (NAMER=mix: add `--desc-suffix _mix`) →
+   `data/prepared_habitat_instr_v3/{train_desc,eval_desc_entry,eval_desc_goal,eval_desc_pairs,eval_desc_shuffled}.json`
+   (70/30 entry/goal forms, both routes of a pair share a form, scene-disjoint re-asserted)
+7. Train: `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v3/train_desc.json outputs/runs_desc/d1 ...`
+   as for v2 (the eval sbatch looks for the adapter at `outputs/runs_desc/d1/adapter`)
+8. Eval: `sbatch slurm/eval_descriptions.sbatch` (`ADAPTER=<dir> TAG=<tag>` to override; finished
+   cells are skipped) → `outputs/eval_desc/<set>/<tag>/metrics.json`
+9. Videos (CPU, login node): `uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag d1`
+   → `outputs/eval_desc/<set>/<tag>/paths.mp4` (ground truth grey, prediction orange, description
+   under each tile; `--n` frames)
+
+Reading the metrics: `metrics.json` gets a `description` block (`eval.aggregate_habitat_metrics`).
+`follow_rate` = the back-projected predicted path satisfies every event and the stop (`pass`:
+every object on the stated side; `wall`: the wall stays on the rover's stated side;
+`between`: both sides; `through`: crosses the gap; stop: judged in image space, the path's last
+waypoint within `STOP_TOL_UV = 0.03` of the GT end; a route that only grazes an obstacle, closer
+than `PASS_TIE_M = 0.15` m, counts either way); `event_rate_by_type` and `stop_rate` split it.
+`gt_follow_rate` is the same check run on the ground-truth path itself: the ceiling any model
+can reach, so read `follow_rate` against it; `pair_success` =
+both routes of a frame followed (a text-blind model is near 0%). `endpoint_error_median` has no
+goal in the entry form, so read it against `constant_goal_endpoint_error_median` (every
+prediction ending at the set's mean goal; goals cluster near x = 0.5, so that baseline is close).
+`eval_desc_shuffled` gives each frame another frame's description: its follow rate should fall
+well below `eval_desc_entry`, otherwise the model is not reading the text.
+
+### Steering eval (2026-10-07)
+
+Does d1 *steer* — does changing only the text change the route the way the text says? The d1
+pairs cannot tell (both routes end at the same goal and differ only behind obstacles). This
+eval-only set keeps each eval frame's ground-truth route and cuts it at two points whose stop phrases
+differ: same image, same entry, same route, two texts, two different ends; each route fails the other's
+text. Every visible object is named first. Side pairs (one object passed on either side) proved not viable
+on these frames — see the spec's Addenda A1/A2: `docs/superpowers/specs/2026-10-07-steering-eval-design.md`.
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py steer-objects               # objects to name (CPU)
+    STAGE=steer_names sbatch slurm/label_descriptions.sbatch            # Gemma names them (GPU)
+    uv run scripts/prepare_habitat_instr.py steer                       # candidate stop pairs (CPU)
+    uv run scripts/prepare_habitat_instr.py steer-select                # one pair per viewpoint; Gate 0 (>= 150)
+    uv run scripts/audit_instruction_labels.py --mode steer --n 50      # Gate 1 audit page (>= 90% true)
+    STAGE=steer sbatch slurm/label_descriptions.sbatch                  # composed text (GPU, < 1 h)
+    uv run scripts/prepare_habitat_instr.py finalize-steer              # 4 files; Gate 2 (>= 85% composed)
+    SETS=steer sbatch slurm/eval_descriptions.sbatch                    # d1 on the 4 sets
+    SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
+    uv run scripts/visualize_steering.py                                # outputs/steering_report.html
+    uv run scripts/render_desc_videos.py --set eval_steer_stop_template_entry --tag d1 --n 20
+
+Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, candidates, rows, meta),
+`data/prepared_habitat_instr_v3/eval_steer_stop_{template,composed}_{entry,goal}.json`,
+`outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success, entry form (text-blind = 0%; goal-form rows give each text its own stop, so they measure goal-following, a ceiling, not steering).
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
@@ -820,6 +1564,9 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Cross-round: what more data bought | `uv run scripts/visualize_crossround.py` | `outputs/crossround_report.html` |
 | Trace prompt: how v6 was arrived at | `uv run scripts/visualize_traces.py` | `outputs/traces_report.html` |
 | Traced fine-tune: 2B vs 0.8B + reasoning | `uv run scripts/visualize_traced_comparison.py` | `outputs/eval_habitat_v2_traced/traced_comparison.html` |
+| Real-image eval: Habitat vs real per model | `uv run scripts/visualize_real_eval.py` | `outputs/eval_real/real_eval.html` |
+| Instruction-conditioned paths | `uv run scripts/visualize_instruction_results.py` | `outputs/instruction_results.html` |
+| General instruction model (v2) | `uv run scripts/visualize_instruction_general.py` | `outputs/instruction_general.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):
