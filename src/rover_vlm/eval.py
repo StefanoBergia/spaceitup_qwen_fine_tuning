@@ -662,6 +662,11 @@ STOP_TOL_UV = 0.03
 # A pass this close is a graze: its side flips between a dense and a sparse path, so it counts
 # as satisfied whichever side it lands on.
 PASS_TIE_M = 0.15
+# d2 turn check: the prediction ends at least this far to the turn's side of the GT pre-turn line (the line
+# through the turn point along the heading before it) -- or, when the GT route itself ends closer than twice
+# that, half the GT end's own offset, so the GT always follows its own text (the ceiling stays 1).
+TURN_FOLLOW_M = 0.5
+TURN_FOLLOW_SHARE = 0.5
 MAX_FLOOR_M = 15.0
 
 
@@ -701,8 +706,19 @@ def _event_followed(floor, e):
     rover's side `side`, i.e. the route passes it on the opposite side. Both within
     FOLLOW_NEAR_M; a graze (< PASS_TIE_M) counts either way. between: one member on each side,
     both within FOLLOW_NEAR_M; a grazed member counts on either side. through: the gap ends on
-    opposite sides."""
+    opposite sides. turn: the path's end lies TURN_FOLLOW_M (or half the GT's offset) to the turn's
+    side of the pre-turn line."""
     kind = e.get("type")
+    if kind == "turn":
+        p, h = e.get("turn_xz"), e.get("pre_heading_xz")
+        if p is None or h is None or e.get("side") not in _OPPOSITE or not len(floor):
+            return 0
+        h = np.asarray(h, float)
+        h = h / (np.linalg.norm(h) + 1e-9)
+        lateral = float((floor[-1] - np.asarray(p, float)) @ np.array([-h[1], h[0]]))   # + = right of the line
+        gt = float(e.get("gt_lateral_m") or TURN_FOLLOW_M / TURN_FOLLOW_SHARE)
+        want = min(TURN_FOLLOW_M, TURN_FOLLOW_SHARE * gt)
+        return int((lateral if e["side"] == "right" else -lateral) >= want)
     if kind in ("pass", "wall"):
         obs = e.get("obstacles") or []
         want = e.get("side") if kind == "pass" else _OPPOSITE.get(e.get("side"))
@@ -783,6 +799,18 @@ def aggregate_description_metrics(records):
             by_type.setdefault(e["type"], []).append(ok)
         if r["habitat_meta"].get("pair_id"):
             pairs.setdefault(r["habitat_meta"]["pair_id"], []).append(r["id"])
+    split = {"turn": [], "no_turn": []}
+    for r in rows:
+        chk = r["habitat_meta"]["desc_check"]
+        split["turn" if any(e["type"] == "turn" for e in chk["events"]) else "no_turn"].append(r)
+
+    def _group(rs):
+        met = [x["metrics"] for x in rs if x.get("metrics")]
+        ge = [m["goal_point_error"] for m in met if "goal_point_error" in m]
+        pe = [m["mean_point_error"] for m in met if "mean_point_error" in m]
+        return {"n": len(rs), "follow_rate": float(np.mean([follows[x["id"]] for x in rs])),
+                "endpoint_error_median": float(np.median(ge)) if ge else None,
+                "point_error_median": float(np.median(pe)) if pe else None}
     full = [p for p in pairs.values() if len(p) == 2]
     goals = np.array([r["gt"]["goal"][:2] for r in rows if r.get("gt") and r.get("metrics")], float)
     ep = [r["metrics"]["goal_point_error"] for r in rows if r.get("metrics")]
@@ -792,6 +820,7 @@ def aggregate_description_metrics(records):
         "gt_follow_rate": float(np.mean(gt_follows)) if gt_follows else None,
         "stop_rate": float(np.mean(stops)),
         "event_rate_by_type": {k: float(np.mean(v)) for k, v in sorted(by_type.items())},
+        "by_turn": {k: _group(v) for k, v in split.items() if v},
         "n_pairs": len(full),
         "pair_success": float(np.mean([all(follows[i] for i in p) for p in full])) if full else None,
         "endpoint_error_median": float(np.median(ep)) if ep else None,
@@ -826,7 +855,8 @@ def aggregate_steering_metrics(records):
     steered their own way; text-blind = 0), with a 95% bootstrap interval over viewpoints. Also:
     swap control, closer-to-own-GT rate, strict follow (all events + stop at 0.03 and 0.05), the
     share of pairs whose two generations are identical, and the headline over pure pairs only
-    (steer.prefix_events True; absent = True) as pair_success_prefix_events / n_prefix_events."""
+    (steer.prefix_events True; absent = True) as pair_success_prefix_events / n_prefix_events.
+    by_slice: pair success per steer.slice ("stop" / "turn")."""
     rows = [r for r in records if (r.get("habitat_meta") or {}).get("steer")]
     by_id = {r["id"]: r for r in rows}
     pairs, seen = [], set()
@@ -857,9 +887,17 @@ def aggregate_steering_metrics(records):
         groups.append(a["habitat_meta"]["steer"]["viewpoint"])
         pure.append(bool(a["habitat_meta"]["steer"].get("prefix_events", True)))
     lo, hi = clustered_bootstrap_ci(succ, groups)
+    slices = [a["habitat_meta"]["steer"]["slice"] for a, _ in pairs]
+    by_slice = {}
+    for s_ in sorted(set(slices)):
+        idx = [i for i, x in enumerate(slices) if x == s_]
+        lo_s, hi_s = clustered_bootstrap_ci([succ[i] for i in idx], [groups[i] for i in idx])
+        by_slice[s_] = {"n_pairs": len(idx), "pair_success": float(np.mean([succ[i] for i in idx])),
+                        "pair_success_ci": [lo_s, hi_s]}
     pure_succ = [v for v, p in zip(succ, pure) if p]
     return {
-        "slice": pairs[0][0]["habitat_meta"]["steer"]["slice"],
+        "slice": slices[0] if len(by_slice) == 1 else "all",
+        "by_slice": by_slice,
         "n_pairs": len(pairs),
         "pair_success": float(np.mean(succ)),
         "pair_success_ci": [lo, hi],

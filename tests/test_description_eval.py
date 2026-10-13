@@ -279,3 +279,53 @@ def test_steering_pair_purity_split():
     m = aggregate_steering_metrics(_pair(A_GT, B_GT, pid="q", prefix=False))
     assert m["n_prefix_events"] == 0 and m["pair_success_prefix_events"] is None
     assert aggregate_steering_metrics(_pair(A_GT, B_GT))["n_prefix_events"] == 1     # key absent = pure
+
+
+from rover_vlm.eval import TURN_FOLLOW_M, TURN_FOLLOW_SHARE  # noqa: E402
+
+TURN_L = {"type": "turn", "side": "left", "obstacles": [], "gap_xz": None,
+          "turn_xz": [0.0, 3.0], "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 1.5}
+
+
+@pytest.mark.parametrize("xz,ok", [
+    ([(0.0, 0.8), (0.0, 3.0), (1.5, 3.0)], 1),       # turns left (+x is the rover's left)
+    ([(0.0, 0.8), (0.0, 4.5)], 0),                    # carries straight on
+    ([(0.0, 0.8), (0.0, 2.5)], 0),                    # stops short of the turn
+    ([(0.0, 0.8), (0.0, 3.0), (-1.5, 3.0)], 0),       # turns the other way
+])
+def test_turn_followed(xz, ok):
+    assert description_follow(to_image(xz), check([TURN_L], goal=xz[-1]))["events"] == [ok]
+
+
+def test_turn_threshold_shrinks_with_a_short_gt_turn():
+    assert (TURN_FOLLOW_M, TURN_FOLLOW_SHARE) == (0.5, 0.5)
+    path = to_image([(0.0, 0.8), (0.0, 3.0), (0.3, 3.0)])                   # 0.3 m left of the pre-turn line
+    assert description_follow(path, check([TURN_L], goal=(0.3, 3.0)))["events"] == [0]
+    short = {**TURN_L, "gt_lateral_m": 0.4}                                  # the GT itself ends 0.4 m off
+    assert description_follow(path, check([short], goal=(0.3, 3.0)))["events"] == [1]
+
+
+def test_turn_with_no_floor_points_is_not_followed():           # Review Focus 5
+    assert description_follow([[0.5, 0.4, 1], [0.6, 0.45, 1]], check([TURN_L]))["events"] == [0]
+
+
+def test_by_turn_split():
+    def rec(rid, events, path_xz):
+        p = to_image(path_xz)
+        return {"id": rid, "parsed": {"path": p}, "gt": {"path": p, "goal": p[-1]},
+                "metrics": {"goal_point_error": 0.1 if events else 0.02, "mean_point_error": 0.05 if events else 0.01},
+                "habitat_meta": {"desc_check": check(events, goal=path_xz[-1]), "pair_id": None}}
+    recs = [rec("t", [TURN_L], [(0.0, 0.8), (0.0, 3.0), (1.5, 3.0)]), rec("s", [], [(0.0, 0.8), (0.0, 4.0)])]
+    m = aggregate_description_metrics(recs)
+    assert m["by_turn"]["turn"] == {"n": 1, "follow_rate": 1.0, "endpoint_error_median": 0.1, "point_error_median": 0.05}
+    assert m["by_turn"]["no_turn"]["n"] == 1 and m["event_rate_by_type"]["turn"] == 1.0
+
+
+def test_steering_by_slice():
+    recs = _pair(A_GT, B_GT, pid="p") + _pair(B_GT, B_GT, pid="q")
+    for r in recs[2:]:
+        r["habitat_meta"]["steer"]["slice"] = "turn"
+    m = aggregate_steering_metrics(recs)
+    assert m["slice"] == "all" and m["by_slice"]["stop"]["pair_success"] == 1.0
+    assert m["by_slice"]["turn"]["n_pairs"] == 1 and m["by_slice"]["turn"]["pair_success"] == 0.0
+    assert aggregate_steering_metrics(_pair(A_GT, B_GT))["slice"] == "stop"
