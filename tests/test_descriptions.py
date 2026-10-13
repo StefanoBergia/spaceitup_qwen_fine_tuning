@@ -970,3 +970,23 @@ def test_turn_right_after_is_a_turn_not_the_adverb():          # Review Focus 1
 def test_turn_templates_pass_their_own_rules(events):
     text = template_description(events, NEAR, NAMES)
     assert description_rejects(text, events, NEAR, NAMES) == [], text
+
+
+def _anchored_turn(side, relation):
+    return {"type": "turn", "side": side, "relation": relation, "objects": ["f:b6"], "arc_m": 2.0,
+            "turn_xz": [1.0, 2.0], "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 1.0}
+
+
+@pytest.mark.parametrize("word", ["round", "around"])
+def test_anchored_right_turn_passes_with_its_relation(word):
+    ev = [PASS_L, _anchored_turn("right", "round")]
+    t = f"Go left of the coffee table, then turn right {word} the table and stop in front of the fridge."
+    assert description_rejects(t, ev, NEAR, NAMES) == [], description_rejects(t, ev, NEAR, NAMES)
+
+
+def test_anchored_behind_right_turn_after_is_only_a_relation_reject():
+    ev = [PASS_L, _anchored_turn("right", "behind")]
+    t = "Go left of the coffee table, then turn right after the table and stop in front of the fridge."
+    r = description_rejects(t, ev, NEAR, NAMES)
+    assert "turn:relation:1" in r, r
+    assert not [x for x in r if x.startswith(("side:", "turn:side:"))], r
