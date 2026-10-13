@@ -102,3 +102,42 @@ def test_finalize_recheck_drops_a_reused_text_that_breaks_a_d2_rule():
 def test_desc_path_round():
     assert prep.desc_path(Path("L"), "eval", "_mix").name == "desc_eval_mix_d1.jsonl"
     assert prep.desc_path(Path("L"), "eval", "_mix", "d2").name == "desc_eval_mix_d2.jsonl"
+
+
+_ASPEC = importlib.util.spec_from_file_location(
+    "audit_instruction_labels", Path(__file__).resolve().parent.parent / "scripts" / "audit_instruction_labels.py")
+audit = importlib.util.module_from_spec(_ASPEC)
+_ASPEC.loader.exec_module(audit)
+
+
+def _ev(rid, reason=None, rel=None):
+    events = [] if rel is False else [dict(TURN, relation=rel)]
+    return {"id": rid, "reason": reason, "events": events if reason is None else [], "pair_id": None}
+
+
+def test_sample_turns_stratifies():
+    d2 = ([_ev(f"h{i}", rel="behind") for i in range(40)] + [_ev(f"v{i}", rel=None) for i in range(10)]
+          + [_ev(f"r{i}", rel="round") for i in range(5)] + [_ev(f"b{i}", rel=False) for i in range(30)]
+          + [_ev(f"s{i}", reason="spur") for i in range(50)])
+    d1 = [{"id": f"b{i}", "reason": "no_events_bent"} for i in range(25)]
+    picked, pop = audit.sample_turns(d2, d1, seed=0)
+    groups = [g for g, _ in picked]
+    assert groups.count("turn_visible") == 15 and groups.count("turn_hidden") == 35   # 20 visible wanted, 15 exist
+    assert groups.count("bent") == 20 and groups.count("spur") == 30
+    assert pop == {"turn_visible": 15, "turn_hidden": 40, "rescued_bent": 25, "spur": 50}
+
+
+def test_select_d2_rows_half_with_a_turn():
+    ok = [{"id": f"t{i}", "prompt_version": "d4"} for i in range(80)] + \
+         [{"id": f"n{i}", "prompt_version": "d4"} for i in range(80)] + [{"id": "old", "prompt_version": "d3"}]
+    ev = {**{f"t{i}": {"events": [TURN]} for i in range(80)}, **{f"n{i}": {"events": [PASS]} for i in range(80)},
+          "old": {"events": [PASS]}}
+    rows = audit.select_d2_rows(ok, ev, 100, seed=0)
+    assert len(rows) == 100 and sum(r["id"].startswith("t") for r in rows) == 50 and "old" not in {r["id"] for r in rows}
+
+
+def test_sample_steer_takes_turn_pairs_first():
+    rows = [{"pair_id": f"t{i}", "id": f"t{i}_{k}", "slice": "turn"} for i in range(30) for k in "AB"] + \
+           [{"pair_id": f"s{i}", "id": f"s{i}_{k}", "slice": "stop"} for i in range(60) for k in "AB"]
+    picked, pop = audit.sample_steer(rows, 50, 0, n_turn=20)
+    assert len(picked) == 50 and sum(p[0]["slice"] == "turn" for p in picked) == 20 and pop == 90

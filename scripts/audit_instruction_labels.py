@@ -66,6 +66,7 @@ import numpy as np
 from rover_vlm.descriptions import template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
+from rover_vlm.landmarks import Camera
 from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
 from rover_vlm.overlay import draw_polyline
 from rover_vlm.route_events import check_events_schema
@@ -118,6 +119,41 @@ VERDICTS = {
         {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
     ],
 }
+
+
+VERDICTS["turns"] = [
+    {"v": "ok", "label": "True", "help": "Every step (the turn included) and the stop are true; for a dropped route, dropping it is right"},
+    {"v": "turn", "label": "Wrong turn", "help": "There is no such turn, or it goes the other way"},
+    {"v": "anchor", "label": "Wrong turn object", "help": "'behind / round' the outlined object is not true"},
+    {"v": "step", "label": "Other step or stop wrong", "help": "A pass / wall / between / through step or the stop is wrong"},
+    {"v": "keep", "label": "Should not be dropped", "help": "A spur or bent drop of a route that is fine"},
+    {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+]
+TURN_MARK = (255, 60, 60)
+
+
+def _turn(row):
+    return next(e for e in row["events"] if e["type"] == "turn")
+
+
+def sample_turns(rows_d2, rows_d1, seed, n_visible=20, n_hidden=30, n_bent=20, n_spur=30):
+    """G1 (spec "Success criteria"): ~20 visible + ~30 hidden turn routes (hidden fills what visible lacks),
+    20 routes d1 dropped as no_events_bent that d2 describes, 30 routes d2 drops as spur. Shuffled."""
+    rng = random.Random(seed)
+    d1 = {r["id"]: r for r in rows_d1}
+    turns = [r for r in rows_d2 if r["reason"] is None and any(e["type"] == "turn" for e in r["events"])]
+    hidden = [r for r in turns if _turn(r)["relation"] == "behind"]
+    visible = [r for r in turns if _turn(r)["relation"] != "behind"]
+    bent = [r for r in rows_d2 if r["reason"] is None and (d1.get(r["id"]) or {}).get("reason") == "no_events_bent"]
+    spur = [r for r in rows_d2 if r["reason"] == "spur"]
+    k_vis = min(n_visible, len(visible))
+    k_hid = min(n_hidden + n_visible - k_vis, len(hidden))
+    picked = ([("turn_visible", r) for r in rng.sample(visible, k_vis)]
+              + [("turn_hidden", r) for r in rng.sample(hidden, k_hid)]
+              + [("bent", r) for r in rng.sample(bent, min(n_bent, len(bent)))]
+              + [("spur", r) for r in rng.sample(spur, min(n_spur, len(spur)))])
+    rng.shuffle(picked)
+    return picked, {"turn_visible": len(visible), "turn_hidden": len(hidden), "rescued_bent": len(bent), "spur": len(spur)}
 
 
 def sample(records, n, opposite_share, seed):
@@ -305,6 +341,45 @@ def events_item(rec, row, objects, text=None):
             "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
 
 
+def turns_item(rec, row, objects, group):
+    """One G1 item: the GT route, numbered objects and the turn point; a spur drop shows the route alone."""
+    if group == "spur":
+        img = Image.open(io.BytesIO(render_generation_jpeg(rec))).resize((IMG_PX, IMG_PX), Image.LANCZOS)
+        draw_reference_line(img, _answer_path(rec))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        m = rec["habitat_meta"]
+        return {"id": rec["id"], "instruction": "DROPPED as an out-and-back spur. Is dropping this route right?",
+                "side": m["side"], "kind": m["kind"], "has_alt": False, "scene": m["scene_id"], "target": "spur",
+                "reason": "spur", "group": group,
+                "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
+    item = events_item(rec, row, objects)
+    t = next((e for e in row["events"] if e["type"] == "turn"), None)
+    if t is not None:
+        img = Image.open(io.BytesIO(base64.b64decode(item["img"].split(",", 1)[1])))
+        uv, fwd = Camera(row["pose_xz"], row["heading_xz"]).uv(np.array([t["turn_xz"]], float))
+        if fwd[0] > 0:
+            x, y = float(uv[0, 0]) * IMG_PX, float(uv[0, 1]) * IMG_PX
+            ImageDraw.Draw(img).ellipse([x - 10, y - 10, x + 10, y + 10], outline=TURN_MARK, width=4)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        item["img"] = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    item["group"] = group
+    return item
+
+
+def select_d2_rows(ok, events_by_id, n, seed):
+    """G3: n passed d2 rows composed with the current prompt (reused d1 rows left out), half with a turn."""
+    rng = random.Random(seed)
+    new = [r for r in ok if r.get("prompt_version") == "d4" and r["id"] in events_by_id]
+    has = [r for r in new if any(e["type"] == "turn" for e in events_by_id[r["id"]]["events"])]
+    no = [r for r in new if r not in has]
+    k = min(n // 2, len(has))
+    rows = rng.sample(has, k) + rng.sample(no, min(n - k, len(no)))
+    rng.shuffle(rows)
+    return rows
+
+
 def read_ids(path):
     """Route ids from a text file, one per line; blank lines and surrounding whitespace ignored."""
     return [ln.strip() for ln in Path(path).read_text().splitlines() if ln.strip()]
@@ -320,14 +395,18 @@ def select_d1_rows(ok, ids, n, seed):
     return rows, len(ids) - len(rows)
 
 
-def sample_steer(rows, n, seed):
-    """Up to n pairs (both rows, id order), shuffled; and the number of pairs available."""
+def sample_steer(rows, n, seed, n_turn=0):
+    """Up to n pairs (both rows, id order), shuffled; and the number of pairs available.
+    n_turn of them come from the turn slice first, the rest from the other pairs."""
     by = {}
     for r in rows:
         by.setdefault(r["pair_id"], []).append(r)
     pairs = sorted((sorted(v, key=lambda r: r["id"]) for v in by.values() if len(v) == 2), key=lambda p: p[0]["pair_id"])
     rng = random.Random(seed)
-    picked = rng.sample(pairs, min(n, len(pairs)))
+    turn = [p for p in pairs if p[0].get("slice") == "turn"]
+    other = [p for p in pairs if p[0].get("slice") != "turn"]
+    first = rng.sample(turn, min(n_turn, len(turn)))
+    picked = first + rng.sample(other, min(max(0, n - len(first)), len(other)))
     rng.shuffle(picked)
     return picked, len(pairs)
 
@@ -337,7 +416,7 @@ def steer_item(a, b):
     img = Image.open(a["image"]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
     draw = ImageDraw.Draw(img)
     font = _font(max(16, IMG_PX // 30))
-    for k, oid in enumerate(o for o in dict.fromkeys([a["anchor"], b["anchor"]]) if o):
+    for k, oid in enumerate(o for o in dict.fromkeys([a["anchor"], b["anchor"]] + [o for e in b.get("events", []) if e["type"] == "turn" for o in e["objects"]]) if o):
         poly = a["outlines"].get(oid) or b["outlines"].get(oid) or []
         pts = [(u * IMG_PX, v * IMG_PX) for u, v in poly]
         if len(pts) >= 3:
@@ -371,7 +450,7 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns"], default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -384,6 +463,10 @@ def main() -> None:
     ap.add_argument("--desc", type=Path, default=None, help="desc_*_d1.jsonl (--mode d1)")
     ap.add_argument("--ids", type=Path, default=None,
                     help="route ids, one per line (--mode d1): audit exactly these passed routes, in order; ignores --n")
+    ap.add_argument("--d1-events", type=Path, default=None, help="d1 events_*.jsonl (--mode turns: the rescued-bent group)")
+    ap.add_argument("--labelset-dir", type=Path, default=V2, help="dir holding labelset_<split>.json")
+    ap.add_argument("--round", default="d1", help="--mode d1: 'd2' samples half turn routes, d4 prompt only")
+    ap.add_argument("--n-turn", type=int, default=0, help="--mode steer: pairs taken from the turn slice")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -391,7 +474,7 @@ def main() -> None:
     if args.mode == "steer":
         events = args.events or V3 / "steer" / "events_steer_eval.jsonl"
         check_events_schema(events)
-        picked, pop = sample_steer(jsonl(events), args.n, args.seed)
+        picked, pop = sample_steer(jsonl(events), args.n, args.seed, n_turn=args.n_turn)
         items = [steer_item(a, b) for a, b in picked]
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "steer",
                    "verdicts": VERDICTS["steer"], "source": str(events)}
@@ -419,26 +502,48 @@ def main() -> None:
         out.write_text(html)
         print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
         return
+    if args.mode == "turns":
+        if not (args.events and args.objects and args.d1_events):
+            raise SystemExit("--mode turns needs --events, --objects and --d1-events (the d1 events_train.jsonl)")
+        check_events_schema(args.events)
+        split = "eval" if "eval" in args.events.name else "train"
+        by_id = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{split}.json").read_text())}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        picked, pop = sample_turns(jsonl(args.events), jsonl(args.d1_events), args.seed)
+        items = [turns_item(by_id[r["id"]], r, objects, g) for g, r in picked]
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "turns",
+                   "verdicts": VERDICTS["turns"], "source": str(args.events)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Turn Events Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "turn_events_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     if args.mode == "d1":
         if not (args.events and args.objects and args.desc):
             raise SystemExit("--mode d1 needs --events, --objects and --desc desc_*_d1.jsonl")
         check_events_schema(args.events)
-        split = V2 / ("labelset_eval.json" if "eval" in args.events.name else "labelset_train.json")
+        split = args.labelset_dir / ("labelset_eval.json" if "eval" in args.events.name else "labelset_train.json")
         by_id = {r["id"]: r for r in json.loads(split.read_text())}
         ev = {r["id"]: r for r in jsonl(args.events)}
         objects = {o["object_id"]: o for o in jsonl(args.objects)}
         ok = [r for r in jsonl(args.desc) if r.get("passed")]
-        rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
+        if args.round == "d2":
+            rows, missing = select_d2_rows(ok, ev, args.n, args.seed), 0
+        else:
+            rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
         if args.ids:
             print(f"--ids: {len(rows)} shown, {missing} id(s) missing or not passed in {args.desc}")
         items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"]) for r in rows]
         for it, r in zip(items, rows):
             it["source"] = r["instruction_source"]
         pop = {"passed": len(ok), "template": sum(r["instruction_source"] == "template" for r in ok)}
+        title = "d2 Label Audit" if args.round == "d2" else d1_title(args.desc)
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "d1",
-                   "verdicts": VERDICTS["d1"], "source": str(args.desc), "title": d1_title(args.desc)}
+                   "verdicts": VERDICTS["d1"], "source": str(args.desc), "title": title}
         html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
-        html = html.replace("<title>Instruction Label Audit</title>", f"<title>{d1_title(args.desc)}</title>", 1)
+        html = html.replace("<title>Instruction Label Audit</title>", f"<title>{title}</title>", 1)
         out = args.out or REPO_ROOT / "outputs" / "instr_d1_audit.html"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html)
