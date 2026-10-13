@@ -76,7 +76,7 @@ start→goal line (left/right = the rover's own).
 - G2 label gate (300 changed eval routes): accept ≥ 0.90, template share ≤ 0.10.
 - G3 label audit (human, 100 changed routes, half with a turn): **≥ 90% correct**.
 - Steering: Gate 0 ≥ 150 pairs and ≥ 50 in the turn slice; Gate 1 (50 pairs, 20 turn + 30 stop)
-  ≥ 90% true; Gate 2 compose accept ≥ 0.9.
+  ≥ 90% true; Gate 2 ≥ 85% of pairs keep both routes' composed text (unchanged from the steering spec).
 - d2 model (v4 eval sets):
   - On turning routes in the entry form, d2 beats d1 on turn follow rate and on endpoint / point error,
     with the 95% CI of the difference excluding 0.
@@ -227,7 +227,8 @@ touched.
   today's rule (`slice: "stop"`).
 - Names: `STAGE=steer_names` only for ids still missing, wall-like turn anchors included.
 - Gate 0: ≥ 150 pairs and ≥ 50 turn pairs (expected ~80–120). Gate 1: new 50-pair audit, 20 turn +
-  30 stop, seed 0; the paused 4/50 audit is abandoned. Gate 2: compose with d4.
+  30 stop, seed 0; the paused 4/50 audit is abandoned. Gate 2: compose with d4, ≥ 85% of pairs keep both
+  composed texts.
 - Eval: `SETS=steer` for d1 and d2 (+ goal-form control); pair success overall and per slice
   (`audit_instruction_labels.py --mode steer` stratified, `visualize_steering.py` per slice).
 
@@ -271,6 +272,18 @@ touched.
   never staged).
 - Dated pointer lines at the end of `2026-09-30-route-descriptions-design.md` and
   `2026-10-07-steering-eval-design.md`.
+
+## Plan refinements (2026-10-13, from prototyping the plan's synthetic scenes)
+
+- **A pass of the turn's anchor after the turn point is dropped.** When a single-object pass of the turn's anchor
+  object comes at or after the turn point, the pass event is left out. Prototype: without this, a visible
+  post round which the route turned read "turn left round the post, then go right of the post". A pass
+  *before* the turn stays ("go right of the box, then turn left behind it").
+- **Turn check threshold.** A turn counts as followed when the prediction ends at least
+  `min(TURN_FOLLOW_M, 0.5 × gt_lateral_m)` to the stated side of the pre-turn line. `gt_lateral_m`, the GT
+  end's own offset, is stored in the turn event and in `desc_check`. A GT route that ends shortly after its
+  turn still follows its own text, so `gt_follow_rate` stays the ceiling.
+- Plan: `docs/superpowers/plans/2026-10-13-turn-events-d2.md`.
 
 ## Out of scope / known issues
 
