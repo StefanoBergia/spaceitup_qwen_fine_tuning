@@ -19,14 +19,27 @@ def test_thread_caps(name):
 def test_label_descriptions_has_a_steer_names_stage():
     text = (SLURM / "label_descriptions.sbatch").read_text()
     assert '"$STAGE" = "steer_names"' in text and "--all-objects" in text
-    assert "names_steer_gemma_d1.jsonl" in text and 'serve "$GEMMA_MODEL"' in text
+    assert 'names_steer_gemma_${ROUND}.jsonl' in text and 'serve "$GEMMA_MODEL"' in text
 
 
 def test_label_descriptions_has_a_steer_stage():
     text = (SLURM / "label_descriptions.sbatch").read_text()
     assert '"$STAGE" = "steer"' in text and "events_steer_eval.jsonl" in text
-    assert "desc_steer_eval_d1.jsonl" in text and "missing $OUT/names_eval_d1.jsonl" in text and "names_primary_eval.jsonl" in text and "--fallback-names" in text
+    assert 'desc_steer_eval_${ROUND}.jsonl' in text and 'missing $OUT/names_eval_${ROUND}.jsonl' in text
+    assert "names_primary_eval.jsonl" in text and "--fallback-names" in text
     assert "steer-propose" not in text
+
+
+def test_label_descriptions_round_and_changed_gate():
+    text = (SLURM / "label_descriptions.sbatch").read_text()
+    assert 'ROUND="${ROUND:-d1}"' in text and "_d1.jsonl" not in text.split("set -euo pipefail", 1)[1]
+    assert 'GATE_SPLIT=eval_changed' in text and 'name_stage "$GATE_SPLIT" gate --limit 300' in text
+    assert 'SD="${STEER_DIR:-data/prepared_habitat_instr_v3/steer}"' in text
+
+
+def test_eval_descriptions_data_and_out_dir():
+    text = (SLURM / "eval_descriptions.sbatch").read_text()
+    assert 'D="${DATA:-data/prepared_habitat_instr_v3}"' in text and 'OUT="${OUT_DIR:-outputs/eval_desc}"' in text
 
 
 def test_eval_descriptions_sets():

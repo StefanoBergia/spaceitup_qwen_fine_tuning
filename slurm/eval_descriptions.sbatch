@@ -4,6 +4,7 @@
 #     ADAPTER=<dir> TAG=<tag> sbatch slurm/eval_descriptions.sbatch
 #     SETS=steer sbatch slurm/eval_descriptions.sbatch              # the 4 steering stop-pair sets (d1)
 #     SETS=steer_goal ADAPTER=outputs/runs_v4/habitat_train_full/adapter TAG=r4 sbatch slurm/eval_descriptions.sbatch
+#     DATA=data/prepared_habitat_instr_v4 OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch
 # metrics.json gains a "description" block. Then, on the login node:
 #     uv run scripts/render_desc_videos.py --set eval_desc_pairs --tag d1
 #SBATCH --job-name=qwen-desc-eval
@@ -18,8 +19,8 @@ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 mkdir -p outputs/slurm
 export HF_HUB_OFFLINE=1 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
 UV=~/.local/bin/uv
-D=data/prepared_habitat_instr_v3
-OUT=outputs/eval_desc
+D="${DATA:-data/prepared_habitat_instr_v3}"
+OUT="${OUT_DIR:-outputs/eval_desc}"
 TAG="${TAG:-d1}"
 ADAPTER="${ADAPTER:-outputs/runs_desc/d1/adapter}"
 run() {  # run <set>

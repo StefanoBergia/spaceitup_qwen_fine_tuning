@@ -37,6 +37,11 @@
 # Afterwards, on the login node:
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions            # cosmos / gemma
 #     uv run scripts/prepare_habitat_instr.py finalize-descriptions --desc-suffix _mix
+# d2 (2026-10-13, turn events): after prepare_habitat_instr.py events --out-dir data/prepared_habitat_instr_v4
+# and d2-seed, the same job names only new objects and composes only changed routes (--resume on seeded files):
+#     ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch            # gate
+#     ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch
+#     ROUND=d2 STEER_DIR=data/prepared_habitat_instr_v4/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch
 #SBATCH --job-name=cosmos3-label-desc
 #SBATCH --partition=A100
 #SBATCH --gres=gpu:3g.40gb:1
@@ -55,6 +60,14 @@ OUT=outputs/instr_labels_v3
 CONCURRENCY="${CONCURRENCY:-8}"
 UV="${UV:-$HOME/.local/bin/uv}"
 STAGE="${STAGE:-gate}"
+ROUND="${ROUND:-d1}"     # label-file tag: d1, or d2 (turn events; files seeded by prepare_habitat_instr.py d2-seed)
+GATE_SPLIT=eval          # d2 gates only the changed eval routes (events_eval_changed.jsonl, written by d2-seed)
+if [ "$ROUND" != d1 ]; then
+    GATE_SPLIT=eval_changed
+    for f in events objects; do
+        [ -f "$D/${f}_eval_changed.jsonl" ] || { echo "missing $D/${f}_eval_changed.jsonl — run prepare_habitat_instr.py d2-seed"; exit 1; }
+    done
+fi
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 unset VIRTUAL_ENV
 for s in eval train; do
@@ -105,7 +118,7 @@ name_stage() {  # name_stage <split> <tag> [--limit N]
     local s=$1 tag=$2; shift 2
     local first gate limit; parse_opts "$@"
     local name_args=(--stage name --events "$D/events_$s.jsonl" --objects "$D/objects_$s.jsonl"
-                     --out "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "${NAME_EXTRA[@]}")
+                     --out "$OUT/names_${tag}${NAME_SFX}_${ROUND}.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY" "${NAME_EXTRA[@]}")
     echo; echo "=============== name: $tag$NAME_SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${name_args[@]}" "$first" "${limit[@]}"
     echo; echo "=============== name: $tag$NAME_SFX (pass 2, retries errors; summary is report-only) ==============="
@@ -115,8 +128,8 @@ name_stage() {  # name_stage <split> <tag> [--limit N]
 compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
     local s=$1 tag=$2; shift 2
     local first gate limit; parse_opts "$@"
-    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}${NAME_SFX}_d1.jsonl" "${FALLBACK[@]}"
-                     --out "$OUT/desc_${tag}${SFX}_d1.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
+    local comp_args=(--stage compose --events "$D/events_$s.jsonl" --names "$OUT/names_${tag}${NAME_SFX}_${ROUND}.jsonl" "${FALLBACK[@]}"
+                     --out "$OUT/desc_${tag}${SFX}_${ROUND}.jsonl" --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== compose: $tag$SFX (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${comp_args[@]}" "$first" "${limit[@]}"
     echo; echo "=============== compose: $tag$SFX (pass 2, retries errors${gate[*]:+, gated}) ==============="
@@ -131,20 +144,20 @@ compose_stage() {  # compose_stage <split> <tag> [--limit N] [--gate]
 # A failed compose gate exits 2 under set -e.
 mix_cosmos_phase() {  # mix_cosmos_phase <split> <tag> [opts]: Cosmos names ONLY the objects of routes
     local tag=$2      # the Gemma names cannot serve (clash / unnamed); locals are seen by name_stage
-    local NAME_SFX="" NAME_EXTRA=(--only-unusable-under "$OUT/names_${tag}_gemma_d1.jsonl")
+    local NAME_SFX="" NAME_EXTRA=(--only-unusable-under "$OUT/names_${tag}_gemma_${ROUND}.jsonl")
     name_stage "$@"
 }
 mix_compose() {  # mix_compose <split> <tag> [opts]: compose with Gemma names + Cosmos fallback names
     local tag=$2
-    local NAME_SFX="_gemma" FALLBACK=(--fallback-names "$OUT/names_${tag}_d1.jsonl")
+    local NAME_SFX="_gemma" FALLBACK=(--fallback-names "$OUT/names_${tag}_${ROUND}.jsonl")
     compose_stage "$@"
 }
 
 if [ "$STAGE" = "steer_names" ]; then
-    SD=data/prepared_habitat_instr_v3/steer
+    SD="${STEER_DIR:-data/prepared_habitat_instr_v3/steer}"
     [ -f "$SD/objects_eval.jsonl" ] || { echo "missing $SD/objects_eval.jsonl — run prepare_habitat_instr.py steer-objects"; exit 1; }
     serve "$GEMMA_MODEL"
-    steer_names=(--stage name --all-objects --objects "$SD/objects_eval.jsonl" --out "$OUT/names_steer_gemma_d1.jsonl"
+    steer_names=(--stage name --all-objects --objects "$SD/objects_eval.jsonl" --out "$OUT/names_steer_gemma_${ROUND}.jsonl"
                  --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== name: steer objects (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${steer_names[@]}" --resume
@@ -155,14 +168,14 @@ if [ "$STAGE" = "steer_names" ]; then
 fi
 
 if [ "$STAGE" = "steer" ]; then
-    SD=data/prepared_habitat_instr_v3/steer
+    SD="${STEER_DIR:-data/prepared_habitat_instr_v3/steer}"
     for f in events_steer_eval.jsonl names_primary_eval.jsonl; do
         [ -f "$SD/$f" ] || { echo "missing $SD/$f — run prepare_habitat_instr.py steer + steer-select"; exit 1; }
     done
-    [ -f "$OUT/names_eval_d1.jsonl" ] || { echo "missing $OUT/names_eval_d1.jsonl (compose fallback names)"; exit 1; }
+    [ -f "$OUT/names_eval_${ROUND}.jsonl" ] || { echo "missing $OUT/names_eval_${ROUND}.jsonl (compose fallback names)"; exit 1; }
     serve "$COSMOS_MODEL"
     steer_args=(--stage compose --events "$SD/events_steer_eval.jsonl" --names "$SD/names_primary_eval.jsonl"
-                --fallback-names "$OUT/names_eval_d1.jsonl" --out "$OUT/desc_steer_eval_d1.jsonl"
+                --fallback-names "$OUT/names_eval_${ROUND}.jsonl" --out "$OUT/desc_steer_eval_${ROUND}.jsonl"
                 --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
     echo; echo "=============== compose: steer (pass 1) ==============="
     "$UV" run scripts/label_descriptions.py "${steer_args[@]}" --resume
@@ -181,15 +194,15 @@ fi
 
 if [ "$STAGE" = "gate" ]; then
     case "$NAMER" in
-        gemma) name_stage eval gate --limit 300
+        gemma) name_stage "$GATE_SPLIT" gate --limit 300
                serve "$COSMOS_MODEL"
-               compose_stage eval gate --limit 300 --gate ;;
-        mix)   name_stage eval gate --limit 300
+               compose_stage "$GATE_SPLIT" gate --limit 300 --gate ;;
+        mix)   name_stage "$GATE_SPLIT" gate --limit 300
                serve "$COSMOS_MODEL"
-               mix_cosmos_phase eval gate --limit 300
-               mix_compose eval gate --limit 300 --gate ;;
-        *)     name_stage eval gate --limit 300
-               compose_stage eval gate --limit 300 --gate ;;
+               mix_cosmos_phase "$GATE_SPLIT" gate --limit 300
+               mix_compose "$GATE_SPLIT" gate --limit 300 --gate ;;
+        *)     name_stage "$GATE_SPLIT" gate --limit 300
+               compose_stage "$GATE_SPLIT" gate --limit 300 --gate ;;
     esac
     echo "gate labelled — audit it, then: $([ "$NAMER" != cosmos ] && echo "NAMER=$NAMER ")STAGE=full sbatch slurm/label_descriptions.sbatch"
     exit 0
@@ -213,4 +226,4 @@ case "$NAMER" in
            compose_stage train train ;;
 esac
 echo; echo "=============== done ==============="
-wc -l "$OUT"/*_d1.jsonl
+wc -l "$OUT"/*_${ROUND}.jsonl
