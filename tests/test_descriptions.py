@@ -926,3 +926,47 @@ def test_desc_check_keeps_the_turn_geometry():
     c = desc_check(ev, objects)
     assert c["events"][1]["turn_xz"] == [1.9, 3.0] and c["events"][1]["pre_heading_xz"] == [0.0, 1.0]
     assert c["events"][1]["gt_lateral_m"] == 1.9 and "turn_xz" not in c["events"][0]
+
+
+from rover_vlm.descriptions import turn_rejects  # noqa: E402
+
+EV_T = [PASS_R6, TURN_BEHIND6]
+
+
+@pytest.mark.parametrize("text", [
+    "Go right of the table, then turn left behind it, and stop in front of the fridge.",          # Review Focus 2
+    "Pass the table on the right, turn left behind the table and stop in front of the fridge.",
+    "Go right of the table, then turn to your left behind it and stop in front of the fridge.",
+    "Go right of the table, then turn left behind the table, and stop in front of the fridge.",   # the turn owns 'left'
+])
+def test_turn_texts_that_pass(text):
+    assert description_rejects(text, EV_T, NEAR, NAMES) == [], text
+
+
+@pytest.mark.parametrize("text,reason", [
+    ("Go right of the table, then turn behind it and stop in front of the fridge.", "turn:side:missing:1"),
+    ("Go right of the table, then turn right behind it and stop in front of the fridge.", "turn:side:opposite:1"),
+    ("Go right of the table, then turn left past it, and stop in front of the fridge.", "turn:relation:1"),
+    ("Go right of the table, then turn left behind the sofa, and stop in front of the fridge.", "name:missing:1"),
+])
+def test_turn_rejections(text, reason):
+    assert reason in description_rejects(text, EV_T, NEAR, NAMES), description_rejects(text, EV_T, NEAR, NAMES)
+
+
+def test_a_turn_word_without_a_turn_event_is_stray():
+    t = "Go left of the coffee table, then turn right and stop in front of the fridge."
+    assert "turn:stray" in description_rejects(t, [PASS_L], NEAR, NAMES)
+    assert turn_rejects(t, [PASS_L]) == ["turn:stray"]
+    assert turn_rejects("Go left of the coffee table and stop in front of the fridge.", [PASS_L]) == []
+
+
+def test_turn_right_after_is_a_turn_not_the_adverb():          # Review Focus 1
+    turn_r = {**TURN_BARE_L, "side": "right"}
+    t = "Go left of the coffee table, turn right after it, and stop in front of the fridge."
+    assert description_rejects(t, [PASS_L, turn_r], NEAR, NAMES) == []
+
+
+@pytest.mark.parametrize("events", [[PASS_R6, TURN_BEHIND6], [TURN_BARE_L], [PASS_L, TURN_ROUND3]])
+def test_turn_templates_pass_their_own_rules(events):
+    text = template_description(events, NEAR, NAMES)
+    assert description_rejects(text, events, NEAR, NAMES) == [], text

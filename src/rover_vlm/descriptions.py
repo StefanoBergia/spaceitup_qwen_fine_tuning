@@ -38,6 +38,10 @@ _CONJUNCTION = re.compile(r"\b(?:and|then|or)\b", re.I)     # would split the na
 # still say "right next to" in passing, and that "right" is never a side word.
 _RIGHT_ADVERB = re.compile(r"\bright(?= (?:after|past|beyond|before|in front of|next to|by|beside)\b)", re.I)
 _PRONOUN = re.compile(r"\b(?:it|them)\b", re.I)
+# d2: "turn left", "turns right", "turning to the left", "turn to your right". Its side word belongs to the turn
+# event, never to the next name, and is claimed BEFORE _RIGHT_ADVERB blanks "right after" (Review Focus 1).
+_TURN = re.compile(r"\bturn(?:s|ed|ing)?\s+(?:to\s+(?:the|your)\s+)?(left|right)\b", re.I)
+TURN_RELATION_WORDS = {"behind": r"\bbehind\b", "round": r"\b(?:a)?round\b"}
 # The words that say each stop relation. The stop clause (the text after the last stop word)
 # must hold one of its own relation's words, so a swapped relation ("a little before the
 # armchair" for a past stop) is rejected as stop:relation. after_last is checked by _AFTER.
@@ -182,6 +186,30 @@ def _side_rejects(text, events, spans):
     return list(dict.fromkeys(out))
 
 
+def turn_rejects(text, events):
+    """The turn rules, which need no names (finalize re-checks reused d1 texts with them): a turn phrase only
+    where the events have a turn, saying the turn's side and no other, and an anchored turn's relation word
+    ("behind" / "round") in the clause after the turn phrase."""
+    found = list(_TURN.finditer(text))
+    turns = [i for i, e in enumerate(events) if e["type"] == "turn"]
+    if not turns:
+        return ["turn:stray"] if found else []
+    i, e = turns[0], events[turns[0]]
+    sides = {m.group(1).lower() for m in found}
+    out = []
+    if e["side"] not in sides:
+        out.append(f"turn:side:missing:{i}")
+    if sides - {e["side"]}:
+        out.append(f"turn:side:opposite:{i}")
+    rel = e.get("relation")
+    if rel and found:
+        m = next((m for m in found if m.group(1).lower() == e["side"]), found[0])
+        b = _BREAK.search(text, m.end())
+        if not re.search(TURN_RELATION_WORDS[rel], text[m.end(): b.start() if b else len(text)], re.I):
+            out.append(f"turn:relation:{i}")
+    return out
+
+
 def description_rejects(text, events, stop, names):
     """Why a description is unusable for these events; [] when it is fine."""
     if not text:
@@ -196,6 +224,8 @@ def description_rejects(text, events, stop, names):
     for i, e in enumerate(events):
         for oid in e["objects"]:
             m = _find_name(text, names[oid], pos)
+            if m is None and e["type"] == "turn" and i > 0 and oid in events[i - 1]["objects"]:
+                m = _PRONOUN.search(text, pos)       # "...right of the table, then turn left behind it"
             if m is None:
                 out.append(f"name:missing:{i}")
                 continue
@@ -227,7 +257,9 @@ def description_rejects(text, events, stop, names):
         words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
         if not words or not stops or not _words_re(words).search(text, clause):
             out.append("stop:amount")
-    return out + _side_rejects(text, events, spans)
+    # the turn phrase's side word is the turn's: blank it (same length, spans stay valid) before side ownership
+    side_text = _TURN.sub(lambda m: " " * len(m.group(0)), text)
+    return out + turn_rejects(text, events) + _side_rejects(side_text, events, spans)
 
 
 def name_rejects(name, kind, need):
