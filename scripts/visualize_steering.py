@@ -6,6 +6,7 @@ with rover_vlm.eval.aggregate_steering_metrics, so a metric fix never needs a GP
 
     uv run scripts/visualize_steering.py                   # tags d1 and r4
     uv run scripts/visualize_steering.py --tags d1 --n 16
+    uv run scripts/visualize_steering.py --tags d1 d2 --eval-dir outputs/eval_desc_d2 --data-dir data/prepared_habitat_instr_v4 --out outputs/steering_report_d2.html
 
 Writes outputs/steering_report.html (self-contained; images inline). Spec:
 docs/superpowers/specs/2026-10-07-steering-eval-design.md
@@ -27,17 +28,20 @@ TEXT_H = 70
 
 
 def metric_cells(eval_dir, tags):
-    """One row per (slice, text, form, tag) with predictions on disk."""
+    """One row per (text, form, tag) with slice "all", then one per slice present."""
     out = []
-    for s, t, f in CELLS:
+    for _s, t, f in CELLS:
         for tag in tags:
-            p = Path(eval_dir) / f"eval_steer_{s}_{t}_{f}" / tag / "predictions.json"
+            p = Path(eval_dir) / f"eval_steer_stop_{t}_{f}" / tag / "predictions.json"
             if not p.exists():
                 continue
             recs = json.loads(p.read_text())
-            out.append({"slice": s, "text": t, "form": f, "tag": tag, "n": len(recs),
-                        "parse_rate": sum(bool((r.get("parsed") or {}).get("path")) for r in recs) / max(1, len(recs)),
-                        "steering": aggregate_steering_metrics(recs) or {}})
+            base = {"text": t, "form": f, "tag": tag, "n": len(recs),
+                    "parse_rate": sum(bool((r.get("parsed") or {}).get("path")) for r in recs) / max(1, len(recs))}
+            agg = aggregate_steering_metrics(recs) or {}
+            out.append({**base, "slice": "all", "steering": agg})
+            for sl, v in sorted((agg.get("by_slice") or {}).items()):
+                out.append({**base, "slice": sl, "steering": v})     # pair success + CI only; the rest shows "—"
     return out
 
 
@@ -126,8 +130,8 @@ def main() -> None:
     cells = metric_cells(args.eval_dir, args.tags)
     if not cells:
         raise SystemExit(f"no eval_steer_* predictions under {args.eval_dir}")
-    galleries = [("stop pairs — d1, template text, entry form",
-                  gallery(args.eval_dir, args.data_dir, "eval_steer_stop_template_entry", "d1", args.n))]
+    galleries = [(f"stop pairs — {args.tags[0]}, template text, entry form",
+                  gallery(args.eval_dir, args.data_dir, "eval_steer_stop_template_entry", args.tags[0], args.n))]
     args.out.write_text(render(cells, galleries))
     for c in cells:
         print(f"{c['slice']:5s} {c['text']:9s} {c['form']:5s} {c['tag']:3s} pairs {c['steering'].get('n_pairs', 0):4d} "

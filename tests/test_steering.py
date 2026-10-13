@@ -5,6 +5,7 @@ camera's right is -x and image-left is +x (as in test_route_events.py). The imag
 edge is 0.8 m ahead of the camera (z = 1.0).
 """
 import base64
+import importlib.util
 import json
 from pathlib import Path
 
@@ -467,9 +468,9 @@ def test_metric_cells_reads_predictions_per_set_and_tag(tmp_path):
     b = [[0.5, 1.0, 1], [0.7, 0.6, 1]]
     (run / "predictions.json").write_text(json.dumps([_pred("p_A", "p_B", a, a, "a"), _pred("p_B", "p_A", b, b, "b")]))
     cells = vz.metric_cells(tmp_path, ["d1", "r4"])
-    assert len(cells) == 1
+    assert [c["slice"] for c in cells] == ["all", "stop"]      # the all row, then one per slice present
     c = cells[0]
-    assert (c["slice"], c["text"], c["form"], c["tag"]) == ("stop", "template", "entry", "d1")
+    assert (c["slice"], c["text"], c["form"], c["tag"]) == ("all", "template", "entry", "d1")
     assert c["steering"]["pair_success"] == 1.0 and c["parse_rate"] == 1.0
 
 
@@ -530,3 +531,19 @@ def test_finalize_steer_puts_turn_pairs_in_the_stop_files():
     recs = out["files"]["eval_steer_stop_template_entry"]
     assert len(recs) == 2 and {r["habitat_meta"]["steer"]["slice"] for r in recs} == {"turn"}
     assert out["stats"]["turn:pairs"] == 1
+
+
+def test_report_rows_per_slice(tmp_path):
+    vs = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+        "visualize_steering", Path(__file__).resolve().parent.parent / "scripts" / "visualize_steering.py"))
+    vs.__spec__.loader.exec_module(vs)
+    from test_description_eval import _pair, A_GT, B_GT      # noqa: E402  (tests dir is on sys.path under pytest)
+    recs = _pair(A_GT, B_GT, pid="p") + _pair(B_GT, B_GT, pid="q")
+    for r in recs[2:]:
+        r["habitat_meta"]["steer"]["slice"] = "turn"
+    d = tmp_path / "eval_steer_stop_template_entry" / "d2"
+    d.mkdir(parents=True)
+    (d / "predictions.json").write_text(json.dumps(recs))
+    cells = vs.metric_cells(tmp_path, ["d2"])
+    assert [c["slice"] for c in cells] == ["all", "stop", "turn"]
+    assert cells[2]["steering"]["pair_success"] == 0.0

@@ -1549,6 +1549,47 @@ Outputs: `data/prepared_habitat_instr_v3/steer/` (objects, candidates, rows, met
 `data/prepared_habitat_instr_v3/eval_steer_stop_{template,composed}_{entry,goal}.json`,
 `outputs/eval_desc/eval_steer_*/<tag>/`. Headline: stop-pair success, entry form (text-blind = 0%; goal-form rows give each text its own stop, so they measure goal-following, a ceiling, not steering).
 
+## Turn events and d2 (2026-10-13)
+
+d1's descriptions only said how to pass objects. d2 adds **turn events** ("turn left round the post")
+and drops **spur** routes (a reversal of >= 150 deg within 0.6 m, ~1.8k train / 212 eval). The label
+set is `data/prepared_habitat_instr_v4/` (events schema `d2-turns`, prompt version `d4`); d1 files
+(`v2`, `v3`, `outputs/runs_desc/d1/`) are read-only. Steering pairs gain a `turn` slice
+(cuts at `start_arc - 0.3 m` and `end_arc + 1.0 m`); the report adds one row per slice.
+Every sbatch below needs a free slot (max 3 jobs).
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    D=data/prepared_habitat_instr_v4; L=outputs/instr_labels_v3
+    uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 --out-dir $D   # ~40 min; check events_meta.json
+    uv run scripts/prepare_habitat_instr.py d2-seed                     # seed_meta.json: to_compose, est_compose_hours
+    uv run scripts/audit_instruction_labels.py --mode turns --events $D/events_train.jsonl --objects $D/objects_train.jsonl \
+        --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100        # G1: >= 90% true (human)
+    ROUND=d2 DATA=$D NAMER=mix sbatch slurm/label_descriptions.sbatch   # G2: accept >= 0.90, template <= 0.10
+    uv run scripts/audit_instruction_labels.py --mode d1 --round d2 --events $D/events_eval_changed.jsonl \
+        --objects $D/objects_eval_changed.jsonl --desc $L/desc_gate_mix_d2.jsonl     # G3: >= 90% correct (human)
+    ROUND=d2 DATA=$D NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d2 --desc-suffix _mix   # meta_d2.json: recheck_failed ~ 0
+    # train: d1's settings (slurm/train_habitat.sbatch) on $D/train_desc.json -> outputs/runs_desc/d2
+    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch
+    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d1/adapter TAG=d1 sbatch slurm/eval_descriptions.sbatch
+
+Steering rebuild on v4 (`F="--frames $D/eval_desc_entry.json --names $L/names_eval_gemma_d2.jsonl --fallback-names $L/names_eval_d2.jsonl --out-dir $D/steer"`):
+
+    uv run scripts/prepare_habitat_instr.py steer-objects $F
+    ROUND=d2 STEER_DIR=$D/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py steer $F --steer-names $L/names_steer_gemma_d2.jsonl
+    uv run scripts/prepare_habitat_instr.py steer-select --out-dir $D/steer      # Gate 0: >= 150 pairs, >= 50 turn pairs
+    uv run scripts/audit_instruction_labels.py --mode steer --n 50 --n-turn 20 --events $D/steer/events_steer_eval.jsonl   # Gate 1: >= 90%
+    ROUND=d2 STEER_DIR=$D/steer STAGE=steer sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-steer --frames $D/eval_desc_entry.json --steer-dir $D/steer \
+        --desc $L/desc_steer_eval_d2.jsonl --out-dir $D                       # Gate 2: >= 85% composed
+    SETS=steer DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch   # and TAG=d1
+    uv run scripts/visualize_steering.py --tags d1 d2 --eval-dir outputs/eval_desc_d2 --data-dir $D --out outputs/steering_report_d2.html
+
+Outputs: `$D/` (events, objects, `meta_d2.json`, `steer/`), `outputs/eval_desc_d2/`,
+`outputs/steering_report_d2.html` (rows `all` / `stop` / `turn`; slice rows show pair success + CI only).
+A turn counts as followed when the prediction ends >= `min(0.5 m, half the GT end's lateral offset)` to the stated side.
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
