@@ -231,7 +231,8 @@ def test_stop_pairs_on_a_route_past_a_box_to_a_cabinet(tmp_path):
     for p in pairs:
         a, b = p["routes"]
         assert (p["slice"], a["tag"], b["tag"]) == ("stop", "A", "B") and a["fraction"] < b["fraction"]
-        assert st.stop_key(a["desc"]["stop"]) != st.stop_key(b["desc"]["stop"])
+        assert (st.stop_key(a["desc"]["stop"]), st._event_keys(a["desc"]["events"])) != \
+               (st.stop_key(b["desc"]["stop"]), st._event_keys(b["desc"]["events"]))     # the texts differ
         assert a["path"][0] == b["path"][0]                                # one entry
         assert p["separation"] >= st.MIN_SEP_UV and st.exclusive(a, b)
     full = [p for p in pairs if p["routes"][1]["fraction"] == 1.0][0]["routes"][1]
@@ -480,3 +481,52 @@ def test_pair_panel_size(tmp_path):
     a = _pred("p_A", "p_B", [[0.5, 1.0, 1], [0.3, 0.6, 1]], [[0.5, 1.0, 1], [0.35, 0.6, 1]], "a")
     b = _pred("p_B", "p_A", [[0.5, 1.0, 1], [0.7, 0.6, 1]], [[0.5, 1.0, 1], [0.65, 0.6, 1]], "b")
     assert vz.pair_panel(img, a, b, px=200).size == (400, 200 + vz.TEXT_H)
+
+
+from rover_vlm.route_events import detect_turn  # noqa: E402
+
+
+def _behind_scene():
+    s = _state()
+    s[32:52, 43:55] = OCC          # box ahead: x 2.15..2.75, z 1.6..2.6
+    s[52:68, 96:99] = OCC          # cabinet: x 4.8..4.95, z 2.6..3.4
+    return s
+
+
+BEHIND = [(2.5, 0.2), (1.9, 1.2), (1.9, 3.0), (3.9, 3.0)]     # right of the box, then left behind it
+
+
+def test_turn_cuts_straddle_the_turn():
+    t = detect_turn(BEHIND)
+    (fa, a), (fb, b) = st.turn_cuts(BEHIND, t)
+    assert st.route_length(a) == pytest.approx(t["start_arc_m"] - st.TURN_CUT_BEFORE_M, abs=0.06)
+    assert st.route_length(b) == pytest.approx(t["end_arc_m"] + st.TURN_CUT_AFTER_M, abs=0.06)
+    assert fa < fb <= 1.0
+    short = [(0.0, 0.0), (0.0, 1.2), (-0.8, 1.2)]                   # turns (56 deg right) before 1.5 m: no A cut
+    assert detect_turn(short) is not None and st.turn_cuts(short, detect_turn(short)) == []
+
+
+def test_a_turning_route_gives_a_turn_pair(tmp_path):
+    sd = _sample(tmp_path / "f", _behind_scene(), [BEHIND])
+    meta, frame = load_frame(sd)
+    pairs, reasons = st.stop_pairs(frame, meta, BEHIND, turn=detect_turn(BEHIND))
+    turn = [p for p in pairs if p["slice"] == "turn"]
+    assert len(turn) == 1, dict(reasons)
+    a, b = turn[0]["routes"]
+    assert not [e for e in a["desc"]["events"] if e["type"] == "turn"]
+    assert [e["side"] for e in b["desc"]["events"] if e["type"] == "turn"] == ["left"]
+    assert st.exclusive(a, b) and turn[0]["separation"] >= st.MIN_SEP_UV
+
+
+def test_select_pairs_prefers_the_turn_pair_of_a_viewpoint():
+    cands = [_cand("s1", "v1", False, 0.5), {**_cand("t1", "v1", False, 0.2), "slice": "turn"},
+             _cand("s2", "v2", False, 0.3)]
+    assert [p["pair_id"] for p in st.select_pairs(cands)] == ["s2", "t1"]
+
+
+def test_finalize_steer_puts_turn_pairs_in_the_stop_files():
+    rows = [{**_srow("p", "A", "B"), "slice": "turn"}, {**_srow("p", "B", "A"), "slice": "turn"}]
+    out = st.finalize_steer({"f": _base("f")}, rows, {})
+    recs = out["files"]["eval_steer_stop_template_entry"]
+    assert len(recs) == 2 and {r["habitat_meta"]["steer"]["slice"] for r in recs} == {"turn"}
+    assert out["stats"]["turn:pairs"] == 1

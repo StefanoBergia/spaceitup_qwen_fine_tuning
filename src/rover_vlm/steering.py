@@ -8,7 +8,9 @@ ground-truth route (planned by the generator on the navmesh) and cuts it at two 
 phrases differ: same image, same entry, same route, two texts, two different ends. Each cut is
 described from the rover's pose, as d1's routes; its answer starts where the route reaches the
 image (hidden stretches v = 0). A pair is kept only when each cut fails the other's description
-under the eval's own checker. Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
+under the eval's own checker.
+d2 (2026-10-13): a turning GT route also gets two turn cuts (just before
+the turn, 1 m after it); that pair is the viewpoint's pair, slice "turn". Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
 """
 
 import copy
@@ -25,11 +27,14 @@ from .habitat_data import clip_polyline_unit, format_answer_goal, resample_with_
 from .instructions import head_noun
 from .landmarks import CAM_HEIGHT_M, MIN_FWD_M, densify
 from .route_events import (MIN_AREA, MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
-                           first_blocker, load_frame, object_outline, visible_cells)
+                           detect_turn, first_blocker, load_frame, object_outline, visible_cells)
 
 MIN_ROUTE_M = 1.5
 MIN_SEP_UV = 0.1
 CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)   # where a route is cut, as shares of its length
+TURN_CUT_BEFORE_M = 0.3    # A_turn stops this far before the turn starts ("stop before the turn")
+TURN_CUT_AFTER_M = 1.0     # B_turn stops this far after it ends ("turn ... and stop past X")
+GATE0_MIN_TURN_PAIRS = 50
 
 
 def route_length(xz):
@@ -130,22 +135,38 @@ def cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M):
     return out
 
 
+def turn_cuts(route_xz, turn, min_m=MIN_ROUTE_M):
+    """(fraction, prefix) of the two turn cuts of a turning route (spec "Steering"): A TURN_CUT_BEFORE_M before
+    the turn starts, B TURN_CUT_AFTER_M after it ends (or at the route's end). Both or none: a cut shorter
+    than min_m drops the pair."""
+    pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
+    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    out = []
+    for s in (turn["start_arc_m"] - TURN_CUT_BEFORE_M, min(turn["end_arc_m"] + TURN_CUT_AFTER_M, arc[-1])):
+        if s < min_m:
+            return []
+        out.append((round(float(s / arc[-1]), 3), pts[: max(2, int(np.searchsorted(arc, s - 1e-9)) + 1)]))
+    return out
+
+
 def _event_keys(events):
     return [(e["type"], e["side"], tuple(e["objects"])) for e in events]
 
 
-def stop_pairs(frame, meta, route_xz):
-    """(pairs, reasons): every two cuts of one route whose stop phrases differ, whose answer ends lie
+def stop_pairs(frame, meta, route_xz, turn=None):
+    """(pairs, reasons): every two cuts of one route whose texts differ (stop or events), whose answer ends lie
     at least MIN_SEP_UV apart, and whose answers each fail the other's description. Tags A (the
     earlier stop) / B. prefix_events: A's events are the first ones of B's (a pure stop pair; False when
     the texts also differ in a step). Frame-level reasons: route_too_short (no cut keeps MIN_ROUTE_M),
-    lt2_cuts (fewer than two cuts survive)."""
+    lt2_cuts (fewer than two cuts survive). With `turn` (route_events.detect_turn) the route also gets its two
+    turn cuts; the pair of those two is slice "turn", every other pair "stop"."""
     reasons, routes = Counter(), []
-    made = cuts(route_xz)
+    made = [(f, cut, False) for f, cut in cuts(route_xz)] + \
+           [(f, cut, True) for f, cut in (turn_cuts(route_xz, turn) if turn else [])]
     if not made:
         reasons["route_too_short"] += 1
-    for f, cut in made:
-        desc = describe_xz(meta, frame, cut)
+    for f, cut, is_turn in made:
+        desc = describe_xz(meta, frame, cut, turn=turn)
         if desc["reason"]:
             reasons[f"cut:{desc['reason']}"] += 1
             continue
@@ -155,13 +176,16 @@ def stop_pairs(frame, meta, route_xz):
             reasons["cut:out_of_view"] += 1
             continue
         routes.append({"tag": None, "side": None, "route_xz": _rounded(cut), "path": path, "desc": desc,
-                       "anchor_event": None, "target": desc["stop"]["object"], "fraction": f})
+                       "anchor_event": None, "target": desc["stop"]["object"], "fraction": f,
+                       "turn_cut": is_turn})
     if made and len(routes) < 2:
         reasons["lt2_cuts"] += 1
     pairs = []
+    routes.sort(key=lambda r: route_length(r["route_xz"]))      # A is always the shorter cut
     for a, b in itertools.combinations(routes, 2):
-        if stop_key(a["desc"]["stop"]) == stop_key(b["desc"]["stop"]):
-            reasons["same_stop"] += 1
+        if (stop_key(a["desc"]["stop"]), _event_keys(a["desc"]["events"])) == \
+                (stop_key(b["desc"]["stop"]), _event_keys(b["desc"]["events"])):
+            reasons["same_text"] += 1
             continue
         sep = float(np.linalg.norm(np.subtract(a["path"][-1][:2], b["path"][-1][:2])))
         if sep < MIN_SEP_UV:
@@ -172,7 +196,7 @@ def stop_pairs(frame, meta, route_xz):
             reasons["not_exclusive"] += 1
             continue
         ea, eb = (r["desc"]["events"] for r in (ra, rb))
-        pairs.append({"slice": "stop", "anchor": None, "targets": [ra["target"], rb["target"]],
+        pairs.append({"slice": "turn" if a["turn_cut"] and b["turn_cut"] else "stop", "anchor": None, "targets": [ra["target"], rb["target"]],
                       "separation": round(sep, 4), "prefix_events": _event_keys(ea) == _event_keys(eb[: len(ea)]),
                       "routes": [ra, rb]})
     return pairs, reasons
@@ -216,11 +240,12 @@ def frame_pairs(sample_dir, candidate_index, names, fallback, kinds):
     pre = f"{frame.name}:"      # naming only needs this frame's objects
     names = {o: n for o, n in names.items() if o.startswith(pre)}
     fallback = {o: n for o, n in (fallback or {}).items() if o.startswith(pre)}
-    pairs, why = stop_pairs(frame, meta, cm[candidate_index]["polyline_xz"])
+    route = cm[candidate_index]["polyline_xz"]
+    pairs, why = stop_pairs(frame, meta, route, turn=detect_turn(route))
     reasons.update({f"stop:{k}": v for k, v in why.items()})
     kept = []
     for p in pairs:
-        p["pair_id"] = f"steer_stop_{frame.name}_" + "_".join(f"{round(r['fraction'] * 100):03d}" for r in p["routes"])
+        p["pair_id"] = f"steer_{p['slice']}_{frame.name}_" + "_".join(f"{round(r['fraction'] * 100):03d}" for r in p["routes"])
         w = name_pair(p, names, fallback, kinds)
         reasons[f"stop:{w or 'kept'}"] += 1
         if w is None:
@@ -272,13 +297,13 @@ GATE0_MIN_PAIRS = 150
 
 
 def select_pairs(candidates):
-    """One pair per (slice, viewpoint): the original frame before its yaw variants, then the
-    largest end separation (pair_id breaks ties). Sorted by pair_id."""
+    """One pair per viewpoint: a turn pair when the viewpoint has one (spec "Steering"), then the original frame
+    before its yaw variants, then the largest end separation (pair_id breaks ties). Sorted by pair_id."""
     best = {}
     for p in candidates:
-        key, rank = (p["slice"], p["viewpoint"]), (bool(p["is_aug"]), -p["separation"], p["pair_id"])
-        if key not in best or rank < best[key][0]:
-            best[key] = (rank, p)
+        rank = (p["slice"] != "turn", bool(p["is_aug"]), -p["separation"], p["pair_id"])
+        if p["viewpoint"] not in best or rank < best[p["viewpoint"]][0]:
+            best[p["viewpoint"]] = (rank, p)
     return sorted((v[1] for v in best.values()), key=lambda p: p["pair_id"])
 
 
@@ -342,7 +367,7 @@ def finalize_steer(base_by_sample, rows, desc_by_id):
         sl, base = pair[0]["slice"], base_by_sample[pair[0]["sample_id"]]
         stats[f"{sl}:pairs"] += 1
         for form in ("entry", "goal"):
-            files[f"eval_steer_{sl}_template_{form}"] += [steer_record(base, r, r["template"], "template", form)
+            files[f"eval_steer_stop_template_{form}"] += [steer_record(base, r, r["template"], "template", form)
                                                           for r in pair]
         labels = [desc_by_id.get(r["id"]) for r in pair]
         if any(lab is None for lab in labels):
@@ -353,6 +378,6 @@ def finalize_steer(base_by_sample, rows, desc_by_id):
             continue
         stats[f"{sl}:composed"] += 1
         for form in ("entry", "goal"):
-            files[f"eval_steer_{sl}_composed_{form}"] += [steer_record(base, r, lab["description"], "cosmos", form)
+            files[f"eval_steer_stop_composed_{form}"] += [steer_record(base, r, lab["description"], "cosmos", form)
                                                           for r, lab in zip(pair, labels)]
     return {"files": files, "stats": dict(stats)}

@@ -444,14 +444,14 @@ def stage_steer(args):
     t0 = time.time()
     items, prim, results = _run_steer_pool(args)
     (out / "names_primary_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in prim))
-    reasons, errors, n_frames = Counter(), [], {"stop": set()}
+    reasons, errors, n_frames = Counter(), [], {}
     with (out / "candidates_eval.jsonl").open("w") as f:
         for pairs, rs, err in results:
             reasons.update(rs)
             if err:
                 errors.append(err)
             for p in pairs:
-                n_frames[p["slice"]].add(p["viewpoint"])
+                n_frames.setdefault(p["slice"], set()).add(p["viewpoint"])
                 f.write(json.dumps(p) + "\n")
     meta = {"frames": len(items), "seconds": round(time.time() - t0, 1),
             "viewpoints_with_candidates": {k: len(v) for k, v in n_frames.items()},
@@ -472,9 +472,10 @@ def stage_steer_select(args):
             "prefix_events": sum(bool(p["prefix_events"]) for p in kept)}
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
-    n = per.get("stop", 0)
-    print(f"GATE 0 stop: {n} pairs -> {'PASS' if n >= steering.GATE0_MIN_PAIRS else 'FAIL'} "
-          f"(need >= {steering.GATE0_MIN_PAIRS})")
+    n, t = len(kept), per.get("turn", 0)
+    ok = n >= steering.GATE0_MIN_PAIRS and t >= steering.GATE0_MIN_TURN_PAIRS
+    print(f"GATE 0: {n} pairs ({t} turn, {per.get('stop', 0)} stop) -> {'PASS' if ok else 'FAIL'} "
+          f"(need >= {steering.GATE0_MIN_PAIRS} and >= {steering.GATE0_MIN_TURN_PAIRS} turn)")
 
 
 def desc_path(labels: Path, split: str, suffix: str = "", round_: str = "d1") -> Path:
@@ -587,9 +588,10 @@ def stage_finalize_steer(args):
     meta = {"stats": stats, "files": {k: len(v) for k, v in out["files"].items()}}
     (d / "finalize_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
-    n, c = stats.get("stop:pairs", 0), stats.get("stop:composed", 0)
+    n = sum(v for k, v in stats.items() if k.endswith(":pairs"))
+    c = sum(v for k, v in stats.items() if k.endswith(":composed"))
     share = c / n if n else 0.0
-    print(f"GATE 2 stop: composed {c}/{n} = {share:.3f} -> {'PASS' if share >= GATE2_MIN_COMPOSED else 'FAIL'} "
+    print(f"GATE 2: composed {c}/{n} = {share:.3f} -> {'PASS' if share >= GATE2_MIN_COMPOSED else 'FAIL'} "
           f"(need >= {GATE2_MIN_COMPOSED})")
 
 
