@@ -1556,34 +1556,37 @@ and drops **spur** routes (a reversal of >= 150 deg within 0.6 m, ~1.8k train / 
 set is `data/prepared_habitat_instr_v4/` (events schema `d2-turns`, prompt version `d4`); d1 files
 (`v2`, `v3`, `outputs/runs_desc/d1/`) are read-only. Steering pairs gain a `turn` slice
 (cuts at `start_arc - 0.3 m` and `end_arc + 1.0 m`); the report adds one row per slice.
-Every sbatch below needs a free slot (max 3 jobs).
+Every sbatch below is a GPU job: ask before submitting; at most 3 SLURM jobs at once.
 
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     D=data/prepared_habitat_instr_v4; L=outputs/instr_labels_v3
     uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 --out-dir $D   # ~40 min; check events_meta.json
     uv run scripts/prepare_habitat_instr.py d2-seed                     # seed_meta.json: to_compose, est_compose_hours
     uv run scripts/audit_instruction_labels.py --mode turns --events $D/events_train.jsonl --objects $D/objects_train.jsonl \
-        --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100        # G1: >= 90% true (human)
-    ROUND=d2 DATA=$D NAMER=mix sbatch slurm/label_descriptions.sbatch   # G2: accept >= 0.90, template <= 0.10
+        --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100
+    # G1 (human): publish the page as an artifact with the db capability for marks; stop until the marks are in (>= 90% true)
+    ROUND=d2 DATA=$D NAMER=mix sbatch slurm/label_descriptions.sbatch   # GPU, ask first; G2: accept >= 0.90, template <= 0.10
     uv run scripts/audit_instruction_labels.py --mode d1 --round d2 --events $D/events_eval_changed.jsonl \
         --objects $D/objects_eval_changed.jsonl --desc $L/desc_gate_mix_d2.jsonl     # G3: >= 90% correct (human)
-    ROUND=d2 DATA=$D NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch
+    ROUND=d2 DATA=$D NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch   # GPU, ask first
     uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d2 --desc-suffix _mix   # meta_d2.json: recheck_failed ~ 0
-    # train: d1's settings (slurm/train_habitat.sbatch) on $D/train_desc.json -> outputs/runs_desc/d2
-    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch
-    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d1/adapter TAG=d1 sbatch slurm/eval_descriptions.sbatch
+    # train (GPU, ask first): d1's settings (slurm/train_habitat.sbatch) on $D/train_desc.json -> outputs/runs_desc/d2
+    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch   # GPU, ask first
+    DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d1/adapter TAG=d1 sbatch slurm/eval_descriptions.sbatch   # GPU, ask first
+    uv run scripts/render_desc_videos.py --set <set> --tag d2   # path mp4s, per eval set and tag (also d1)
 
 Steering rebuild on v4 (`F="--frames $D/eval_desc_entry.json --names $L/names_eval_gemma_d2.jsonl --fallback-names $L/names_eval_d2.jsonl --out-dir $D/steer"`):
 
     uv run scripts/prepare_habitat_instr.py steer-objects $F
-    ROUND=d2 STEER_DIR=$D/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch
+    ROUND=d2 STEER_DIR=$D/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch   # GPU, ask first
     uv run scripts/prepare_habitat_instr.py steer $F --steer-names $L/names_steer_gemma_d2.jsonl
     uv run scripts/prepare_habitat_instr.py steer-select --out-dir $D/steer      # Gate 0: >= 150 pairs, >= 50 turn pairs
     uv run scripts/audit_instruction_labels.py --mode steer --n 50 --n-turn 20 --events $D/steer/events_steer_eval.jsonl   # Gate 1: >= 90%
-    ROUND=d2 STEER_DIR=$D/steer STAGE=steer sbatch slurm/label_descriptions.sbatch
+    ROUND=d2 STEER_DIR=$D/steer STAGE=steer sbatch slurm/label_descriptions.sbatch   # GPU, ask first
     uv run scripts/prepare_habitat_instr.py finalize-steer --frames $D/eval_desc_entry.json --steer-dir $D/steer \
         --desc $L/desc_steer_eval_d2.jsonl --out-dir $D                       # Gate 2: >= 85% composed
-    SETS=steer DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch   # and TAG=d1
+    SETS=steer DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch   # GPU, ask first
+    SETS=steer DATA=$D OUT_DIR=outputs/eval_desc_d2 ADAPTER=outputs/runs_desc/d1/adapter TAG=d1 sbatch slurm/eval_descriptions.sbatch   # GPU, ask first
     uv run scripts/visualize_steering.py --tags d1 d2 --eval-dir outputs/eval_desc_d2 --data-dir $D --out outputs/steering_report_d2.html
 
 Outputs: `$D/` (events, objects, `meta_d2.json`, `steer/`), `outputs/eval_desc_d2/`,
