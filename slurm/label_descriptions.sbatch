@@ -62,11 +62,14 @@ UV="${UV:-$HOME/.local/bin/uv}"
 STAGE="${STAGE:-gate}"
 ROUND="${ROUND:-d1}"     # label-file tag: d1, or d2 (turn events; files seeded by prepare_habitat_instr.py d2-seed)
 GATE_SPLIT=eval          # d2 gates only the changed eval routes (events_eval_changed.jsonl, written by d2-seed)
+case "$ROUND" in d1|d2) ;; *) echo "ROUND must be d1 or d2, got '$ROUND'"; exit 1 ;; esac
 if [ "$ROUND" != d1 ]; then
     GATE_SPLIT=eval_changed
-    for f in events objects; do
-        [ -f "$D/${f}_eval_changed.jsonl" ] || { echo "missing $D/${f}_eval_changed.jsonl — run prepare_habitat_instr.py d2-seed"; exit 1; }
-    done
+    if [ "$STAGE" = gate ]; then   # only the gate reads the changed-eval files (steer stages need no DATA)
+        for f in events objects; do
+            [ -f "$D/${f}_eval_changed.jsonl" ] || { echo "missing $D/${f}_eval_changed.jsonl — run prepare_habitat_instr.py d2-seed"; exit 1; }
+        done
+    fi
 fi
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 unset VIRTUAL_ENV

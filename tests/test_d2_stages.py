@@ -2,6 +2,7 @@
 finalize --round d2 re-checking every text."""
 import importlib.util
 import json
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from rover_vlm.descriptions import finalize_descriptions, same_description_geome
 _SPEC = importlib.util.spec_from_file_location(
     "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
 prep = importlib.util.module_from_spec(_SPEC)
+sys.modules["prepare_habitat_instr"] = prep      # the stage's Pool pickles event_row by module name
 _SPEC.loader.exec_module(prep)
 
 STOP = {"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:b2"}
@@ -136,6 +138,13 @@ def test_select_d2_rows_half_with_a_turn():
     assert len(rows) == 100 and sum(r["id"].startswith("t") for r in rows) == 50 and "old" not in {r["id"] for r in rows}
 
 
+def test_select_d2_rows_empty_no_turn_pool_still_returns_n():
+    ok = [{"id": f"t{i}", "prompt_version": "d4"} for i in range(156)]
+    ev = {f"t{i}": {"events": [TURN]} for i in range(156)}
+    rows = audit.select_d2_rows(ok, ev, 100, seed=0)
+    assert len(rows) == 100 and all(r["id"].startswith("t") for r in rows)
+
+
 def test_sample_steer_takes_turn_pairs_first():
     rows = [{"pair_id": f"t{i}", "id": f"t{i}_{k}", "slice": "turn"} for i in range(30) for k in "AB"] + \
            [{"pair_id": f"s{i}", "id": f"s{i}_{k}", "slice": "stop"} for i in range(60) for k in "AB"]
@@ -148,3 +157,38 @@ def test_audit_template_has_a_turns_mode():
     assert 'DATA.mode === "turns"' in html and "Turn Events Audit" in html
     assert "red ring" in html and "spur drop" in html and "rescued bent route" in html
     assert 'DATA.mode === "turns" || !it.has_alt' in html     # the alt legend stays hidden for turns
+
+
+def _labelset(src, tmp_path):
+    """One synthetic labelset record per split, built like tests/test_route_turns.py's write_sample."""
+    from test_route_turns import L_LEFT, _round_state, write_sample
+    src.mkdir(parents=True)
+    for split in ("train", "eval"):
+        sd = write_sample(tmp_path / f"s_{split}", _round_state(), [L_LEFT])
+        rec = {"id": f"{split}_0", "image": [str(sd / "fpv_enhanced.png")],
+               "habitat_meta": {"candidate_index": 0, "kind": "instructed", "pair_id": None, "sample_id": split}}
+        (src / f"labelset_{split}.json").write_text(json.dumps([rec]))
+
+
+def test_events_writes_into_out_dir_from_a_labelset_elsewhere(tmp_path):
+    _labelset(tmp_path / "v2", tmp_path)
+    out = tmp_path / "v4"
+    prep.stage_events(Namespace(out_dir=out, labelset_dir=tmp_path / "v2", limit=0, force=False))
+    meta = json.loads((out / "events_meta.json").read_text())
+    assert meta["schema"] == prep.EVENTS_SCHEMA and meta["labelset_dir"] == str(tmp_path / "v2")
+    assert (out / "events_eval.jsonl").exists() and (out / "objects_train.jsonl").exists()
+    assert not list((tmp_path / "v2").glob("events_*"))                 # the labelset's dir is untouched
+    row = json.loads((out / "events_eval.jsonl").read_text().splitlines()[0])
+    assert row["reason"] is None and [e["type"] for e in row["events"]] == ["turn"]
+
+
+def test_events_refuses_to_overwrite_d1_events_unless_forced(tmp_path):
+    _labelset(tmp_path / "v2", tmp_path)
+    d1 = tmp_path / "v2"
+    (d1 / "events_meta.json").write_text(json.dumps({"schema": "d1-addendumA2"}))
+    args = Namespace(out_dir=d1, labelset_dir=None, limit=0, force=False)
+    with pytest.raises(SystemExit, match="refusing"):
+        prep.stage_events(args)
+    assert not (d1 / "events_eval.jsonl").exists()
+    prep.stage_events(Namespace(out_dir=d1, labelset_dir=None, limit=0, force=True))
+    assert json.loads((d1 / "events_meta.json").read_text())["schema"] == prep.EVENTS_SCHEMA

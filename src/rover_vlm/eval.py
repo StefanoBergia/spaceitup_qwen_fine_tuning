@@ -784,7 +784,7 @@ def aggregate_description_metrics(records):
     rows = [r for r in records if (r.get("habitat_meta") or {}).get("desc_check")]
     if not rows:
         return None
-    follows, stops, by_type, pairs, gt_follows = {}, [], {}, {}, []
+    follows, stops, by_type, pairs, gt_follows, gt_by_id = {}, [], {}, {}, [], {}
     for r in rows:
         chk = r["habitat_meta"]["desc_check"]
         path = (r.get("parsed") or {}).get("path")
@@ -792,7 +792,8 @@ def aggregate_description_metrics(records):
         f = (description_follow(path, chk, end) if path
              else {"follows": 0, "events": [0] * len(chk["events"]), "stop": 0})
         if (r.get("gt") or {}).get("path"):
-            gt_follows.append(description_follow(r["gt"]["path"], chk, end)["follows"])
+            gt_by_id[r["id"]] = description_follow(r["gt"]["path"], chk, end)["follows"]
+            gt_follows.append(gt_by_id[r["id"]])
         follows[r["id"]] = f["follows"]
         stops.append(f["stop"])
         for e, ok in zip(chk["events"], f["events"]):
@@ -808,7 +809,9 @@ def aggregate_description_metrics(records):
         met = [x["metrics"] for x in rs if x.get("metrics")]
         ge = [m["goal_point_error"] for m in met if "goal_point_error" in m]
         pe = [m["mean_point_error"] for m in met if "mean_point_error" in m]
+        gt = [gt_by_id[x["id"]] for x in rs if x["id"] in gt_by_id]
         return {"n": len(rs), "follow_rate": float(np.mean([follows[x["id"]] for x in rs])),
+                "gt_follow_rate": float(np.mean(gt)) if gt else None,
                 "endpoint_error_median": float(np.median(ge)) if ge else None,
                 "point_error_median": float(np.median(pe)) if pe else None}
     full = [p for p in pairs.values() if len(p) == 2]

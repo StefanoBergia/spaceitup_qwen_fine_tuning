@@ -375,7 +375,7 @@ def select_d2_rows(ok, events_by_id, n, seed):
     has = [r for r in new if any(e["type"] == "turn" for e in events_by_id[r["id"]]["events"])]
     has_ids = {r["id"] for r in has}
     no = [r for r in new if r["id"] not in has_ids]
-    k = min(n // 2, len(has))
+    k = min(len(has), max(n // 2, n - len(no)))   # turn rows fill what the no-turn pool cannot
     rows = rng.sample(has, k) + rng.sample(no, min(n - k, len(no)))
     rng.shuffle(rows)
     return rows
@@ -532,6 +532,8 @@ def main() -> None:
         ok = [r for r in jsonl(args.desc) if r.get("passed")]
         if args.round == "d2":
             rows, missing = select_d2_rows(ok, ev, args.n, args.seed), 0
+            n_turn = sum(any(e["type"] == "turn" for e in ev[r["id"]]["events"]) for r in rows)
+            print(f"G3: {n_turn} with a turn, {len(rows) - n_turn} without (population {len(ok)} passed)")
         else:
             rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
         if args.ids:

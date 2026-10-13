@@ -42,7 +42,10 @@ frame object for Cosmos to name. CPU, 4 single-threaded workers:
 
 Steering eval (2026-10-07, docs/superpowers/specs/2026-10-07-steering-eval-design.md, Addendum A2):
 eval-only stop pairs: each d1 eval frame's ground-truth route cut at two points whose stop phrases
-differ. CPU, 4 workers:
+differ. The defaults of steer / steer-select / finalize-steer / steer-objects are the d2 round's
+(frames data/prepared_habitat_instr_v4/eval_desc_entry.json, names *_d2.jsonl, steer dir
+data/prepared_habitat_instr_v4/steer); d1's set lives in data/prepared_habitat_instr_v3/steer (pass
+explicit paths to redo it). CPU, 4 workers:
 
     export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
     uv run scripts/prepare_habitat_instr.py steer-objects
@@ -337,6 +340,12 @@ def event_row(rec):
 def stage_events(args):
     import time
     d = args.out_dir
+    meta_path = d / "events_meta.json"
+    if meta_path.exists() and not args.force:
+        old = json.loads(meta_path.read_text()).get("schema")
+        if old != EVENTS_SCHEMA:
+            raise SystemExit(f"refusing to overwrite {d}: its events are schema {old} (d1); write d2 events to "
+                             "data/prepared_habitat_instr_v4 or pass --force")
     d.mkdir(parents=True, exist_ok=True)
     src = args.labelset_dir or d
     meta = {"schema": EVENTS_SCHEMA, "labelset_dir": str(src)}     # label_descriptions.py and the audit refuse files without it
@@ -367,7 +376,7 @@ def stage_events(args):
     (d / "events_meta.json").write_text(json.dumps(meta, indent=2))
 
 
-STEER_DIR = V3_OUT / "steer"
+STEER_DIR = V4_OUT / "steer"      # d2; d1's set lives in data/prepared_habitat_instr_v3/steer
 STEER_WORKERS = 4
 _STEER = {}
 
@@ -622,6 +631,7 @@ def main() -> None:
     h.add_argument("--labelset-dir", type=Path, default=None, help="where labelset_<split>.json are "
                    "(default: --out-dir); d2: data/prepared_habitat_instr_v2")
     h.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
+    h.add_argument("--force", action="store_true", help="overwrite events of another schema (d1) in --out-dir")
     k = sub.add_parser("finalize-descriptions", help="d1: train/eval files from labelled descriptions (CPU)")
     k.add_argument("--events-dir", type=Path, default=None)
     k.add_argument("--labelset-dir", type=Path, default=None)
@@ -637,24 +647,24 @@ def main() -> None:
     sd2.add_argument("--labels", type=Path, default=D1_LABELS)
     sd2.add_argument("--force", action="store_true", help="overwrite existing d2 seed files")
     m = sub.add_parser("steer", help="steering: stop pairs per d1 eval frame (CPU)")
-    m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
-    m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
-    m.add_argument("--steer-names", type=Path, default=D1_LABELS / "names_steer_gemma_d1.jsonl")
-    m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
+    m.add_argument("--frames", type=Path, default=V4_OUT / "eval_desc_entry.json")
+    m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d2.jsonl")
+    m.add_argument("--steer-names", type=Path, default=D1_LABELS / "names_steer_gemma_d2.jsonl")
+    m.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d2.jsonl")
     m.add_argument("--out-dir", type=Path, default=STEER_DIR)
     m.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     sel = sub.add_parser("steer-select", help="steering: one stop pair per viewpoint -> events_steer_eval.jsonl (CPU)")
     sel.add_argument("--out-dir", type=Path, default=STEER_DIR)
     fs = sub.add_parser("finalize-steer", help="steering: the 4 eval_steer_stop_* files + Gate 2 (after compose, CPU)")
-    fs.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
+    fs.add_argument("--frames", type=Path, default=V4_OUT / "eval_desc_entry.json")
     fs.add_argument("--steer-dir", type=Path, default=STEER_DIR)
-    fs.add_argument("--desc", type=Path, default=D1_LABELS / "desc_steer_eval_d1.jsonl")
-    fs.add_argument("--out-dir", type=Path, default=V3_OUT)
+    fs.add_argument("--desc", type=Path, default=D1_LABELS / "desc_steer_eval_d2.jsonl")
+    fs.add_argument("--out-dir", type=Path, default=V4_OUT)
     fs.add_argument("--allow-missing", action="store_true", help="proceed with unlabelled pairs")
     o = sub.add_parser("steer-objects", help="steering: naming rows for every visible non-wall eval object (CPU)")
-    o.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
-    o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
-    o.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d1.jsonl")
+    o.add_argument("--frames", type=Path, default=V4_OUT / "eval_desc_entry.json")
+    o.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d2.jsonl")
+    o.add_argument("--fallback-names", type=Path, default=D1_LABELS / "names_eval_d2.jsonl")
     o.add_argument("--out-dir", type=Path, default=STEER_DIR)
     o.add_argument("--limit", type=int, default=0, help="first N frames (smoke run)")
     args = p.parse_args()

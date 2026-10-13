@@ -317,7 +317,11 @@ def test_by_turn_split():
                 "habitat_meta": {"desc_check": check(events, goal=path_xz[-1]), "pair_id": None}}
     recs = [rec("t", [TURN_L], [(0.0, 0.8), (0.0, 3.0), (1.5, 3.0)]), rec("s", [], [(0.0, 0.8), (0.0, 4.0)])]
     m = aggregate_description_metrics(recs)
-    assert m["by_turn"]["turn"] == {"n": 1, "follow_rate": 1.0, "endpoint_error_median": 0.1, "point_error_median": 0.05}
+    assert m["by_turn"]["turn"] == {"n": 1, "follow_rate": 1.0, "gt_follow_rate": 1.0,
+                                       "endpoint_error_median": 0.1, "point_error_median": 0.05}
+    assert m["by_turn"]["no_turn"]["gt_follow_rate"] == 1.0
+    nogt = dict(recs[0], id="x", gt={"goal": recs[0]["gt"]["goal"]})       # no GT path: left out of the group's rate
+    assert aggregate_description_metrics([nogt])["by_turn"]["turn"]["gt_follow_rate"] is None
     assert m["by_turn"]["no_turn"]["n"] == 1 and m["event_rate_by_type"]["turn"] == 1.0
 
 

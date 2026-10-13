@@ -35,6 +35,11 @@ def test_label_descriptions_round_and_changed_gate():
     assert 'ROUND="${ROUND:-d1}"' in text and "_d1.jsonl" not in text.split("set -euo pipefail", 1)[1]
     assert 'GATE_SPLIT=eval_changed' in text and 'name_stage "$GATE_SPLIT" gate --limit 300' in text
     assert 'SD="${STEER_DIR:-data/prepared_habitat_instr_v3/steer}"' in text
+    assert 'case "$ROUND" in d1|d2) ;; *) echo "ROUND must be d1 or d2' in text
+    # the changed-eval existence check sits inside the gate condition, not before every stage
+    gate_if = text.index('if [ "$STAGE" = gate ]; then')
+    check = text.index('_eval_changed.jsonl" ] ||')
+    assert gate_if < check < text.index("\n    fi\n", gate_if)
 
 
 def test_eval_descriptions_data_and_out_dir():
