@@ -584,6 +584,77 @@ def stop_phrase(frame, route_xz, events, cands=None):
     return None
 
 
+# --- turns and spur routes (d2, docs/superpowers/specs/2026-10-13-turn-events-d2-design.md) -----------------
+TURN_MIN_DEG = 45.0          # a route that ENDS this far off its start->goal line has turned
+HEADING_CHORD_M = 0.5        # heading at s = direction of the chord from s - 0.25 m to s + 0.25 m
+TURN_END_WINDOW_M = 0.5      # the final heading = mean heading over the last this-many metres
+TURN_PRE_M = 1.0             # the pre-turn heading is read this far before the turn point
+TURN_HOLD_DEG = 15.0         # turn start / end: heading back within this of the pre-turn / final heading
+TURN_ANCHOR_NEAR_M = 1.0     # a visible turn is anchored to a blob this close on its inner side
+SPUR_REVERSAL_DEG = 150.0    # the chord heading turning this much within SPUR_CHECK_M = an out-and-back spur
+SPUR_CHECK_M = 0.6           # (normal GT routes reach ~100 deg within 0.6 m; spurs 180)
+
+
+def heading_profile(route_xz, step=ROUTE_STEP_M):
+    """(pts, arc, theta_deg, line) of a route: its points densified at `step` (zero-length steps dropped),
+    their arclength, the heading at every point in degrees relative to the start->goal line (+ = right,
+    Camera.right handedness; unwrapped) taken from a HEADING_CHORD_M chord, and that line's unit vector.
+    Relative to the line, not the camera: a yaw-augmented frame sees the same route turn the same way."""
+    pts = densify(np.asarray(route_xz, float), step)
+    pts = pts[np.r_[True, np.linalg.norm(np.diff(pts, axis=0), axis=1) > 1e-9]]
+    arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    g = pts[-1] - pts[0]
+    n = float(np.linalg.norm(g))
+    g = g / n if n > 1e-9 else np.array([0.0, 1.0])
+    right = np.array([-g[1], g[0]])
+
+    def at(s):
+        s = np.clip(s, 0.0, arc[-1])
+        return np.stack([np.interp(s, arc, pts[:, 0]), np.interp(s, arc, pts[:, 1])], -1)
+
+    d = at(arc + HEADING_CHORD_M / 2) - at(arc - HEADING_CHORD_M / 2)
+    return pts, arc, np.degrees(np.unwrap(np.arctan2(d @ right, d @ g))), g
+
+
+def detect_turn(route_xz):
+    """The route's final turn (spec detector A), or None. The route has turned when its mean heading over the
+    last TURN_END_WINDOW_M is at least TURN_MIN_DEG off its start->goal line; a swerve round an obstacle ends
+    back on that line. The turn point is where the heading last crosses half the final angle; it starts at
+    the last earlier point within TURN_HOLD_DEG of the heading TURN_PRE_M before it, and ends at the first
+    later point within TURN_HOLD_DEG of the final heading. Run it on a FULL route: a cut that stops
+    mid-swerve would look like a turn (steering passes the full route's turn to its cuts)."""
+    pts, arc, th, g = heading_profile(route_xz)
+    if arc[-1] < HEADING_CHORD_M or np.linalg.norm(pts[-1] - pts[0]) < 1e-6:
+        return None
+    e = float(np.mean(th[arc >= arc[-1] - TURN_END_WINDOW_M]))
+    if abs(e) < TURN_MIN_DEG:
+        return None
+    not_over = np.nonzero(np.sign(e) * (th - e / 2) <= 0)[0]
+    k = int(min(not_over[-1] + 1, len(pts) - 1)) if len(not_over) else 0
+    j = int(np.searchsorted(arc, arc[k] - TURN_PRE_M))
+    pre = float(th[j])
+    i0 = k
+    while i0 > j and abs(th[i0] - pre) > TURN_HOLD_DEG:
+        i0 -= 1
+    i1 = k
+    while i1 < len(th) - 1 and abs(th[i1] - e) > TURN_HOLD_DEG:
+        i1 += 1
+    r = np.radians(pre)
+    h0 = np.cos(r) * g + np.sin(r) * np.array([-g[1], g[0]])
+    return {"side": "right" if e > 0 else "left", "angle_deg": round(e, 1), "arc_m": float(arc[k]),
+            "start_arc_m": float(arc[i0]), "end_arc_m": float(arc[i1]),
+            "xz": [float(v) for v in pts[k]], "pre_heading_xz": [float(v) for v in h0]}
+
+
+def has_spur(route_xz):
+    """True when the route doubles back on itself: its chord heading turns by >= SPUR_REVERSAL_DEG within
+    SPUR_CHECK_M of arclength. These are the generator's via-point routes that drive out and back along one
+    line (87% of d1's "opposite" routes); d2 drops them (spec "Spur routes")."""
+    _, arc, th, _ = heading_profile(route_xz)
+    j = np.minimum(np.searchsorted(arc, arc + SPUR_CHECK_M), len(arc) - 1)
+    return bool(np.any(np.abs(th[j] - th) >= SPUR_REVERSAL_DEG))
+
+
 def _none(reason, **diag):
     return {"reason": reason, "events": [], "stop": None, "objects": {}, "diag": diag}
 
