@@ -264,7 +264,7 @@ def test_poor_fit_falls_back(tmp_path):
 
 
 from rover_vlm.route_events import (  # noqa: E402
-    MAX_EVENTS, build_events, collect_objects, describe_route, describe_xz, stop_phrase,
+    MAX_EVENTS, build_events, collect_objects, describe_route, describe_xz, detect_turn, stop_phrase,
 )
 
 
@@ -796,7 +796,7 @@ from rover_vlm.route_events import EVENTS_SCHEMA, check_events_schema  # noqa: E
 
 def test_events_schema_check_accepts_stamped_meta(tmp_path):
     (tmp_path / "events_meta.json").write_text(json.dumps({"schema": EVENTS_SCHEMA, "train": {}}))
-    assert EVENTS_SCHEMA == "d1-addendumA2"
+    assert EVENTS_SCHEMA == "d2-turns"
     check_events_schema(tmp_path / "events_train.jsonl")          # no raise
 
 
@@ -804,7 +804,7 @@ def test_events_schema_check_accepts_stamped_meta(tmp_path):
 def test_events_schema_check_refuses_old_or_missing_meta(tmp_path, meta):
     if meta is not None:
         (tmp_path / "events_meta.json").write_text(json.dumps(meta))
-    with pytest.raises(SystemExit, match="events files predate Addendum A — rerun prepare_habitat_instr.py events"):
+    with pytest.raises(SystemExit, match="rerun prepare_habitat_instr.py events"):
         check_events_schema(tmp_path / "events_eval.jsonl")
 
 
@@ -941,4 +941,4 @@ def test_finalize_descriptions_desc_suffix(monkeypatch, tmp_path, argv, stem):
 def test_describe_xz_matches_describe_route(tmp_path):
     sd = write_sample(tmp_path / "s", _stop_state(), [STOP_ROUTE])
     meta, frame = load_frame(sd)
-    assert describe_xz(meta, frame, np.array(STOP_ROUTE)) == describe_route(sd, 0)
+    assert describe_xz(meta, frame, np.array(STOP_ROUTE), turn=detect_turn(STOP_ROUTE)) == describe_route(sd, 0)

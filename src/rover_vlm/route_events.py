@@ -11,6 +11,8 @@ names the objects and phrases the sentence (rover_vlm.descriptions).
 
 A blob the route runs through (closest distance < TOUCH_M) has no defined side: candidates() marks it "touch" and build_events lets it join only a through event (a doorway jamb), never a pass / wall / between (Addendum A2).
 
+d2 (2026-10-13): a route that ends >= 45 deg off its start->goal line gets a "turn" event (behind / round an object, or bare); routes that double back on themselves are dropped as "spur".
+
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
@@ -79,8 +81,8 @@ def load_frame(sample_dir):
     return meta, frame
 
 
-def first_blocker(frame, xz):
-    """Blob label of the first occupied cell between the camera and xz, or None.
+def _first_hit(frame, xz):
+    """(blob label, hit xz) of the first occupied cell between the camera and xz, or (None, None).
 
     Cells within NEAR_CAMERA_M of the camera are skipped (see NEAR_CAMERA_M)."""
     for p in densify(np.array([frame.cam.pos, xz], float), frame.grid.mpp / 2)[1:]:
@@ -88,8 +90,13 @@ def first_blocker(frame, xz):
             continue
         r, c = (int(round(v)) for v in frame.grid.rc(p)[0])
         if frame.grid.cell((r, c)) == OCC:
-            return int(frame.lab[r, c])
-    return None
+            return int(frame.lab[r, c]), p
+    return None, None
+
+
+def first_blocker(frame, xz):
+    """Blob label of the first occupied cell between the camera and xz, or None (see _first_hit)."""
+    return _first_hit(frame, xz)[0]
 
 
 def visible_cells(frame, cells_rc, label):
@@ -340,7 +347,7 @@ AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
 STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": its max offset from entry->goal must be within this
-REASONS = ("no_state", "bad_candidate", "no_stop_anchor", "no_events_bent", "error")
+REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_events_bent", "error")
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 
 
@@ -655,6 +662,51 @@ def has_spur(route_xz):
     return bool(np.any(np.abs(th[j] - th) >= SPUR_REVERSAL_DEG))
 
 
+def _anchor_outline(frame, blob, near_xz):
+    """(visible cells, outline) of the part of a blob within KEEP_NEAR_ROUTE_M of near_xz, or None when it is
+    not nameable (fewer than MIN_VISIBLE_CELLS visible cells, or an outline under MIN_AREA)."""
+    cells, xz = _blob_cells(frame)[blob]
+    keep = np.linalg.norm(xz - np.asarray(near_xz, float), axis=1) <= KEEP_NEAR_ROUTE_M
+    vis = visible_cells(frame, cells[keep], blob)
+    if len(vis) < MIN_VISIBLE_CELLS:
+        return None
+    o = object_outline(frame, vis)
+    return (vis, o) if o["area"] >= MIN_AREA else None
+
+
+def turn_anchor(frame, turn):
+    """The object a turn is said relative to, or None (a bare "turn left"). A hidden turn point -> the
+    nameable blob hiding it, relation "behind" (its outline: the part near where the camera ray hits it).
+    Else the nearest nameable blob within TURN_ANCHOR_NEAR_M of the turn point on the turn's inner side
+    (the rover's left for a left turn, in the pre-turn heading's frame) -> "round"."""
+    p = np.asarray(turn["xz"], float)
+    occ, hit = _first_hit(frame, p)
+    if occ is not None:
+        got = _anchor_outline(frame, occ, hit)
+        if got:
+            return {"blob": occ, "relation": "behind", "vis_xz": got[0], "outline": got[1]}
+    h0 = np.asarray(turn["pre_heading_xz"], float)
+    inner = np.array([-h0[1], h0[0]]) * (1.0 if turn["side"] == "right" else -1.0)
+    near = []
+    for b, (_, xz) in _blob_cells(frame).items():
+        d = np.linalg.norm(xz - p, axis=1)
+        k = int(d.argmin())
+        if d[k] <= TURN_ANCHOR_NEAR_M and float((xz[k] - p) @ inner) > 0:
+            near.append((float(d[k]), b))
+    for _, b in sorted(near):
+        got = _anchor_outline(frame, b, p)
+        if got:
+            return {"blob": b, "relation": "round", "vis_xz": got[0], "outline": got[1]}
+    return None
+
+
+def _straight_before(route, arc_m):
+    """True when the route up to `arc_m` stays within STRAIGHT_MAX_M of its own chord ("go ahead, then turn")."""
+    rg = route_geometry(route)
+    pts = rg["pts"][rg["arc"] <= max(arc_m, ROUTE_STEP_M)]
+    return len(pts) < 2 or route_geometry(pts)["offset"].max() <= STRAIGHT_MAX_M
+
+
 def _none(reason, **diag):
     return {"reason": reason, "events": [], "stop": None, "objects": {}, "diag": diag}
 
@@ -684,23 +736,38 @@ def describe_route(sample_dir, candidate_index):
     cm = meta.get("candidates", [])
     if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
         return _none("bad_candidate")
-    return describe_xz(meta, frame, cm[candidate_index]["polyline_xz"])
+    route = cm[candidate_index]["polyline_xz"]
+    return describe_xz(meta, frame, route, turn=detect_turn(route))
 
 
-def describe_xz(meta, frame, route):
-    """The events + stop phrase for any route polyline (world xz) on a loaded frame
-    (steering pairs describe routes that are not candidates of the frame)."""
+def describe_xz(meta, frame, route, turn=None):
+    """The events + stop phrase for any route polyline (world xz) on a loaded frame (steering pairs describe
+    routes that are not candidates of the frame). `turn` is the FULL route's turn (detect_turn): a route
+    shorter than its end_arc_m (a steering cut that stops before or inside the turn) gets no turn event, and
+    without `turn` none is emitted. A route that doubles back on itself is dropped as "spur"."""
     route = np.asarray(route, float)
+    if has_spur(route):
+        return _none("spur")
     cands = candidates(frame, route)
     events = build_events(frame, cands)
-    if not events and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:
-        return _none("no_events_bent")                   # "go straight ahead" would be false
-    stop = stop_phrase(frame, route, events, cands)
+    if turn is not None and route_geometry(route)["arc"][-1] + 1e-6 < turn["end_arc_m"]:
+        turn = None
+    anchor = turn_anchor(frame, turn) if turn is not None else None
+    if anchor is not None:          # a pass of the anchor alone, after the turn point, is what the turn says
+        events = [e for e in events if not (e["type"] == "pass" and len(e["members"]) == 1
+                                            and cands[e["members"][0]]["blob"] == anchor["blob"]
+                                            and e["arc_m"] >= turn["arc_m"])]
+    if not events:
+        if turn is None and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:
+            return _none("no_events_bent")                   # "go straight ahead" would be false
+        if turn is not None and not _straight_before(route, turn["start_arc_m"]):
+            return _none("no_events_bent")                   # an unexplained swing before the turn
+    stop = stop_phrase(frame, route, events, cands)          # obstacle events only: "just after" / "past" name objects
     if stop is None:
-        return _none("no_stop_anchor", n_events=len(events))
-    # Object rows in two explicit passes. Events first: an event member's kind_hint is its event role
-    # (pass member -> "object", wall member -> "wall", opening -> "opening"). Then the stop anchor:
-    # it reuses an event's object row unchanged, and sets kind_hint / outline only for a new object.
+        return _none("no_stop_anchor", n_events=len(events) + (turn is not None))
+    # Object rows in explicit passes. Events first: an event member's kind_hint is its event role
+    # (pass member -> "object", wall member -> "wall", opening -> "opening"). Then the turn anchor, then the stop
+    # anchor: each reuses an existing object row unchanged and sets kind_hint / outline only for a new object.
     objects = {}
 
     def add(key, kind, outline, cells):
@@ -723,6 +790,18 @@ def describe_xz(meta, frame, route):
         if e["type"] == "through":
             row["gap_xz"] = e["opening"]["gap_xz"]
         rows.append(row)
+    if turn is not None:
+        ids = []
+        if anchor is not None:
+            kind = "wall" if _wall_like(_blob_cells(frame)[anchor["blob"]][1]) else "object"
+            ids = [add(f"b{anchor['blob']}", kind, anchor["outline"], anchor["vis_xz"])]
+        p, h0 = np.asarray(turn["xz"], float), np.asarray(turn["pre_heading_xz"], float)
+        lateral = float((route[-1] - p) @ np.array([-h0[1], h0[0]]))     # how far the end is off the pre-turn line
+        rows.append({"type": "turn", "side": turn["side"], "relation": anchor["relation"] if anchor else None,
+                     "objects": ids, "arc_m": round(turn["arc_m"], 2),
+                     "turn_xz": [round(float(v), 3) for v in p], "pre_heading_xz": [round(float(v), 4) for v in h0],
+                     "gt_lateral_m": round(abs(lateral), 2)})
+        rows.sort(key=lambda r: r["arc_m"])                  # stable: an obstacle event at the same arc stays first
     st = {"type": stop["type"], "relation": stop["relation"], "amount": stop.get("amount"),
           "distance_m": stop.get("distance_m"), "object": None}
     if stop["anchor"] is not None:                       # after every event row (see above)
@@ -734,7 +813,7 @@ def describe_xz(meta, frame, route):
             "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
 
 
-EVENTS_SCHEMA = "d1-addendumA2"  # stamped into events_meta.json by prepare_habitat_instr.py events
+EVENTS_SCHEMA = "d2-turns"  # stamped into events_meta.json by prepare_habitat_instr.py events
 
 
 def check_events_schema(events_path):
@@ -746,8 +825,7 @@ def check_events_schema(events_path):
     except (OSError, ValueError):
         schema = None
     if schema != EVENTS_SCHEMA:
-        raise SystemExit(f"events files predate Addendum A — rerun prepare_habitat_instr.py events "
-                         f"({mp}: schema {schema!r}, want {EVENTS_SCHEMA!r})")
+        raise SystemExit(f"events files are not {EVENTS_SCHEMA!r} — rerun prepare_habitat_instr.py events ({mp}: schema {schema!r})")
 
 
 def collect_objects(rows):
