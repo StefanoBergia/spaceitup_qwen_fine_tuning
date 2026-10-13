@@ -400,6 +400,6 @@ Clarifications (final review, 2026-10-01):
 
 ## Pointer (2026-10-13)
 
-Turn events ("turn left behind the X"), the opposite-route spur cut and the d2 relabel + retrain are
+Turn events ("turn left behind the X"), dropping opposite-route spurs and the d2 relabel + retrain are
 designed in `2026-10-13-turn-events-d2-design.md`; it changes `route_events`, `descriptions` and `eval`
 as specified there (schema `d2-turns`, prompt d4).

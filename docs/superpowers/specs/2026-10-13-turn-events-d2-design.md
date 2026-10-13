@@ -1,4 +1,4 @@
-# Turn events, spur cut and the d2 dataset — design
+# Turn events, spur routes and the d2 dataset — design
 
 Date: 2026-10-13. Branch: `feat/turn-events` (off local `main` 2bfed97). Builds on
 `2026-09-30-route-descriptions-design.md` (d1, Addenda A–A5) and `2026-10-07-steering-eval-design.md`
@@ -61,7 +61,8 @@ start→goal line (left/right = the rover's own).
 2. A turn with no nameable object → bare **"turn left"** (keep the route).
 3. Detector **A**: one final turn per route, **T = 45°**, detected on the full GT route; a cut keeps it
    only when finished.
-4. **Cut the spur** (not drop, not a generator fix). The fix is part of d2.
+4. **Drop spur routes** (revised 2026-10-13 after planning measurements, see "Spur routes"; first
+   chosen: cut the spur). The fix is part of d2.
 5. **Recompose only changed routes**; unchanged routes keep their d1 text.
 6. Steering: **turn cuts + a `turn` slice**; Gate 1 redone, stratified.
 7. A **new spec** (this file) rather than a sixth addendum: the change spans the descriptions and the
@@ -71,7 +72,7 @@ start→goal line (left/right = the rover's own).
 ## Success criteria
 
 - G1 geometry audit (human, 100 routes: 50 turn routes ≈ 20 visible / 30 hidden, 20 rescued bent
-  routes, 30 spur-cut opposite routes): **≥ 90% true**.
+  routes, 30 routes dropped as `spur`: is dropping them right): **≥ 90% true**.
 - G2 label gate (300 changed eval routes): accept ≥ 0.90, template share ≤ 0.10.
 - G3 label audit (human, 100 changed routes, half with a turn): **≥ 90% correct**.
 - Steering: Gate 0 ≥ 150 pairs and ≥ 50 in the turn slice; Gate 1 (50 pairs, 20 turn + 30 stop)
@@ -126,36 +127,36 @@ as today. The template opens such a route with "go ahead, then …".
 
 **Schema.** `EVENTS_SCHEMA = "d2-turns"`. The labeller, the audit and `steer` refuse other schemas.
 
-## Spur cut (`route_events.clean_route` + stage `spur-cut`)
+## Spur routes (`route_events.has_spur`; dropped at the events stage)
 
-**`clean_route(polyline_xz) -> (polyline, cuts)`**, where `cuts` = intervals of the *original* arclength
-that were removed. Applied to every route.
-- At each vertex reversing ≥ `SPUR_REVERSAL_DEG = 150`, walk outwards in arclength t (0.05 m steps)
-  while P(s_k − t) and P(s_k + t) stay within `SPUR_MIRROR_M = 0.3` m.
-- Remove [s_k − t*, s_k + t*] and join the two ends at their midpoint.
-- Repeat until the chord-based check (≥ 150° within 0.6 m) finds no reversal. If it still finds one,
-  the route is dropped (`spur`).
-- Tested on the 212 eval spur routes: 209 cleaned (12.1 → 6.9 m median), 3 V-spikes dropped; 0 of 200
-  normal routes changed.
+**Why drop, not cut (measured while planning, 2026-10-13).** Cutting the out-and-back leaves the overshoot
+it sits on: the route drives past the goal to the branch point, and the spur and the way back meet there
+in a hairpin. On the 212 eval spur routes:
 
-**Answer path.** `fpv_paths.json` points are spaced uniformly along the route (~0.05 m; verified on
-three routes, including a frame where the floor is not 0.8 m below the camera). The same original-arclength
-intervals are cut from the candidate's point list, which keeps the generator's projection and visibility
-flags. The result is then clipped and resampled exactly as `build_record` does. A re-projection of the
-cleaned floor route is NOT used: on ~12% of routes it is > 10 px off the generator's path.
+| after cutting the spur | plain collapse of the exact retrace | mirror walk 0.3 m, midpoint join |
+|---|---|---|
+| still on its labelled side | 86% | 42% |
+| still has a turn ≥ 120° within 0.6 m | 98% | ~46% |
+| usable (both OK, distinct from GT) | 0% | 37 / 212 (17%) |
 
-**Keep rule (opposite routes).** Kept in its pair only when:
-- the cleaned route's answer path is still ≥ 0.05 image Fréchet from the GT route's (the d1 pair rule);
-  and
-- its largest offset from the start→goal line is still on its own side.
+Normal GT routes have a ≥ 120° turn within 0.6 m in 1 of 300; the largest-offset side matches the label
+on 300 / 300 instructed and 70 / 70 non-spur opposite routes, so both measures are sound. These
+opposite routes are "drive to the other side and come back". Cutting would add at most ~37 eval pairs, at
+the cost of cutting the generator's fpv image path. The d1 eval pairs were never a steering test (route A
+satisfies B's events 94% of the time); the steering stop pairs, built from GT routes (no spurs), are.
 
-Else dropped (`spur_collapsed`), and the GT record stays as a single record (no `pair_id`). From the
-exact-retrace measurement: ~80% keep their side, 97% stay ≥ 1 m from the GT route.
+**`has_spur(route_xz) -> bool`**: the chord heading (`heading_profile`, the same 0.5 m chord as turns)
+turns by ≥ `SPUR_REVERSAL_DEG = 150` within `SPUR_CHECK_M = 0.6` m of arclength. This is the probe's
+detector: 1,775 d1 train routes (1,772 of them opposite) and 212 eval routes (all opposite). Normal routes
+reach at most ~100° within 0.6 m.
 
-**Stage `prepare_habitat_instr.py spur-cut`** (CPU) reads the v2 labelsets and writes
-`data/prepared_habitat_instr_v4/labelset_{split}.json`. Records carry `habitat_meta.route_xz` (cleaned)
-and `habitat_meta.spur_cuts`, with the rebuilt answer in `conversations`. It prints counts per reason.
-`event_row` describes `habitat_meta.route_xz` through `describe_xz` when present.
+**Rule.** `describe_xz` returns reason `spur` (added to `REASONS`) for a route with a spur, before anything
+else. Applied to every route, so the 3 GT train routes with a spur go too. A dropped opposite route leaves
+its GT sibling as a single record: finalize already keeps only pairs with both routes. Steering cuts come
+from GT routes; a cut of a spur route would be dropped the same way.
+
+No new stage and no change to records: `events` (and `finalize-descriptions`) read the v2 labelsets
+through a `--labelset-dir` argument, so v4 holds only what d2 produces.
 
 ## Text (`src/rover_vlm/descriptions.py`)
 
@@ -184,20 +185,24 @@ touched.
 
 | # | Step | Where | Output |
 |---|---|---|---|
-| 1 | `spur-cut` | CPU | v4 `labelset_{split}.json` |
-| 2 | `events --out-dir v4` | CPU, 4 workers, ~40 min | `events_{split}.jsonl`, `objects_{split}.jsonl` (schema d2-turns) |
-| 3 | `d2-diff` | CPU | `compose_{split}.jsonl` (changed routes); `desc_{split}_reuse_d2.jsonl` (d1 rows of unchanged routes); `objects_to_name_{split}.jsonl` |
-| 4 | `STAGE=d2_gate`, then `STAGE=d2 sbatch slurm/label_descriptions.sbatch` | GPU | names (new ids), `desc_{split}_mix_d2.jsonl` |
-| 5 | `finalize-descriptions --d2` | CPU | v4 `train_desc.json`, `eval_desc_{entry,goal,pairs,shuffled}.json` |
-| 6 | `slurm/train_habitat.sbatch` (d1 settings, 2 epochs) | GPU, ~6 h | `outputs/runs_desc/d2/adapter` |
-| 7 | `slurm/eval_descriptions.sbatch` on v4 sets, d1 and d2 | GPU | metrics, report, path videos |
+| 1 | `events --labelset-dir v2 --out-dir v4` | CPU, 4 workers, ~40 min | `events_{split}.jsonl`, `objects_{split}.jsonl` (schema d2-turns) |
+| 2 | `d2-seed` | CPU | label files seeded with what d1 already has (below); `events_eval_changed.jsonl` for the gate; counts |
+| 3 | `ROUND=d2 DATA=v4 NAMER=mix sbatch slurm/label_descriptions.sbatch` (gate), then the same with `STAGE=full` | GPU | names of new objects, compose of changed routes, all with `--resume` |
+| 4 | `finalize-descriptions --round d2` | CPU | v4 `train_desc.json`, `eval_desc_{entry,goal,pairs,shuffled}.json` |
+| 5 | `slurm/train_habitat.sbatch` (d1 settings, 2 epochs) | GPU, ~6 h | `outputs/runs_desc/d2/adapter` |
+| 6 | `DATA=v4 OUT_DIR=outputs/eval_desc_d2 slurm/eval_descriptions.sbatch`, d1 and d2 | GPU | metrics, report, path videos |
 
-- **Unchanged route** (step 3): same route polyline, same events (type, side, relation, objects) and the
-  same stop as its d1 row. Its d1 text is reused. Finalize re-checks every text (reused or new) against
-  the d2 rules.
-- **Cost.** Cosmos composes ~14 routes/min. ~4–4.5k changed routes (turns ~1.8k, spur-cut opposites
-  ~1.9k, rescued bent routes, eval) ≈ 5–6 h, plus a short Gemma naming pass. Counts are printed by
-  `d2-diff` before any submit.
+- **Seeding** (step 2). The label job resumes by id and skips ids already in its output file. `d2-seed`
+  therefore writes the d2 label files pre-filled with d1 rows that still hold:
+  - `names_{split}_gemma_d2.jsonl` / `names_{split}_d2.jsonl`: every d1 Gemma / Cosmos name row whose
+    object id is in the v4 objects file;
+  - `desc_{split}_mix_d2.jsonl`: the d1 desc row of every **unchanged route** (same route, same events
+    (type, side, objects) and same stop as its d1 events row), tagged `"reused_from": "d1"`.
+  The label job then names only new objects and composes only changed routes. The gate (`--limit 300`)
+  runs on `events_eval_changed.jsonl`, the changed eval routes, so it judges d4 compose only.
+- Finalize re-checks every text (reused or new) against the d2 rules and drops any that fail (counted).
+- **Cost.** Cosmos composes ~14 routes/min. ~2–2.5k changed routes (turns ~1.8k train + rescued bent
+  routes + eval) ≈ 3 h, plus a short Gemma naming pass. `d2-seed` prints the counts before any submit.
 - SLURM: at most 3 jobs at once; every GPU submit is asked for first.
 
 ## Eval (`src/rover_vlm/eval.py`)
@@ -211,7 +216,7 @@ touched.
 
 ## Steering (`src/rover_vlm/steering.py`, stages `steer` / `steer-select` / `finalize-steer`)
 
-- Source: the d2 eval GT routes (cleaned). Turns are detected once per route (`detect_turn`).
+- Source: the d2 eval GT routes. Turns are detected once per route (`detect_turn`).
 - Cuts: `CUT_FRACTIONS` as today, plus for a turning route two turn cuts. Both must be ≥ `MIN_ROUTE_M`.
   - **A_turn** at `start_arc_m − 0.3` m.
   - **B_turn** at min(`end_arc_m + 1.0` m, route end).
@@ -233,8 +238,8 @@ touched.
   - Cut before / after `end_arc_m`.
   - Anchors: behind / round / bare.
   - Turn as first event; top-3 + turn; straight lead-in rescued vs swing kept as `no_events_bent`.
-  - `clean_route`: exact retrace, near-mirror, uncleanable V-spike → drop, normal route unchanged.
-  - fpv point-list cut on the same intervals.
+  - `has_spur`: exact retrace and a near-mirror spike → True; an L-turn, a swerve and a 120° bend → False;
+    `describe_xz` on a spur route → reason `spur`.
 - `tests/test_descriptions.py`:
   - The three template forms and "go ahead, then".
   - `turn:side:missing/opposite/stray`, missing relation, pronoun anchor accepted.
@@ -244,21 +249,24 @@ touched.
   - Turn check: straight fails, turned passes, short fails.
   - `by_turn` split.
 - `tests/test_steering.py`: turn cuts, turn-pair preference, texts-differ rule, slice field.
-- Stage tests: `spur-cut` (reasons, answer rebuilt), `d2-diff` (reuse vs compose, objects to name).
+- Stage tests: `events --labelset-dir`, `d2-seed` (reuse vs compose, seeded names, changed-eval file),
+  `finalize-descriptions --round d2` (re-check drops a text that breaks the d2 rules).
 
 ## Files touched
 
-- `src/rover_vlm/route_events.py`: detect_turn, turn_anchor, turn event, clean_route, describe_xz(turn=),
+- `src/rover_vlm/route_events.py`: heading_profile, detect_turn, turn_anchor, turn event, has_spur,
+  describe_xz(turn=),
   schema.
 - `src/rover_vlm/descriptions.py`: event_phrase, template, compose prompt d4, rejects, desc_check turn
   fields.
 - `src/rover_vlm/eval.py`: turn follow, by_turn, steering per slice.
 - `src/rover_vlm/steering.py`: turn cuts, text-differs rule, slice.
-- `scripts/prepare_habitat_instr.py`: `spur-cut`, `events` (route_xz), `d2-diff`,
-  `finalize-descriptions --d2`, `steer` / `steer-select` changes.
-- `scripts/label_descriptions.py`, `slurm/label_descriptions.sbatch`: `STAGE=d2_gate|d2`.
-- `scripts/audit_instruction_labels.py`: G1 geometry audit for turns and spurs; G3; stratified steer
-  audit.
+- `scripts/prepare_habitat_instr.py`: `events --labelset-dir`, `d2-seed`, `finalize-descriptions --round d2`,
+  `steer` / `steer-select` / `finalize-steer` changes.
+- `slurm/label_descriptions.sbatch`: `ROUND` (file tag, default d1); with `ROUND=d2` the gate reads
+  `events_eval_changed.jsonl`; steering stages take `STEER_DIR`.
+- `scripts/audit_instruction_labels.py`: `--mode turns` (G1: turns, rescued bent routes, spur drops);
+  `--mode d1` reads the labelset next to the events file (G3); stratified steer audit.
 - `scripts/visualize_steering.py`, README (index-only commits; the user's uncommitted README row is
   never staged).
 - Dated pointer lines at the end of `2026-09-30-route-descriptions-design.md` and
@@ -266,7 +274,8 @@ touched.
 
 ## Out of scope / known issues
 
-- Fixing spurs in the generator (spaceitup-habitat); new Habitat rendering.
+- Fixing spurs in the generator (spaceitup-habitat); cutting spurs out of routes (measured, rejected);
+  new Habitat rendering.
 - Multiple turns or jogs (detector B; jogs are 1.7% of train routes).
 - Real-image eval of d2.
 - **Known issue, not fixed here:** on ~12% of routes the generator's fpv path differs from our level
