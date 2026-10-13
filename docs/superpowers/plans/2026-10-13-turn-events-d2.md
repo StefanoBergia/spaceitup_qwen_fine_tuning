@@ -1952,7 +1952,8 @@ git status --short README.md scripts/evaluate.py                  # both still '
 
 CPU steps on the login node: `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1`.
 
-1. **Events** (~40 min, 4 workers):
+1. **Back up d1's events, then events** (~40 min, 4 workers; `events` refuses to overwrite other-schema events without `--force`):
+   `mkdir -p data/prepared_habitat_instr_v2/events_d1A2_backup && cp -a data/prepared_habitat_instr_v2/{events_*.jsonl,objects_*.jsonl,events_meta.json} data/prepared_habitat_instr_v2/events_d1A2_backup/`
    `uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 --out-dir data/prepared_habitat_instr_v4`
    Check `events_meta.json`. Expect `spur` ≈ 1.8k train / 212 eval, `no_events_bent` lower than d1's 2,861 / 458,
    and event_types including `turn` ≈ 1.7–1.9k train.
@@ -1960,38 +1961,36 @@ CPU steps on the login node: `export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLA
    `objects_to_name`, `est_compose_hours`.
 3. **G1 geometry audit** (human): `uv run scripts/audit_instruction_labels.py --mode turns --events
    data/prepared_habitat_instr_v4/events_train.jsonl --objects data/prepared_habitat_instr_v4/objects_train.jsonl
-   --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100`. Publish the page as an artifact with
+   --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100 --out outputs/turn_events_audit.html`. Publish the page as an artifact with
    the `db` capability (marks) and record the URL in the memory file `visualization-artifacts.md`.
    **Stop until the user's marks are in: ≥ 90% true.**
 4. **G2 label gate** (GPU, ask first):
    `ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch`.
-   Pass: accept ≥ 0.90 and template ≤ 0.10, printed by compose pass 2.
+   Pass: accept ≥ 0.90 and template ≤ 0.10, printed by compose pass 2. The gate sees only the changed eval routes (~156, all with a turn).
 5. **G3 label audit** (human, 100 gate rows):
    `--mode d1 --round d2 --events data/prepared_habitat_instr_v4/events_eval_changed.jsonl --objects
-   data/prepared_habitat_instr_v4/objects_eval_changed.jsonl --desc outputs/instr_labels_v3/desc_gate_mix_d2.jsonl`.
+   data/prepared_habitat_instr_v4/objects_eval_changed.jsonl --desc outputs/instr_labels_v3/desc_gate_mix_d2.jsonl
+   --out outputs/instr_d2_audit.html`.
    Pass at ≥ 90% correct.
 6. **Full labels** (GPU, ask first):
    `ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch`.
 7. **Finalize**: `uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d2 --desc-suffix _mix`.
    Check `meta_d2.json` (`recheck_failed` should be ~0).
-8. **Train d2** (GPU, ask first): same command and settings as d1's job 92477 (`slurm/train_habitat.sbatch`), with
-   data `data/prepared_habitat_instr_v4/train_desc.json` and output `outputs/runs_desc/d2`.
+8. **Train d2** (GPU, ask first; d1's settings, ~6 h):
+   `sbatch slurm/train_habitat.sbatch data/prepared_habitat_instr_v4/train_desc.json outputs/runs_desc/d2 --epochs 2 --save-steps 500 --resume`.
 9. **Eval** (GPU, ask first): `DATA=data/prepared_habitat_instr_v4 OUT_DIR=outputs/eval_desc_d2
    ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch`, and the same with
-   `ADAPTER=outputs/runs_desc/d1/adapter TAG=d1`. Then `uv run scripts/render_desc_videos.py` per set (path videos).
-10. **Steering rebuild**:
-    - `steer-objects --frames data/prepared_habitat_instr_v4/eval_desc_entry.json --names
-      outputs/instr_labels_v3/names_eval_gemma_d2.jsonl --fallback-names outputs/instr_labels_v3/names_eval_d2.jsonl
-      --out-dir data/prepared_habitat_instr_v4/steer`
+   `ADAPTER=outputs/runs_desc/d1/adapter TAG=d1`. Then `uv run scripts/render_desc_videos.py --set <set> --tag d2 --eval-dir outputs/eval_desc_d2 --data-dir data/prepared_habitat_instr_v4` per set (path videos; also `--tag d1`).
+10. **Steering rebuild** (the defaults of `steer-objects`, `steer`, `steer-select`, `finalize-steer` are the d2 paths:
+    frames `v4/eval_desc_entry.json`, names `names_*_d2.jsonl`, steer dir `v4/steer`; the ROUND=d2 steer stages need no `DATA`):
+    - `steer-objects`
     - `ROUND=d2 STEER_DIR=data/prepared_habitat_instr_v4/steer STAGE=steer_names sbatch …` (GPU, ask)
-    - `steer` with the same `--frames`/`--names`/`--fallback-names`/`--out-dir` plus `--steer-names
-      outputs/instr_labels_v3/names_steer_gemma_d2.jsonl`
-    - `steer-select --out-dir data/prepared_habitat_instr_v4/steer`, which prints Gate 0
-    - Gate 1: `--mode steer --n 50 --n-turn 20` on `v4/steer/events_steer_eval.jsonl` (human, ≥ 90%)
-    - `ROUND=d2 STEER_DIR=… STAGE=steer sbatch …` (GPU, ask)
-    - `finalize-steer --frames … --steer-dir data/prepared_habitat_instr_v4/steer --desc
-      outputs/instr_labels_v3/desc_steer_eval_d2.jsonl --out-dir data/prepared_habitat_instr_v4` (Gate 2)
+    - `steer`
+    - `steer-select`, which prints Gate 0
+    - Gate 1: `--mode steer --n 50 --n-turn 20` on `v4/steer/events_steer_eval.jsonl` with `--out outputs/steer_audit_d2.html` (human, ≥ 90%)
+    - `ROUND=d2 STEER_DIR=data/prepared_habitat_instr_v4/steer STAGE=steer sbatch …` (GPU, ask)
+    - `finalize-steer` (Gate 2)
     - `SETS=steer` eval for d1 and d2 (GPU, ask)
-11. **Report**: `uv run scripts/visualize_steering.py --tags d1 d2 --eval-dir outputs/eval_desc_d2 --data-dir
+11. **Report**: `uv run scripts/visualize_steering.py --tags d2 d1 --eval-dir outputs/eval_desc_d2 --data-dir
     data/prepared_habitat_instr_v4 --out outputs/steering_report_d2.html`, plus the by_turn table from the d1/d2
     eval metrics. Publish it, and add the URL to the memory file `visualization-artifacts.md`.
