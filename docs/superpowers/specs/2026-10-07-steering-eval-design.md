@@ -298,3 +298,8 @@ gates — Gate 0 is ≥ 150 pairs for the one slice.
 
 **Run order (replaces A1's).** `steer-objects` → `STAGE=steer_names` (GPU) → `steer` → `steer-select`
 (Gate 0) → audit (Gate 1) → `STAGE=steer` compose (Gate 2) → `finalize-steer` → eval → report.
+
+## Pointer (2026-10-13)
+
+The stop pairs are rebuilt on the d2 routes with turn cuts and a `turn` slice, and Gate 1 is redone
+(20 turn + 30 stop pairs): see `2026-10-13-turn-events-d2-design.md`, section "Steering".

@@ -397,3 +397,9 @@ Clarifications (final review, 2026-10-01):
   routes; `names_missing` stays satisfied because a primary-usable route never needs the fallback
   file. Order for mix: Gemma names eval then train, ONE switch to Cosmos, then per split
   `names (fallback) -> compose` (eval first), so the eval descriptions finish before train naming.
+
+## Pointer (2026-10-13)
+
+Turn events ("turn left behind the X"), the opposite-route spur cut and the d2 relabel + retrain are
+designed in `2026-10-13-turn-events-d2-design.md`; it changes `route_events`, `descriptions` and `eval`
+as specified there (schema `d2-turns`, prompt d4).
