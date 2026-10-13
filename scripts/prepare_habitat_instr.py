@@ -55,6 +55,16 @@ differ. CPU, 4 workers:
 The split is round 4's (data/prepared_habitat_v4), which is already scene-disjoint;
 that is re-asserted here. Yaw-augmented frames are skipped: the candidate projections
 belong to the unrotated camera.
+
+Turn events and d2 (2026-10-13, docs/superpowers/specs/2026-10-13-turn-events-d2-design.md): events into v4 from
+the v2 labelsets, seed the d2 label files from d1, label (GPU), finalize. CPU, 4 workers:
+
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 \
+        --out-dir data/prepared_habitat_instr_v4
+    uv run scripts/prepare_habitat_instr.py d2-seed
+    ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch   # gate
+    uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d2 --desc-suffix _mix
 """
 
 import argparse
@@ -64,7 +74,8 @@ from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
 
-from rover_vlm.descriptions import as_form, finalize_descriptions, shuffled_texts
+from rover_vlm.descriptions import (
+    as_form, finalize_descriptions, route_objects, seed_d2_labels, shuffled_texts, turn_rejects)
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
@@ -156,6 +167,7 @@ def stage_finalize(args):
 
 V2_OUT = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
 V3_OUT = REPO_ROOT / "data" / "prepared_habitat_instr_v3"
+V4_OUT = REPO_ROOT / "data" / "prepared_habitat_instr_v4"          # d2 (spec 2026-10-13)
 D1_LABELS = REPO_ROOT / "outputs" / "instr_labels_v3"
 WRONG_SIDE_N, HANDWRITTEN_N, V2_SEED = 300, 30, 7
 HANDWRITTEN = REPO_ROOT / "configs" / "instructions_handwritten_v2.json"
@@ -325,9 +337,11 @@ def event_row(rec):
 def stage_events(args):
     import time
     d = args.out_dir
-    meta = {"schema": EVENTS_SCHEMA}     # label_descriptions.py and the audit refuse files without it
+    d.mkdir(parents=True, exist_ok=True)
+    src = args.labelset_dir or d
+    meta = {"schema": EVENTS_SCHEMA, "labelset_dir": str(src)}     # label_descriptions.py and the audit refuse files without it
     for name in SPLITS:
-        recs = json.loads((d / f"labelset_{name}.json").read_text())
+        recs = json.loads((src / f"labelset_{name}.json").read_text())
         if args.limit:
             recs = recs[: args.limit]
         t0 = time.time()
@@ -463,21 +477,69 @@ def stage_steer_select(args):
           f"(need >= {steering.GATE0_MIN_PAIRS})")
 
 
-def desc_path(labels: Path, split: str, suffix: str = "") -> Path:
-    """Composed-description file of one split: desc_<split><suffix>_d1.jsonl (suffix "_mix" = NAMER=mix)."""
-    return labels / f"desc_{split}{suffix}_d1.jsonl"
+def desc_path(labels: Path, split: str, suffix: str = "", round_: str = "d1") -> Path:
+    """Composed-description file of one split: desc_<split><suffix>_<round>.jsonl (suffix "_mix" = NAMER=mix)."""
+    return labels / f"desc_{split}{suffix}_{round_}.jsonl"
+
+
+def _write_jsonl(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+COMPOSE_PER_MIN = 14     # Cosmos compose throughput on 3g.40gb (job 92229)
+
+
+def stage_d2_seed(args):
+    """d2: seed the d2 label files with the d1 rows that still hold, so the label job (--resume) names only new
+    objects and composes only changed routes; write the changed eval routes for the gate (spec "Seeding")."""
+    files = {s: {"gemma": args.labels / f"names_{s}_gemma_d2.jsonl", "cosmos": args.labels / f"names_{s}_d2.jsonl",
+                 "desc": desc_path(args.labels, s, "_mix", "d2")} for s in SPLITS}
+    existing = [str(p) for f in files.values() for p in f.values() if p.exists() and p.stat().st_size]
+    if existing and not args.force:
+        raise SystemExit(f"refusing to overwrite d2 label files (they may hold GPU work): {existing[:3]} — "
+                         "pass --force only if they are seeds you mean to redo")
+    meta = {}
+    for s in SPLITS:
+        new_ev = _jsonl(args.events_dir / f"events_{s}.jsonl")
+        new_obj = _jsonl(args.events_dir / f"objects_{s}.jsonl")
+        seed = seed_d2_labels(_jsonl(args.d1_events_dir / f"events_{s}.jsonl"), new_ev, new_obj,
+                              {"gemma": _jsonl(args.labels / f"names_{s}_gemma_d1.jsonl"),
+                               "cosmos": _jsonl(args.labels / f"names_{s}_d1.jsonl")},
+                              _jsonl(desc_path(args.labels, s, "_mix")))
+        _write_jsonl(files[s]["gemma"], seed["names"]["gemma"])
+        _write_jsonl(files[s]["cosmos"], seed["names"]["cosmos"])
+        _write_jsonl(files[s]["desc"], seed["desc"])
+        wanted = {o for r in seed["changed"] for o in route_objects(r)}
+        if s == "eval":
+            _write_jsonl(args.events_dir / "events_eval_changed.jsonl", seed["changed"])
+            _write_jsonl(args.events_dir / "objects_eval_changed.jsonl",
+                         [o for o in new_obj if o["object_id"] in wanted])
+        named = {r["id"] for r in seed["names"]["gemma"] if r.get("passed")}
+        meta[s] = {"described": sum(r.get("reason") is None for r in new_ev), "reused": len(seed["desc"]),
+                   "to_compose": len(seed["changed"]),
+                   "changed_with_turn": sum(any(e["type"] == "turn" for e in r["events"]) for r in seed["changed"]),
+                   "objects": len(new_obj), "objects_named_d1_gemma": len(named),
+                   "objects_to_name": len(wanted - named),
+                   "est_compose_hours": round(len(seed["changed"]) / COMPOSE_PER_MIN / 60, 1)}
+    (args.events_dir / "seed_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
 
 
 def stage_finalize_descriptions(args):
     import random
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    d2 = args.round != "d1"
+    events_dir = args.events_dir or (V4_OUT if d2 else V2_OUT)
+    labelset_dir = args.labelset_dir or V2_OUT
+    out_dir = args.out_dir or (V4_OUT if d2 else V3_OUT)
+    out_dir.mkdir(parents=True, exist_ok=True)
     meta, splits = {}, {}
     for name in SPLITS:
-        recs = json.loads((args.events_dir / f"labelset_{name}.json").read_text())
-        events = {r["id"]: r for r in map(json.loads, (args.events_dir / f"events_{name}.jsonl").open())}
-        objects = {o["object_id"]: o for o in map(json.loads, (args.events_dir / f"objects_{name}.jsonl").open())}
-        desc = _label_rows([desc_path(args.labels, name, args.desc_suffix)])
-        out = finalize_descriptions(recs, events, desc, objects)
+        recs = json.loads((labelset_dir / f"labelset_{name}.json").read_text())
+        events = {r["id"]: r for r in map(json.loads, (events_dir / f"events_{name}.jsonl").open())}
+        objects = {o["object_id"]: o for o in map(json.loads, (events_dir / f"objects_{name}.jsonl").open())}
+        desc = _label_rows([desc_path(args.labels, name, args.desc_suffix, args.round)])
+        out = finalize_descriptions(recs, events, desc, objects, recheck=turn_rejects if d2 else None)
         if out["stats"]["unlabelled"] > 0.01 * max(1, out["stats"]["records"] - out["stats"]["dropped_geometry"]) \
                 and not args.allow_missing:
             raise SystemExit(f"{name}: {out['stats']['unlabelled']} described routes have no label row (> 1%) — "
@@ -486,7 +548,7 @@ def stage_finalize_descriptions(args):
         meta[name] = out["stats"]
         print(f"{name}: {json.dumps(out['stats'])}", flush=True)
     assert_scene_disjoint(splits["train"]["kept"], splits["eval"]["kept"])
-    d = args.out_dir
+    d = out_dir
     train = splits["train"]["kept"]
     random.Random(V2_SEED).shuffle(train)
     (d / "train_desc.json").write_text(json.dumps(train, indent=1))
@@ -499,7 +561,7 @@ def stage_finalize_descriptions(args):
         (d / f"{fname}.json").write_text(json.dumps(rs, indent=1))
         meta["eval"][fname] = len(rs)
     meta["train"]["train_desc"] = len(train)
-    (d / "meta_v3.json").write_text(json.dumps(meta, indent=2))
+    (d / ("meta_d2.json" if d2 else "meta_v3.json")).write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
 
 
@@ -555,14 +617,23 @@ def main() -> None:
     g.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
     h = sub.add_parser("events", help="d1: route events + stop phrase per labelset record (CPU)")
     h.add_argument("--out-dir", type=Path, default=V2_OUT)
+    h.add_argument("--labelset-dir", type=Path, default=None, help="where labelset_<split>.json are "
+                   "(default: --out-dir); d2: data/prepared_habitat_instr_v2")
     h.add_argument("--limit", type=int, default=0, help="first N records per split (smoke run)")
     k = sub.add_parser("finalize-descriptions", help="d1: train/eval files from labelled descriptions (CPU)")
-    k.add_argument("--events-dir", type=Path, default=V2_OUT)
+    k.add_argument("--events-dir", type=Path, default=None)
+    k.add_argument("--labelset-dir", type=Path, default=None)
+    k.add_argument("--round", default="d1", choices=["d1", "d2"])
     k.add_argument("--labels", type=Path, default=D1_LABELS)
-    k.add_argument("--out-dir", type=Path, default=V3_OUT)
+    k.add_argument("--out-dir", type=Path, default=None)
     k.add_argument("--desc-suffix", default="",
                    help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
+    sd2 = sub.add_parser("d2-seed", help="d2: seed the d2 label files from d1 + the changed eval routes (CPU)")
+    sd2.add_argument("--d1-events-dir", type=Path, default=V2_OUT)
+    sd2.add_argument("--events-dir", type=Path, default=V4_OUT)
+    sd2.add_argument("--labels", type=Path, default=D1_LABELS)
+    sd2.add_argument("--force", action="store_true", help="overwrite existing d2 seed files")
     m = sub.add_parser("steer", help="steering: stop pairs per d1 eval frame (CPU)")
     m.add_argument("--frames", type=Path, default=V3_OUT / "eval_desc_entry.json")
     m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d1.jsonl")
@@ -588,7 +659,7 @@ def main() -> None:
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
-     "finalize-descriptions": stage_finalize_descriptions}[args.stage](args)
+     "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed}[args.stage](args)
 
 
 if __name__ == "__main__":

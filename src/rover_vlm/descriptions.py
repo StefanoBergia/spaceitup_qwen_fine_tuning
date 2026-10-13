@@ -599,8 +599,8 @@ def with_description(rec, text, source, form, check):
     return new
 
 
-def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects):
-    kept, geo, unlabelled, rejected = [], 0, 0, 0
+def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects, recheck=None):
+    kept, geo, unlabelled, rejected, rechecked = [], 0, 0, 0, 0
     for rec in label_recs:
         ev, row = events_by_id.get(rec["id"]), desc_by_id.get(rec["id"])
         if not ev or ev.get("reason") is not None:
@@ -612,6 +612,9 @@ def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects):
         if not row.get("passed"):
             rejected += 1
             continue
+        if recheck is not None and recheck(row["description"], ev["events"]):
+            rechecked += 1                    # d2: a reused d1 text that breaks a d2 rule (spec: finalize re-checks)
+            continue
         form = prompt_form(rec["habitat_meta"]["sample_id"])
         kept.append(with_description(rec, row["description"], row["instruction_source"], form, desc_check(ev, objects)))
     groups = {}
@@ -621,9 +624,43 @@ def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects):
     pairs = [r for g in groups.values() if len(g) == 2 for r in g]
     return {"kept": kept, "pairs": pairs,
             "stats": {"records": len(label_recs), "kept": len(kept), "dropped_geometry": geo,
-                      "unlabelled": unlabelled, "rejected": rejected, "pairs_kept": len(pairs) // 2,
+                      "unlabelled": unlabelled, "rejected": rejected, "recheck_failed": rechecked, "pairs_kept": len(pairs) // 2,
                       "entry_form": sum(r["habitat_meta"]["prompt_form"] == "entry" for r in kept),
                       "template": sum(r["habitat_meta"]["instruction_source"] == "template" for r in kept)}}
+
+
+def _geometry_key(row):
+    st = row["stop"]
+    return ([(e["type"], e["side"], tuple(e["objects"])) for e in row["events"]],
+            (st["type"], st["relation"], st.get("amount"), st["object"]))
+
+
+def same_description_geometry(old, new):
+    """True when a d2 events row describes its route as the d1 row did: both described, same events (type,
+    side, objects; arcs may move) and the same stop. Its d1 text then stays true: no d1 text says "turn"."""
+    if old.get("reason") is not None or new.get("reason") is not None:
+        return False
+    return _geometry_key(old) == _geometry_key(new)
+
+
+def seed_d2_labels(old_events, new_events, new_objects, old_names, old_desc):
+    """What the d2 label job can start from (spec "Seeding"): the d1 name rows of objects that still exist
+    ({"gemma": rows, "cosmos": rows}, error rows left out so they are retried), the d1 desc row of every
+    unchanged described route (tagged "reused_from": "d1"), and the described routes that need composing."""
+    ids = {o["object_id"] for o in new_objects}
+    names = {tag: [r for r in rows if r["id"] in ids and not r.get("error")] for tag, rows in old_names.items()}
+    old = {r["id"]: r for r in old_events}
+    desc = {r["id"]: r for r in old_desc if not r.get("error")}
+    reused, changed = [], []
+    for r in new_events:
+        if r.get("reason") is not None:
+            continue
+        o = old.get(r["id"])
+        if o is not None and r["id"] in desc and same_description_geometry(o, r):
+            reused.append({**desc[r["id"]], "reused_from": "d1"})
+        else:
+            changed.append(r)
+    return {"names": names, "desc": reused, "changed": changed}
 
 
 def as_form(rec, form):
