@@ -704,9 +704,9 @@ def test_wall_egocentric_form_survives_the_right_adverb_blanking():
 def test_compose_prompt_d2_direction_paragraph():
     from rover_vlm.descriptions import PROMPT_VERSION
     p = " ".join(compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence").split())
-    assert PROMPT_VERSION == "d3"
+    assert PROMPT_VERSION == "d4"
     assert (
-        "Keep every step in this order and keep each object's name. Copy each step's direction words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add one. Keep where to stop."
+        "Keep every step in this order and keep each object's name. Copy each step's direction words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add one. In a 'turn left' / 'turn right' step, keep 'turn left' / 'turn right' exactly (it is the rover's own turn) and keep its 'behind' / 'round' and its object; never add a turn the steps do not have. Keep where to stop."
     ) in p
     assert "after a wall stays that way" not in p
     assert "the word left or right that goes with it" not in p
@@ -888,3 +888,41 @@ def test_label_route_style_key_shares_style_and_shape_across_a_pair():
                     {**row, "id": rid}, NAMES, seed=0)
     for rid in ("p_L", "p_R"):
         assert choose_d1_style("p") in seen[rid] and choose_shape("p") in seen[rid]
+
+
+from rover_vlm.descriptions import PROMPT_VERSION, compose_prompt, desc_check, event_phrase  # noqa: E402
+
+PASS_R6 = {"type": "pass", "side": "right", "objects": ["f:b6"]}
+TURN_BEHIND6 = {"type": "turn", "side": "left", "relation": "behind", "objects": ["f:b6"], "arc_m": 3.0,
+                "turn_xz": [1.9, 3.0], "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 1.9}
+TURN_ROUND3 = {"type": "turn", "side": "right", "relation": "round", "objects": ["f:b3"], "arc_m": 2.0,
+               "turn_xz": [1.0, 2.0], "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 1.0}
+TURN_BARE_L = {"type": "turn", "side": "left", "relation": None, "objects": [], "arc_m": 2.5,
+               "turn_xz": [0.0, 2.5], "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 1.2}
+
+
+def test_turn_phrases():
+    assert event_phrase(TURN_BEHIND6, ["table"]) == "turn left behind the table"
+    assert event_phrase(TURN_ROUND3, ["grey sofa"]) == "turn right round the grey sofa"
+    assert event_phrase(TURN_BARE_L, []) == "turn left"
+
+
+def test_turn_templates():
+    assert template_description([PASS_R6, TURN_BEHIND6], NEAR, NAMES) == (
+        "Go right of the table, then turn left behind the table, and stop in front of the fridge.")
+    assert template_description([TURN_BARE_L], NEAR, NAMES) == "Go ahead, then turn left, and stop in front of the fridge."
+
+
+def test_compose_prompt_d4_carries_the_turn_step_and_rule():
+    assert PROMPT_VERSION == "d4"
+    p = compose_prompt([PASS_R6, TURN_BEHIND6], NEAR, NAMES, "plain", "one sentence")
+    assert "2. turn left behind the table" in p
+    assert "'turn left' / 'turn right'" in p and "never add a turn" in p
+
+
+def test_desc_check_keeps_the_turn_geometry():
+    objects = {"f:b6": {"cells_xz": [[2.2, 2.0]]}}
+    ev = {"pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0], "goal_xz": [3.9, 3.0], "events": [PASS_R6, TURN_BEHIND6]}
+    c = desc_check(ev, objects)
+    assert c["events"][1]["turn_xz"] == [1.9, 3.0] and c["events"][1]["pre_heading_xz"] == [0.0, 1.0]
+    assert c["events"][1]["gt_lateral_m"] == 1.9 and "turn_xz" not in c["events"][0]

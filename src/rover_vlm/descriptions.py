@@ -1,4 +1,4 @@
-"""Route descriptions (prompt d2; d1 until gate r1): turning geometry's events into checked sentences.
+"""Route descriptions (prompt d4 since d2; d2 / d1 before): turning geometry's events into checked sentences.
 
 rover_vlm.route_events finds what a route passes and where it stops. This module holds the
 canonical template sentence, the text rules every description must pass (all names present
@@ -62,13 +62,17 @@ def _words_re(words):
 
 def event_phrase(ev, names):
     """One step. Object passes name the ROUTE's side ("go right of the table"); walls name the
-    ROVER's side the wall is on ("keep the white wall on your left")."""
+    ROVER's side the wall is on ("keep the white wall on your left"); a turn names the rover's own turn and,
+    when anchored, the object it turns behind / round (d2)."""
     if ev["type"] == "pass":
         return f"go {ev['side']} of the " + " and the ".join(names)
     if ev["type"] == "wall":
         return f"keep the {names[0]} on your {ev['side']}"
     if ev["type"] == "between":
         return f"go between the {names[0]} and the {names[1]}"
+    if ev["type"] == "turn":
+        rel = ev.get("relation")
+        return f"turn {ev['side']}" + (f" {rel} the {names[0]}" if rel and names else "")
     return f"go through the {names[0]}"
 
 
@@ -101,6 +105,8 @@ def template_description(events, stop, names, kinds=None):
     id -> kind_hint) marks walls inside a `between` for the "past the end of the wall" stop."""
     parts = [event_phrase(e, [names[o] for o in e["objects"]]) for e in events]
     body = ", then ".join(parts) if parts else "go straight ahead"
+    if events and events[0]["type"] == "turn":
+        body = "go ahead, then " + body              # the route runs straight before it turns (route_events)
     text = f"{body}, and {_stop_line(events, stop, names, kinds)}."
     return text[0].upper() + text[1:]
 
@@ -258,7 +264,7 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d3"
+PROMPT_VERSION = "d4"
 
 # d1 speaking styles: the shared STYLES minus the "why or where it leads" one (audit of gate r2: both
 # unnatural labels came from it), plus a step-by-step one. The shared STYLES (i4) is unchanged.
@@ -362,7 +368,9 @@ Write it as {style}, in {shape}. Keep every step in this order and keep each obj
 as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that
 way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of'
 / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add
-one. Keep where to stop. You may add small words
+one. In a 'turn left' / 'turn right' step, keep 'turn left' / 'turn right' exactly (it is the rover's own
+turn) and keep its 'behind' / 'round' and its object; never add a turn the steps do not have. Keep where
+to stop. You may add small words
 ("then", "carefully", "keep going"), but add no other objects, sides or directions.
 Write numbers as words. At most 45 words.
 
@@ -535,11 +543,18 @@ def prompt_form(sample_id):
 
 
 def desc_check(ev, objects):
-    """What eval.description_follow needs, carried in the record (no file access at eval time)."""
+    """What eval.description_follow needs, carried in the record (no file access at eval time). A turn
+    event also carries its turn point, pre-turn heading and the GT end's lateral offset (d2)."""
     return {"pose_xz": ev["pose_xz"], "heading_xz": ev["heading_xz"], "goal_xz": ev["goal_xz"],
-            "events": [{"type": e["type"], "side": e["side"],
-                        "obstacles": [objects[o]["cells_xz"] for o in e["objects"]],
-                        "gap_xz": e.get("gap_xz")} for e in ev["events"]]}
+            "events": [_check_event(e, objects) for e in ev["events"]]}
+
+
+def _check_event(e, objects):
+    out = {"type": e["type"], "side": e["side"], "obstacles": [objects[o]["cells_xz"] for o in e["objects"]],
+           "gap_xz": e.get("gap_xz")}
+    if e["type"] == "turn":
+        out.update({k: e[k] for k in ("turn_xz", "pre_heading_xz", "gt_lateral_m")})
+    return out
 
 
 def with_description(rec, text, source, form, check):
