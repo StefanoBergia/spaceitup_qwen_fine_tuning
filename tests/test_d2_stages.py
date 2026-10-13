@@ -141,3 +141,10 @@ def test_sample_steer_takes_turn_pairs_first():
            [{"pair_id": f"s{i}", "id": f"s{i}_{k}", "slice": "stop"} for i in range(60) for k in "AB"]
     picked, pop = audit.sample_steer(rows, 50, 0, n_turn=20)
     assert len(picked) == 50 and sum(p[0]["slice"] == "turn" for p in picked) == 20 and pop == 90
+
+
+def test_audit_template_has_a_turns_mode():
+    html = audit.TEMPLATE.read_text()
+    assert 'DATA.mode === "turns"' in html and "Turn Events Audit" in html
+    assert "red ring" in html and "spur drop" in html and "rescued bent route" in html
+    assert 'DATA.mode === "turns" || !it.has_alt' in html     # the alt legend stays hidden for turns

@@ -373,7 +373,8 @@ def select_d2_rows(ok, events_by_id, n, seed):
     rng = random.Random(seed)
     new = [r for r in ok if r.get("prompt_version") == "d4" and r["id"] in events_by_id]
     has = [r for r in new if any(e["type"] == "turn" for e in events_by_id[r["id"]]["events"])]
-    no = [r for r in new if r not in has]
+    has_ids = {r["id"] for r in has}
+    no = [r for r in new if r["id"] not in has_ids]
     k = min(n // 2, len(has))
     rows = rng.sample(has, k) + rng.sample(no, min(n - k, len(no)))
     rng.shuffle(rows)
