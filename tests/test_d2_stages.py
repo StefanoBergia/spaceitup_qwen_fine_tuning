@@ -129,17 +129,23 @@ def test_sample_turns_stratifies():
     assert pop == {"turn_visible": 15, "turn_hidden": 40, "rescued_bent": 25, "spur": 50}
 
 
-def test_select_d2_rows_half_with_a_turn():
-    ok = [{"id": f"t{i}", "prompt_version": "d4"} for i in range(80)] + \
-         [{"id": f"n{i}", "prompt_version": "d4"} for i in range(80)] + [{"id": "old", "prompt_version": "d3"}]
+def test_select_d2_rows_mixes_rewritten_and_composed_rows():
+    from rover_vlm.descriptions import PROMPT_VERSION
+    ok = ([{"id": f"t{i}", "prompt_version": PROMPT_VERSION} for i in range(80)]
+          + [{"id": f"n{i}", "prompt_version": PROMPT_VERSION} for i in range(80)]
+          + [{"id": f"w{i}", "prompt_version": "d1", "rewritten_from": "d1"} for i in range(80)]
+          + [{"id": "old", "prompt_version": "d4"}, {"id": "same", "prompt_version": "d1", "reused_from": "d1"}])
     ev = {**{f"t{i}": {"events": [TURN]} for i in range(80)}, **{f"n{i}": {"events": [PASS]} for i in range(80)},
-          "old": {"events": [PASS]}}
+          **{f"w{i}": {"events": [PASS]} for i in range(80)}, "old": {"events": [PASS]}, "same": {"events": [PASS]}}
     rows = audit.select_d2_rows(ok, ev, 100, seed=0)
-    assert len(rows) == 100 and sum(r["id"].startswith("t") for r in rows) == 50 and "old" not in {r["id"] for r in rows}
+    ids = [r["id"] for r in rows]
+    assert len(rows) == 100 and sum(i.startswith("w") for i in ids) == 40
+    assert sum(i.startswith("t") for i in ids) == 30 and not {"old", "same"} & set(ids)
 
 
-def test_select_d2_rows_empty_no_turn_pool_still_returns_n():
-    ok = [{"id": f"t{i}", "prompt_version": "d4"} for i in range(156)]
+def test_select_d2_rows_without_rewrites_takes_composed_rows():
+    from rover_vlm.descriptions import PROMPT_VERSION
+    ok = [{"id": f"t{i}", "prompt_version": PROMPT_VERSION} for i in range(156)]
     ev = {f"t{i}": {"events": [TURN]} for i in range(156)}
     rows = audit.select_d2_rows(ok, ev, 100, seed=0)
     assert len(rows) == 100 and all(r["id"].startswith("t") for r in rows)
@@ -257,3 +263,39 @@ def test_endings_check_reports_the_gt_ceiling_per_ending(tmp_path, capsys):
     assert got["behind"] == {"n": 1, "gt_follow_rate": 1.0, "gt_ending_rate": 1.0, "gt_ending_rate_midpoint": 1.0}
     printed = capsys.readouterr().out
     assert "CEILING: behind gt_ending_rate 1.0" in printed and "PASS" in printed
+
+
+def _ending_row(rid, stop_type, reason=None, reanchored=False):
+    st = {"type": stop_type, "relation": None, "amount": None, "distance_m": None, "object": None}
+    if reanchored:
+        st["reanchored"] = True
+    return {"id": rid, "reason": reason, "events": [], "stop": st if reason is None else None, "pair_id": None}
+
+
+def test_sample_endings_stratifies():
+    rows = ([_ending_row(f"b{i}", "behind") for i in range(40)] + [_ending_row(f"t{i}", "turn") for i in range(20)]
+            + [_ending_row(f"r{i}", "near", reanchored=True) for i in range(12)]
+            + [_ending_row(f"v{i}", "near") for i in range(9)]
+            + [_ending_row(f"d{i}", None, reason="no_behind_anchor") for i in range(14)])
+    desc = {**{f"b{i}": {"rewritten_from": "d1"} for i in range(35)}, **{f"v{i}": {"reused_from": "d1"} for i in range(9)}}
+    picked, pop = audit.sample_endings(rows, desc, seed=0)
+    groups = [g for g, _ in picked]
+    assert [groups.count(g) for g in ("behind", "turn_end", "reanchored", "visible", "drop")] == [30, 15, 10, 5, 10]
+    assert pop == {"behind": 35, "turn_end": 20, "reanchored": 12, "visible": 9, "drop": 14}
+
+
+def test_first_hidden_point_and_draw_route():
+    from PIL import Image
+    path = [[0.5, 1.0, 1], [0.5, 0.8, 1], [0.5, 0.7, 0], [0.4, 0.6, 0]]
+    assert audit.first_hidden_point(path) == [0.5, 0.7, 0]
+    assert audit.first_hidden_point(path[:2]) is None
+    img = Image.new("RGB", (100, 100))
+    audit.draw_route(img, path)
+    assert img.getpixel((50, 90)) != (0, 0, 0)                           # the visible part is drawn
+
+
+def test_audit_template_has_an_endings_mode():
+    html = audit.TEMPLATE.read_text()
+    assert 'DATA.mode === "endings"' in html and "Endings Audit" in html and "goes out of sight" in html
+    v = {x["v"] for x in audit.VERDICTS["endings"]}
+    assert {"ok", "object", "stop", "wording", "keep", "unsure"} == v

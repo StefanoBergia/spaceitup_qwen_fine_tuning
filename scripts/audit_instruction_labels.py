@@ -35,6 +35,16 @@ objects. Gate >= 90% correct.
         --objects data/prepared_habitat_instr_v2/objects_eval.jsonl \
         --desc outputs/instr_labels_v3/desc_gate_d1.jsonl
 
+--mode endings (G1e, d2 Addendum T2, 2026-10-14): 30 routes that end out of sight with their REWRITTEN text ("…, then
+carry on behind it"), 15 hidden-turn endings, 10 re-anchored and 5 unchanged visible stops, 10 no_behind_anchor
+drops; the route solid where visible, dashed where out of sight, a red ring where it goes out of sight. Gate >= 90% true.
+    uv run scripts/audit_instruction_labels.py --mode endings --events data/prepared_habitat_instr_v4/events_train.jsonl \
+        --objects data/prepared_habitat_instr_v4/objects_train.jsonl \
+        --desc outputs/instr_labels_v3/desc_train_mix_d2.jsonl --out outputs/endings_audit.html
+--mode d1 --round d2 (G3, the label audit before the full job): ~40% rewritten d1 texts and the rest composed with the
+current prompt (half with a turn); pass the gate file AND the seeded eval desc file:
+    --desc outputs/instr_labels_v3/desc_gate_mix_d2.jsonl outputs/instr_labels_v3/desc_eval_mix_d2.jsonl
+
 --mode steer (steering Gate 1, 2026-10-08): stop pairs from steer/events_steer_eval.jsonl; both cuts of the
 route on the frame (magenta = first text, cyan = second), the stop objects outlined yellow, both template
 texts. Is each text true of its own route (steps and stop), and are the two stops clearly apart?
@@ -63,7 +73,7 @@ from PIL import Image, ImageDraw
 
 import numpy as np
 
-from rover_vlm.descriptions import template_description
+from rover_vlm.descriptions import PROMPT_VERSION, template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmarks import Camera
@@ -131,6 +141,86 @@ VERDICTS["turns"] = [
     {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
 ]
 TURN_MARK = (255, 60, 60)
+VERDICTS["endings"] = [
+    {"v": "ok", "label": "True", "help": "Every step and the ending are true; for a dropped route, dropping it is right"},
+    {"v": "object", "label": "Wrong object", "help": "The route does not go out of sight behind the green object (or does not stop by it)"},
+    {"v": "stop", "label": "Should stop in view", "help": "The end is in view: the text should say where it stops"},
+    {"v": "wording", "label": "Wording broken", "help": "The sentence is ungrammatical, or its ending does not fit the rest"},
+    {"v": "keep", "label": "Should not be dropped", "help": "A dropped route that could be described"},
+    {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+]
+VERDICTS["d2"] = [dict(v, label="Wrong ending", help="The stop, 'behind X' or final turn is wrong") if v["v"] == "stop"
+                  else v for v in VERDICTS["d1"]]
+HIDE_MARK = (255, 60, 60)
+ROUTE_COLOR = (255, 0, 200)
+
+
+def draw_route(img, path, colour=ROUTE_COLOR, dash=12):
+    """An answer path: solid where both ends of a segment are in view, dashed where it is out of sight."""
+    W, H = img.size
+    draw = ImageDraw.Draw(img)
+    for a, b in zip(path[:-1], path[1:]):
+        p, q = (a[0] * W, a[1] * H), (b[0] * W, b[1] * H)
+        if a[2] and b[2]:
+            draw.line([p, q], fill=colour, width=6)
+            continue
+        n = max(1, int(((q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2) ** 0.5 // dash))
+        for i in range(0, n, 2):
+            draw.line([(p[0] + (q[0] - p[0]) * t / n, p[1] + (q[1] - p[1]) * t / n) for t in (i, min(i + 1, n))],
+                      fill=colour, width=4)
+
+
+def first_hidden_point(path):
+    """The first waypoint of the path's final hidden run (where it goes out of sight), or None when it ends in view."""
+    if not path or path[-1][2]:
+        return None
+    k = len(path) - 1
+    while k > 0 and not path[k - 1][2]:
+        k -= 1
+    return path[k]
+
+
+def _ring(img, p, colour=HIDE_MARK):
+    if p is not None:
+        x, y = p[0] * img.size[0], p[1] * img.size[1]
+        ImageDraw.Draw(img).ellipse([x - 10, y - 10, x + 10, y + 10], outline=colour, width=4)
+
+
+def sample_endings(rows, desc_by_id, seed, n_behind=30, n_turn=15, n_reanchored=10, n_visible=5, n_drop=10):
+    """G1e (Addendum T2): behind endings whose route has a rewritten text, hidden-turn endings, re-anchored visible
+    stops, unchanged visible stops with their reused text, and no_behind_anchor drops. Shuffled."""
+    rng = random.Random(seed)
+    ok = [r for r in rows if r["reason"] is None]
+    pools = [("behind", [r for r in ok if r["stop"]["type"] == "behind"
+                         and (desc_by_id.get(r["id"]) or {}).get("rewritten_from")], n_behind),
+             ("turn_end", [r for r in ok if r["stop"]["type"] == "turn"], n_turn),
+             ("reanchored", [r for r in ok if r["stop"].get("reanchored")], n_reanchored),
+             ("visible", [r for r in ok if r["stop"]["type"] not in ("behind", "turn") and not r["stop"].get("reanchored")
+                          and (desc_by_id.get(r["id"]) or {}).get("reused_from")], n_visible),
+             ("drop", [r for r in rows if r["reason"] == "no_behind_anchor"], n_drop)]
+    picked = [(g, r) for g, pool, n in pools for r in rng.sample(pool, min(n, len(pool)))]
+    rng.shuffle(picked)
+    return picked, {g: len(pool) for g, pool, _ in pools}
+
+
+def endings_item(rec, row, objects, group, text=None):
+    """One G1e item: the frame, the route (dashed out of sight, red ring where it goes out of sight), numbered
+    objects (green = the ending's object) and the text; a drop shows the route alone."""
+    path = _answer_path(rec)
+    img = Image.open(rec["image"][0]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
+    draw_route(img, path)
+    if group == "drop":
+        instruction = "DROPPED: nothing nameable hides the end of this route. Is dropping it right?"
+    else:
+        draw_numbered(img, objects, placeholder_names(row), stop_id=row["stop"]["object"])
+        instruction = text or template_text(row, objects)
+    _ring(img, first_hidden_point(path))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    m = rec["habitat_meta"]
+    return {"id": rec["id"], "instruction": instruction, "side": m.get("side"), "kind": m.get("kind"),
+            "has_alt": False, "scene": m.get("scene_id"), "target": "object", "reason": row.get("reason"),
+            "group": group, "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
 
 
 def _turn(row):
@@ -328,11 +418,17 @@ def draw_numbered(img, objects, names, stop_id=None):
             _draw_badge(draw, (cx, cy), label.split()[-1], colour, font, 14)
 
 
-def events_item(rec, row, objects, text=None):
+def events_item(rec, row, objects, text=None, dashed=False):
     names = placeholder_names(row)
-    img = Image.open(io.BytesIO(render_generation_jpeg(rec))).resize((IMG_PX, IMG_PX), Image.LANCZOS)
-    draw_reference_line(img, _answer_path(rec))
+    if dashed:   # d2 label audit: the route solid in view, dashed out of sight, a ring where it goes out of sight
+        img = Image.open(rec["image"][0]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
+        draw_route(img, _answer_path(rec))
+    else:
+        img = Image.open(io.BytesIO(render_generation_jpeg(rec))).resize((IMG_PX, IMG_PX), Image.LANCZOS)
+        draw_reference_line(img, _answer_path(rec))
     draw_numbered(img, objects, names, stop_id=row["stop"]["object"])
+    if dashed:
+        _ring(img, first_hidden_point(_answer_path(rec)))
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=80)
     m = rec["habitat_meta"]
@@ -369,17 +465,24 @@ def turns_item(rec, row, objects, group):
     return item
 
 
-def select_d2_rows(ok, events_by_id, n, seed):
-    """G3: n passed d2 rows composed with the current prompt (reused d1 rows left out), half with a turn."""
+def select_d2_rows(ok, events_by_id, n, seed, rewritten_share=0.4):
+    """G3, the label audit before the full job (d2 T2): passed d2 rows, ~rewritten_share of them d1 texts with a
+    rewritten ending and the rest composed with the current prompt, half of those with a turn (turn rows fill what
+    the no-turn pool cannot); reused d1 rows and rows of older prompts are left out."""
     rng = random.Random(seed)
-    new = [r for r in ok if r.get("prompt_version") == "d4" and r["id"] in events_by_id]
+    rows = [r for r in ok if r["id"] in events_by_id]
+    rewritten = [r for r in rows if r.get("rewritten_from")]
+    new = [r for r in rows if r.get("prompt_version") == PROMPT_VERSION and not r.get("rewritten_from")
+           and not r.get("reused_from")]
+    k_rw = min(len(rewritten), round(n * rewritten_share) if new else n)
+    m = n - k_rw
     has = [r for r in new if any(e["type"] == "turn" for e in events_by_id[r["id"]]["events"])]
     has_ids = {r["id"] for r in has}
     no = [r for r in new if r["id"] not in has_ids]
-    k = min(len(has), max(n // 2, n - len(no)))   # turn rows fill what the no-turn pool cannot
-    rows = rng.sample(has, k) + rng.sample(no, min(n - k, len(no)))
-    rng.shuffle(rows)
-    return rows
+    k = min(len(has), max(m // 2, m - len(no)))
+    picked = rng.sample(rewritten, k_rw) + rng.sample(has, k) + rng.sample(no, min(m - k, len(no)))
+    rng.shuffle(picked)
+    return picked
 
 
 def read_ids(path):
@@ -452,7 +555,7 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings"], default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -462,7 +565,8 @@ def main() -> None:
                     help="landmarks_*.jsonl: draw each record's target (required for --mode geometry)")
     ap.add_argument("--events", type=Path, default=None, help="events_*.jsonl (--mode events)")
     ap.add_argument("--objects", type=Path, default=None, help="objects_*.jsonl (--mode events)")
-    ap.add_argument("--desc", type=Path, default=None, help="desc_*_d1.jsonl (--mode d1)")
+    ap.add_argument("--desc", type=Path, nargs="+", default=None,
+                    help="desc_*.jsonl (--mode d1: label rows; --mode endings: the seeded desc file with rewritten rows)")
     ap.add_argument("--ids", type=Path, default=None,
                     help="route ids, one per line (--mode d1): audit exactly these passed routes, in order; ignores --n")
     ap.add_argument("--d1-events", type=Path, default=None, help="d1 events_*.jsonl (--mode turns: the rescued-bent group)")
@@ -527,6 +631,27 @@ def main() -> None:
         out.write_text(html)
         print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
         return
+    if args.mode == "endings":
+        if not (args.events and args.objects and args.desc):
+            raise SystemExit("--mode endings needs --events, --objects and --desc (the seeded desc_<split>_mix_d2.jsonl)")
+        check_events_schema(args.events)
+        split = "eval" if "eval" in args.events.name else "train"
+        by_id = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{split}.json").read_text())}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        desc = {r["id"]: r for p in args.desc for r in jsonl(p)}
+        picked, pop = sample_endings(jsonl(args.events), desc, args.seed)
+        items = [endings_item(by_id[r["id"]], r, objects, g,
+                              text=desc[r["id"]]["description"] if g in ("behind", "visible") else None)
+                 for g, r in picked]
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "endings",
+                   "verdicts": VERDICTS["endings"], "source": str(args.events)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Endings Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "endings_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     if args.mode == "d1":
         if not (args.events and args.objects and args.desc):
             raise SystemExit("--mode d1 needs --events, --objects and --desc desc_*_d1.jsonl")
@@ -535,7 +660,7 @@ def main() -> None:
         by_id = {r["id"]: r for r in json.loads(split.read_text())}
         ev = {r["id"]: r for r in jsonl(args.events)}
         objects = {o["object_id"]: o for o in jsonl(args.objects)}
-        ok = [r for r in jsonl(args.desc) if r.get("passed")]
+        ok = [r for p in args.desc for r in jsonl(p) if r.get("passed")]
         if args.round == "d2":
             rows, missing = select_d2_rows(ok, ev, args.n, args.seed), 0
             n_turn = sum(any(e["type"] == "turn" for e in ev[r["id"]]["events"]) for r in rows)
@@ -544,13 +669,15 @@ def main() -> None:
             rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
         if args.ids:
             print(f"--ids: {len(rows)} shown, {missing} id(s) missing or not passed in {args.desc}")
-        items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"]) for r in rows]
+        items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"], dashed=args.round == "d2")
+                 for r in rows]
         for it, r in zip(items, rows):
-            it["source"] = r["instruction_source"]
+            it["source"] = "rewritten d1 text" if r.get("rewritten_from") else r["instruction_source"]
         pop = {"passed": len(ok), "template": sum(r["instruction_source"] == "template" for r in ok)}
-        title = "d2 Label Audit" if args.round == "d2" else d1_title(args.desc)
+        title = "d2 Label Audit" if args.round == "d2" else d1_title(args.desc[0])
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "d1",
-                   "verdicts": VERDICTS["d1"], "source": str(args.desc), "title": title}
+                   "verdicts": VERDICTS["d2" if args.round == "d2" else "d1"], "source": " ".join(map(str, args.desc)),
+                   "title": title}
         html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
         html = html.replace("<title>Instruction Label Audit</title>", f"<title>{title}</title>", 1)
         out = args.out or REPO_ROOT / "outputs" / "instr_d1_audit.html"
