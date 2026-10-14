@@ -671,6 +671,42 @@ def has_spur(route_xz):
     return bool(np.any(np.abs(th[j] - th) >= SPUR_REVERSAL_DEG))
 
 
+# --- endings (d2 Addendum T2, 2026-10-14): a route that ends out of sight "proceeds behind" what hides it -------
+HIDDEN_BLIP_M = 0.3      # a visible run this short between two hidden runs is flicker along an occluder's edge
+FPV_STEP_M = 0.05        # fpv_paths.json points are the route resampled this far apart, counted back from its end
+
+
+def hidden_tail_m(flags, step=ROUTE_STEP_M):
+    """Length of a route's final hidden stretch, counted back from its last point, or None when that point is in view.
+    `flags` holds one value per point, `step` metres apart (True = hidden). A visible run shorter than HIDDEN_BLIP_M
+    between two hidden runs counts as hidden; a visible run at the very start never does."""
+    f = [bool(x) for x in flags]
+    if not f or not f[-1]:
+        return None
+    k = len(f) - 1
+    while True:
+        while k > 0 and f[k - 1]:
+            k -= 1                       # k: first point of the current hidden run
+        if k == 0:
+            break
+        i = k - 1
+        while i > 0 and not f[i - 1]:
+            i -= 1                       # i: first point of the visible run before it
+        if i == 0 or (k - i) * step >= HIDDEN_BLIP_M:
+            break                        # a visible start, or a real visible stretch
+        k = i                            # a blip: absorb it and keep walking back
+    return (len(f) - 1 - k) * step
+
+
+def fpv_hidden_flags(sample_dir, candidate_index):
+    """The dataset's own hidden flag per fpv point of one candidate (fpv_paths.json runs), or None without the file."""
+    p = Path(sample_dir) / "fpv_paths.json"
+    if not p.exists():
+        return None
+    runs = json.loads(p.read_text())["candidates"][candidate_index]["runs"]
+    return [bool(r["hidden"]) for r in runs for _ in r["uv"]]
+
+
 def _anchor_outline(frame, blob, near_xz):
     """(visible cells, outline) of the part of a blob within KEEP_NEAR_ROUTE_M of near_xz, or None when it is
     not nameable (fewer than MIN_VISIBLE_CELLS visible cells, or an outline under MIN_AREA)."""
