@@ -230,3 +230,30 @@ def test_d2_seed_meta_counts_rewrites(tmp_path):
     prep.stage_d2_seed(args)
     meta = json.loads((args.events_dir / "seed_meta.json").read_text())["eval"]
     assert (meta["reused"], meta["rewritten"], meta["to_compose"], meta["rewrite_failed"]) == (1, 1, 0, {})
+
+
+def test_events_rows_record_whether_fpv_flags_were_read(tmp_path):        # Review Focus 1
+    _labelset(tmp_path / "v2", tmp_path)
+    out = tmp_path / "v4"
+    prep.stage_events(Namespace(out_dir=out, labelset_dir=tmp_path / "v2", limit=0, force=False))
+    row = json.loads((out / "events_eval.jsonl").read_text().splitlines()[0])
+    meta = json.loads((out / "events_meta.json").read_text())
+    assert row["fpv_flags"] is False and meta["eval"]["fpv_missing"] == 1 and meta["eval"]["reanchored"] == 0
+
+
+def test_endings_check_reports_the_gt_ceiling_per_ending(tmp_path, capsys):
+    box = [[0.4, 0.5], [0.6, 0.5], [0.6, 0.7], [0.4, 0.7]]
+    gt = [[0.5, 1.0, 1], [0.5, 0.8, 1], [0.5, 0.72, 1], [0.52, 0.66, 0], [0.7, 0.6, 0]]
+    rec = {"id": "a", "image": ["/x.png"], "conversations": [{"from": "human", "value": "<image>"},
+           {"from": "gpt", "value": json.dumps({"path": gt})}], "habitat_meta": {"sample_id": "s"}}
+    (tmp_path / "labelset_eval.json").write_text(json.dumps([rec]))
+    ev = {**_row("a", [], stop={"type": "behind", "relation": "behind", "amount": None, "distance_m": None,
+                                "object": "f:b1", "disappear_arc_m": 2.0}),
+          "pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 4]}
+    _write(tmp_path / "events_eval.jsonl", [ev])
+    _write(tmp_path / "objects_eval.jsonl", [{"object_id": "f:b1", "cells_xz": [[0, 2]], "polygon": box}])
+    prep.stage_endings_check(Namespace(events_dir=tmp_path, labelset_dir=tmp_path, split="eval"))
+    got = json.loads((tmp_path / "endings_check_eval.json").read_text())
+    assert got["behind"] == {"n": 1, "gt_follow_rate": 1.0, "gt_ending_rate": 1.0, "gt_ending_rate_midpoint": 1.0}
+    printed = capsys.readouterr().out
+    assert "CEILING: behind gt_ending_rate 1.0" in printed and "PASS" in printed

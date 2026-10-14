@@ -68,6 +68,14 @@ the v2 labelsets, seed the d2 label files from d1, label (GPU), finalize. CPU, 4
     uv run scripts/prepare_habitat_instr.py d2-seed
     ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch   # gate
     uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d2 --desc-suffix _mix
+
+d2 endings (Addendum T2, 2026-10-14): rerun events into v4 (--force: the schema changed to d2-endings), check the
+GT ceiling of the endings, re-seed:
+
+    uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 \
+        --out-dir data/prepared_habitat_instr_v4 --force
+    uv run scripts/prepare_habitat_instr.py endings-check      # CEILING: behind >= 0.95
+    uv run scripts/prepare_habitat_instr.py d2-seed --force
 """
 
 import argparse
@@ -334,7 +342,8 @@ def event_row(rec):
              "diag": {"error": f"{type(e).__name__}: {e}"}}
     return {"id": rec["id"], "sample_dir": str(sample_dir), "image": rec["image"][0],
             "candidate_index": hm["candidate_index"], "kind": hm.get("kind"),
-            "pair_id": hm.get("pair_id"), "sample_id": hm.get("sample_id"), **d}
+            "pair_id": hm.get("pair_id"), "sample_id": hm.get("sample_id"),
+            "fpv_flags": (sample_dir / "fpv_paths.json").exists(), **d}
 
 
 def stage_events(args):
@@ -368,6 +377,8 @@ def stage_events(args):
             "event_types": dict(Counter(e["type"] for r in ok for e in r["events"])),
             "stop_types": dict(Counter(r["stop"]["type"] for r in ok)),
             "pairs_both_described": sum(1 for n in pairs.values() if n == 2),
+            "fpv_missing": sum(not r.get("fpv_flags") for r in rows),
+            "reanchored": sum(bool((r.get("stop") or {}).get("reanchored")) for r in ok),
             "objects": len(objects),
             "depth_fallback": round(sum(o["depth_fallback"] for o in objects) / max(1, len(objects)), 3),
             "seconds": round(time.time() - t0, 1),
@@ -608,6 +619,48 @@ def stage_finalize_steer(args):
           f"(need >= {GATE2_MIN_COMPOSED})")
 
 
+CEILING_MIN = 0.95      # d2 T2: the GT paths must pass their own behind check at least this often
+
+
+def stage_endings_check(args):
+    """d2 T2 step 2 (CPU): every described route of a split checked against its own ending with its GT answer path
+    (labelset record): per ending type n, GT follow rate, GT ending rate (behind: both test points). Writes
+    endings_check_<split>.json next to the events and prints the ceiling gate (behind >= CEILING_MIN)."""
+    from rover_vlm.descriptions import desc_check
+    from rover_vlm.eval import behind_followed, description_follow
+    from rover_vlm.instructions import _answer_path
+    recs = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{args.split}.json").read_text())}
+    objects = {o["object_id"]: o for o in _jsonl(args.events_dir / f"objects_{args.split}.jsonl")}
+    acc = {}
+    for ev in _jsonl(args.events_dir / f"events_{args.split}.jsonl"):
+        if ev.get("reason") is not None or ev["id"] not in recs:
+            continue
+        chk = desc_check(ev, objects)
+        path = _answer_path(recs[ev["id"]])
+        kind = chk["ending"]["type"]
+        f = description_follow(path, chk, path[-1][:2])
+        a = acc.setdefault(kind, {"n": 0, "follow": 0, "ending": 0, "mid": 0})
+        a["n"] += 1
+        a["follow"] += f["follows"]
+        if kind == "behind":
+            a["ending"] += behind_followed(path, chk["ending"]["outline"])
+            a["mid"] += behind_followed(path, chk["ending"]["outline"], point="midpoint")
+        elif kind == "turn":
+            a["ending"] += next((ok for e, ok in zip(chk["events"], f["events"]) if e["type"] == "turn"), 0)
+        else:
+            a["ending"] += f["stop"]
+    out = {k: {"n": a["n"], "gt_follow_rate": round(a["follow"] / a["n"], 4),
+               "gt_ending_rate": round(a["ending"] / a["n"], 4),
+               **({"gt_ending_rate_midpoint": round(a["mid"] / a["n"], 4)} if k == "behind" else {})}
+           for k, a in sorted(acc.items())}
+    (args.events_dir / f"endings_check_{args.split}.json").write_text(json.dumps(out, indent=2))
+    print(json.dumps(out, indent=2))
+    b = out.get("behind", {})
+    ok = (b.get("gt_ending_rate") or 0) >= CEILING_MIN
+    print(f"CEILING: behind gt_ending_rate {b.get('gt_ending_rate')} (midpoint {b.get('gt_ending_rate_midpoint')}) "
+          f"-> {'PASS' if ok else 'FAIL'} (need >= {CEILING_MIN})")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="stage", required=True)
@@ -650,6 +703,10 @@ def main() -> None:
     sd2.add_argument("--events-dir", type=Path, default=V4_OUT)
     sd2.add_argument("--labels", type=Path, default=D1_LABELS)
     sd2.add_argument("--force", action="store_true", help="overwrite existing d2 seed files")
+    ec = sub.add_parser("endings-check", help="d2 T2: GT ceiling of each ending check on a split (CPU)")
+    ec.add_argument("--events-dir", type=Path, default=V4_OUT)
+    ec.add_argument("--labelset-dir", type=Path, default=V2_OUT)
+    ec.add_argument("--split", default="eval", choices=list(SPLITS))
     m = sub.add_parser("steer", help="steering: stop pairs per d1 eval frame (CPU)")
     m.add_argument("--frames", type=Path, default=V4_OUT / "eval_desc_entry.json")
     m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d2.jsonl")
@@ -675,7 +732,8 @@ def main() -> None:
     {"pairs": stage_pairs, "finalize": stage_finalize, "general": stage_general,
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
-     "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed}[args.stage](args)
+     "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed,
+     "endings-check": stage_endings_check}[args.stage](args)
 
 
 if __name__ == "__main__":
