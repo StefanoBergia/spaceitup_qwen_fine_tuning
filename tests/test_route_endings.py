@@ -154,3 +154,46 @@ def test_describe_route_passes_its_fpv_tail(tmp_path):
     tail = hidden_tail_m(fpv_hidden_flags(sd, 0), FPV_STEP_M)
     assert describe_route(sd, 0) == describe_xz(meta, frame, np.array(BEHIND_END), turn=detect_turn(BEHIND_END),
                                                 hidden_tail=tail)
+
+
+from rover_vlm.route_events import REANCHOR_M, build_events, candidates, stop_phrase   # noqa: E402
+
+LONG = [(2.5, 0.2), (2.5, 6.0)]       # passes the post at z 1.0, then ~5 m to the end: "well past the post"
+
+
+def _wide_box(z_row):
+    s = _long_state()
+    s[z_row:z_row + 4, 30:70] = OCC   # a 2 m wide box x 1.5..3.5 (wall-like), 0.2 m deep
+    return s
+
+
+def _stop(tmp_path, state, route):
+    _, frame = load_frame(write_sample(tmp_path / "s", state, [route]))
+    cs = candidates(frame, np.array(route))
+    return frame, stop_phrase(frame, np.array(route), build_events(frame, cs), cs)
+
+
+def test_reanchor_radius():
+    assert REANCHOR_M == 1.5
+
+
+def test_visible_well_past_reanchors_to_an_object_within_1_5_m(tmp_path):
+    frame, st = _stop(tmp_path, _wide_box(144), LONG)          # box face 1.23 m ahead of the end
+    assert (st["type"], st["relation"], st.get("reanchored")) == ("near", "in front of", True)
+    assert st["anchor"]["blob"] == int(frame.lab[145, 50]) and st["anchor"]["kind"] == "wall"
+    row = describe_route(write_sample(tmp_path / "d", _wide_box(144), [LONG]), 0)["stop"]
+    assert row["reanchored"] is True and row["relation"] == "in front of"
+
+
+def test_well_past_stays_when_nothing_is_within_1_5_m(tmp_path):
+    _, st = _stop(tmp_path, _wide_box(154), LONG)              # 1.73 m ahead
+    assert (st["type"], st["relation"], st["amount"]) == ("distance", "past", "well") and "reanchored" not in st
+    row = describe_route(write_sample(tmp_path / "d", _wide_box(154), [LONG]), 0)["stop"]
+    assert set(row) == {"type", "relation", "amount", "distance_m", "object"}
+
+
+def test_a_little_past_is_never_reanchored(tmp_path):
+    s = _long_state(100)
+    s[88:92, 30:70] = OCC                                      # 1.2 m ahead of the end below
+    _, st = _stop(tmp_path, s, [(2.5, 0.2), (2.5, 3.2)])
+    assert (st["type"], st["amount"]) == ("distance", "a little") and "reanchored" not in st

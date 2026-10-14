@@ -345,6 +345,7 @@ MAX_EVENTS = 3
 WALL_EXTENT_M = 1.5        # two blobs this long on both sides of the route = an opening
 OPENING_TOP_M = 2.0        # an opening's outline reaches this high (a door)
 STOP_NEAR_M = 1.0
+REANCHOR_M = 1.5          # a visible "well past" stop first tries the near rule this far out (d2 T2)
 AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
@@ -540,28 +541,11 @@ def _distance(relation, metres, anchor):
             "distance_m": round(float(metres), 1), "anchor": anchor}
 
 
-def stop_phrase(frame, route_xz, events, cands=None):
-    """Where the route ends, first rule that fits (Addendum A 1):
-    1. near: the nearest blob within STOP_NEAR_M the goal is clearly in front of / just past
-       (a blob mostly beside the goal is skipped -- "next to" is gone -- and a wall-like blob,
-       extent >= WALL_EXTENT_M, only takes "in front of"); the next-nearest is tried in turn;
-    2. after_last: at most AFTER_LAST_M of route after the last event;
-    3. distance past the last event's anchor, any remaining length, as a coarse amount; a wall-like
-       member only counts once the route has left it (see _event_anchor); when the last event has
-       no such anchor, the latest earlier event that has one;
-    4. distance before / past the nearest blob on the line of approach (within STOP_FAR_M);
-       a wall-like blob only "before" (it is ahead: in front of, at a distance).
-    None when nothing fits (the route is dropped). Visibility and outlines (the expensive part)
-    are only computed for the blobs a rule actually tries, nearest first."""
-    rg = route_geometry(route_xz)
-    goal = rg["pts"][-1]
-    back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal
-    head = goal - back
-    head /= max(np.linalg.norm(head), 1e-9)
-    right = np.array([-head[1], head[0]])
-    blobs = sorted(_blobs_near(frame, goal, STOP_FAR_M), key=lambda t: t[3].min())
+def _near_stop(frame, goal, head, right, blobs, radius):
+    """stop_phrase rule 1 within `radius`: the nearest blob the goal is clearly in front of / just past (a blob
+    mostly beside the goal is skipped; a wall-like blob only "in front of"), or None."""
     for b, cells, xz, d in blobs:
-        if d.min() > STOP_NEAR_M:
+        if d.min() > radius:
             break
         v = xz[d.argmin()] - goal
         along, lat = float(v @ head), float(v @ right)
@@ -573,13 +557,52 @@ def stop_phrase(frame, route_xz, events, cands=None):
             if _wall_like(xz):
                 x["kind"] = "wall"
             return {"type": "near", "relation": rel, "anchor": x}
+    return None
+
+
+def _reanchored(stop, find_near):
+    """A "well past" distance stop becomes the near stop `find_near()` finds within REANCHOR_M (d2 T2), marked
+    reanchored; the near rule runs only for a "well past" stop (it computes visibility and outlines)."""
+    if stop["relation"] == "past" and stop["amount"] == "well":
+        near = find_near()
+        if near is not None:
+            return {**near, "reanchored": True}
+    return stop
+
+
+def stop_phrase(frame, route_xz, events, cands=None):
+    """Where the route ends, first rule that fits (Addendum A 1):
+    1. near: the nearest blob within STOP_NEAR_M the goal is clearly in front of / just past
+       (a blob mostly beside the goal is skipped -- "next to" is gone -- and a wall-like blob,
+       extent >= WALL_EXTENT_M, only takes "in front of"); the next-nearest is tried in turn;
+    2. after_last: at most AFTER_LAST_M of route after the last event;
+    3. distance past the last event's anchor, any remaining length, as a coarse amount; a wall-like
+       member only counts once the route has left it (see _event_anchor); when the last event has
+       no such anchor, the latest earlier event that has one;
+    4. distance before / past the nearest blob on the line of approach (within STOP_FAR_M);
+       a wall-like blob only "before" (it is ahead: in front of, at a distance).
+    A "well past" result of rule 3 or 4 first tries rule 1 within REANCHOR_M (d2 T2: "in front of / just past Y"
+    beats "well past X"), marked "reanchored".
+    None when nothing fits (the route is dropped). Visibility and outlines (the expensive part)
+    are only computed for the blobs a rule actually tries, nearest first."""
+    rg = route_geometry(route_xz)
+    goal = rg["pts"][-1]
+    back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal
+    head = goal - back
+    head /= max(np.linalg.norm(head), 1e-9)
+    right = np.array([-head[1], head[0]])
+    blobs = sorted(_blobs_near(frame, goal, STOP_FAR_M), key=lambda t: t[3].min())
+    near = _near_stop(frame, goal, head, right, blobs, STOP_NEAR_M)
+    if near is not None:
+        return near
     if events and _just_after(events[-1], cands, rg["arc"][-1]):
         return {"type": "after_last", "relation": "just after", "anchor": None}
     # how far past the last thing passed, when nothing visible is near the goal
     last = next((a for a in (_event_anchor(e, cands, rg["arc"][-1]) for e in reversed(events)) if a), None) \
         if cands is not None else None
     if last is not None:
-        return _distance("past", rg["arc"][-1] - last[1], last[0])
+        return _reanchored(_distance("past", rg["arc"][-1] - last[1], last[0]),
+                           lambda: _near_stop(frame, goal, head, right, blobs, REANCHOR_M))
     for b, cells, xz, d in blobs:
         v = xz[d.argmin()] - goal
         if abs(v @ head) / max(np.linalg.norm(v), 1e-9) < APPROACH_COS:
@@ -589,7 +612,8 @@ def stop_phrase(frame, route_xz, events, cands=None):
             continue
         x = _anchor(frame, b, goal, cells, xz, d)
         if x is not None:
-            return _distance("before" if ahead else "past", x["dist"], x)
+            return _reanchored(_distance("before" if ahead else "past", x["dist"], x),
+                               lambda: _near_stop(frame, goal, head, right, blobs, REANCHOR_M))
     return None
 
 
