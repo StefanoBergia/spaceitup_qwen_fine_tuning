@@ -497,3 +497,10 @@ dropped": a sofa / corridor door / chair + sofa / fireplace does hide the end; 3
 over described routes ~92% true. Decision (user): keep the drops (171 train routes, 0.8%; no wrong text enters training)
 and go to G2. Open notes, outside T2: steps missing from the event selection (00647 x2 black sofa, 00611 second pillar,
 00551 a final "through the door"), a ghost "empty space" outline (00792), the drop rule's misses.
+
+**G2 (job 93455): PASS** — accept 0.957, template 0.063 (300 of the 327 eval routes to compose; 9 name clashes, 4 unnamed).
+**G3 label audit (https://claude.ai/artifact/1Z3ZCbkSxF3uKkKjGVS3Uw, 100 eval routes: 40 rewritten d1 texts, 57 Cosmos, 3
+template): 85/100 correct — accepted by the user.** Rewritten 36/40, Cosmos 46/57, template 3/3; endings ~97% right (1 wrong
+ending in scene 00831, 2 unsure). The 12 wrong names are the namer's (d1's own label audit was 84/100): 7 are the behind
+object, mostly a wall named as furniture — 68% of behind objects are long blobs and the wall naming prompt offers "a long
+piece of furniture such as a sofa or a counter"; only 27% of them get a wall-type head noun. Open: a wall-first naming pass.
