@@ -1563,7 +1563,11 @@ where it disappears and ends "…, then proceed behind X" (X = what hides it) or
 the full route. Visible "well past" stops re-anchor to an object within 1.5 m. Reused d1 texts get their ending
 rewritten on CPU (`d2-seed`; verbs proceed / continue / carry on / go on); Cosmos composes the rest. Eval checks a behind
 ending in image space (the prediction goes out of sight inside X's outline) and reports `by_ending`.
+This block replaces the older block's backup / `events` / `d2-seed` / G1 (turns audit) lines, which ran the earlier
+d2-turns round; after G1e the run continues with the older block's G2 gate line onward (G3 as in this block).
 
+    export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+    D=data/prepared_habitat_instr_v4; L=outputs/instr_labels_v3
     mkdir -p $D/events_d2turns_backup && cp -a $D/{events_*.jsonl,objects_*.jsonl,events_meta.json,seed_meta.json} $D/events_d2turns_backup/
     uv run scripts/prepare_habitat_instr.py events --labelset-dir data/prepared_habitat_instr_v2 --out-dir $D --force   # ~40 min; fpv_missing must be 0
     uv run scripts/prepare_habitat_instr.py endings-check        # CEILING: behind >= 0.95 (else see BEHIND_POINT in eval.py)
@@ -1583,7 +1587,7 @@ ending in image space (the prediction goes out of sight inside X's outline) and 
     uv run scripts/audit_instruction_labels.py --mode turns --events $D/events_train.jsonl --objects $D/objects_train.jsonl \
         --d1-events data/prepared_habitat_instr_v2/events_train.jsonl --n 100 --out outputs/turn_events_audit.html
     # G1 (human): publish the page as an artifact with the db capability for marks; stop until the marks are in (>= 90% true)
-    ROUND=d2 DATA=$D NAMER=mix sbatch slurm/label_descriptions.sbatch   # GPU, ask first; G2: accept >= 0.90, template <= 0.10 (the gate sees only the changed eval routes, ~156, all with a turn)
+    ROUND=d2 DATA=$D NAMER=mix sbatch slurm/label_descriptions.sbatch   # GPU, ask first; G2: accept >= 0.90, template <= 0.10 (the gate sees the eval routes d2-seed left to compose, `events_eval_changed.jsonl`)
     uv run scripts/audit_instruction_labels.py --mode d1 --round d2 --events $D/events_eval.jsonl \
         --objects $D/objects_eval.jsonl --desc $L/desc_gate_mix_d2.jsonl $L/desc_eval_mix_d2.jsonl \
         --out outputs/instr_d2_audit.html     # G3: >= 90% correct (human)
