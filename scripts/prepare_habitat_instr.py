@@ -397,15 +397,31 @@ def _steer_init(names, fallback, kinds):
 
 
 def steer_frame(item):
-    """(candidate pairs, reason counts, error or None) for one eval frame (pool worker)."""
+    """(candidate pairs, reason counts, error or None, object rows of unnamed objects) for one eval frame (pool worker)."""
+    missing = []
     try:
         pairs, reasons = frame_pairs(item["sample_dir"], item["candidate_index"], _STEER["names"],
-                                     _STEER["fallback"], _STEER["kinds"])
+                                     _STEER["fallback"], _STEER["kinds"], missing=missing)
         for p in pairs:
             p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")})
     except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
-        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}"
-    return pairs, dict(reasons), None
+        return [], {"error": 1}, f"{item['sample_id']}: {type(e).__name__}: {e}", []
+    return pairs, dict(reasons), None, [{**m, "image": item["image"]} for m in missing]
+
+
+def merge_object_rows(path, rows):
+    """Append to a naming-rows JSONL file the rows whose object_id it does not hold yet (first row of an id wins);
+    returns how many were added. The steer stage adds the objects that left pairs unnamed (wall-like cut anchors,
+    d2 T2) to steer-objects' file, for STAGE=steer_names."""
+    path = Path(path)
+    have = [json.loads(x) for x in path.read_text().splitlines() if x.strip()] if path.exists() else []
+    seen, new = {r["object_id"] for r in have}, []
+    for r in rows:
+        if r["object_id"] not in seen:
+            seen.add(r["object_id"])
+            new.append(r)
+    _write_jsonl(path, have + new)
+    return len(new)
 
 
 def _jsonl(path):
@@ -464,17 +480,20 @@ def stage_steer(args):
     t0 = time.time()
     items, prim, results = _run_steer_pool(args)
     (out / "names_primary_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in prim))
-    reasons, errors, n_frames = Counter(), [], {}
+    reasons, errors, n_frames, missing = Counter(), [], {}, []
     with (out / "candidates_eval.jsonl").open("w") as f:
-        for pairs, rs, err in results:
+        for pairs, rs, err, miss in results:
             reasons.update(rs)
+            missing += miss
             if err:
                 errors.append(err)
             for p in pairs:
                 n_frames.setdefault(p["slice"], set()).add(p["viewpoint"])
                 f.write(json.dumps(p) + "\n")
+    added = merge_object_rows(out / "objects_eval.jsonl", missing)
     meta = {"frames": len(items), "seconds": round(time.time() - t0, 1),
             "viewpoints_with_candidates": {k: len(v) for k, v in n_frames.items()},
+            "unnamed_objects_added_for_naming": added,
             "reasons": dict(sorted(reasons.items())), "errors": errors[:20], "n_errors": len(errors)}
     (out / "steer_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))

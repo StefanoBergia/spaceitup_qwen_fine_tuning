@@ -35,7 +35,7 @@ MIN_SEP_UV = 0.1
 CUT_FRACTIONS = (0.35, 0.5, 0.65, 0.8, 1.0)   # where a route is cut, as shares of its length
 TURN_CUT_BEFORE_M = 0.3    # A_turn stops this far before the turn starts ("stop before the turn")
 TURN_CUT_AFTER_M = 1.0     # B_turn stops this far after it ends ("turn ... and stop past X")
-GATE0_MIN_TURN_PAIRS = 50
+GATE0_MIN_TURN_PAIRS = 35   # user, 2026-10-14: after T2 the turn slice reaches ~39 viewpoints (prototype), not 50
 
 
 def route_length(xz):
@@ -147,14 +147,17 @@ def cuts(route_xz, fractions=CUT_FRACTIONS, min_m=MIN_ROUTE_M):
     return out
 
 
-def turn_cuts(route_xz, turn, min_m=MIN_ROUTE_M):
+def turn_cuts(route_xz, turn, min_m=MIN_ROUTE_M, disappear_arc_m=None):
     """(fraction, prefix) of the two turn cuts of a turning route (spec "Steering"): A TURN_CUT_BEFORE_M before
-    the turn starts, B TURN_CUT_AFTER_M after it ends (or at the route's end). Both or none: a cut shorter
-    than min_m drops the pair."""
+    the turn starts -- or before the route goes out of sight (`disappear_arc_m`, the start of its final hidden
+    stretch), whichever comes first, so A stops in view: a cut that ends out of sight reads "proceed behind X", which
+    B, turning behind X, also follows (d2 T2) -- and B TURN_CUT_AFTER_M after it ends (or at the route's end). Both
+    or none: a cut shorter than min_m drops the pair."""
     pts = densify(np.asarray(route_xz, float), ROUTE_STEP_M)
     arc = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    a_end = turn["start_arc_m"] if disappear_arc_m is None else min(turn["start_arc_m"], disappear_arc_m)
     out = []
-    for s in (turn["start_arc_m"] - TURN_CUT_BEFORE_M, min(turn["end_arc_m"] + TURN_CUT_AFTER_M, arc[-1])):
+    for s in (a_end - TURN_CUT_BEFORE_M, min(turn["end_arc_m"] + TURN_CUT_AFTER_M, arc[-1])):
         if s < min_m:
             return []
         out.append((round(float(s / arc[-1]), 3), pts[: max(2, int(np.searchsorted(arc, s - 1e-9)) + 1)]))
@@ -173,8 +176,12 @@ def stop_pairs(frame, meta, route_xz, turn=None):
     lt2_cuts (fewer than two cuts survive). With `turn` (route_events.detect_turn) the route also gets its two
     turn cuts; the pair of those two is slice "turn", every other pair "stop"."""
     reasons, routes = Counter(), []
+    disappear = None
+    if turn:
+        tail = hidden_tail_m(hidden_flags(frame, route_xz))
+        disappear = None if tail is None else route_length(route_xz) - tail
     made = [(f, cut, False) for f, cut in cuts(route_xz)] + \
-           [(f, cut, True) for f, cut in (turn_cuts(route_xz, turn) if turn else [])]
+           [(f, cut, True) for f, cut in (turn_cuts(route_xz, turn, disappear_arc_m=disappear) if turn else [])]
     if not made:
         reasons["route_too_short"] += 1
     for f, cut, is_turn in made:
@@ -236,9 +243,11 @@ def name_pair(pair, names, fallback, kinds):
     return None
 
 
-def frame_pairs(sample_dir, candidate_index, names, fallback, kinds):
+def frame_pairs(sample_dir, candidate_index, names, fallback, kinds, missing=None):
     """The stop pairs of one frame's ground-truth route, named, with drop reasons ("no_state",
-    "bad_candidate", "stop:<reason>", "stop:kept")."""
+    "bad_candidate", "stop:<reason>", "stop:kept"). With a `missing` list, the object rows (outline, kind; no image)
+    of every object that left a pair unnamed are appended to it, so the steer_names job can name them (d2 T2: cuts
+    ending behind a wall-like blob need names steer-objects never asks for)."""
     sd = Path(sample_dir)
     reasons = Counter()
     if not (sd / "state.npz").exists():
@@ -262,7 +271,21 @@ def frame_pairs(sample_dir, candidate_index, names, fallback, kinds):
         reasons[f"stop:{w or 'kept'}"] += 1
         if w is None:
             kept.append(p)
+        elif w == "unnamed_object" and missing is not None:
+            missing.extend(_unnamed_rows(p, names, fallback))
     return kept, reasons
+
+
+def _unnamed_rows(pair, names, fallback):
+    """Object rows (naming-row fields, no image) of a pair's route objects that neither name file names."""
+    out = []
+    for r in pair["routes"]:
+        for oid in route_objects({"events": r["desc"]["events"], "stop": r["desc"]["stop"]}):
+            if not (names.get(oid) or fallback.get(oid)):
+                o = r["desc"]["objects"][oid]
+                out.append({"object_id": oid, "kind_hint": o["kind_hint"],
+                            **{k: o[k] for k in ("polygon", "bbox", "crop_box", "area", "depth_fallback")}})
+    return out
 
 
 def steer_frames(records):

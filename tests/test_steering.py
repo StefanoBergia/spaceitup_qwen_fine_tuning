@@ -125,8 +125,8 @@ def test_steer_frame_turns_an_exception_into_a_reason(monkeypatch):
         raise ValueError("bad map")
     monkeypatch.setattr(prep, "frame_pairs", boom)
     prep._steer_init({}, None, {})
-    pairs, reasons, err = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "candidate_index": 0})
-    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err
+    pairs, reasons, err, missing = prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "candidate_index": 0})
+    assert pairs == [] and reasons == {"error": 1} and "ValueError: bad map" in err and missing == []
 
 
 def test_answer_path_marks_floor_behind_an_obstacle_hidden(tmp_path):
@@ -585,3 +585,52 @@ def test_a_hidden_turn_pair_is_not_exclusive():
     b = {"path": [[0.5, 1.0, 1], [0.5, 0.8, 1], [0.5, 0.7, 0], [0.45, 0.62, 0], [0.2, 0.6, 0]],
          "desc": {**base, "events": [turn], "stop": {"type": "turn", "relation": None, "object": None}}}
     assert not st.exclusive(a, b)
+
+
+# --- steering turn set (2026-10-14, after T2): a hidden turn's A cut ends before the route goes out of sight; the wall-like
+# objects steering cuts need are collected for naming ------------------------------------------------------------------
+def _wide_box_scene():
+    s = _state()
+    s[32:52, 39:60] = OCC          # wide box ahead: x 1.95..3.0, z 1.6..2.6
+    return s
+
+
+# right of the box, then behind it (out of sight from ~2.6 m), 1.2 m straight on (+z, so the pre-turn line runs straight
+# ahead) and a left turn at ~4.8 m, still hidden
+LATE_TURN = [(2.5, 0.2), (1.6, 1.3), (1.6, 2.8), (2.2, 3.2), (2.2, 4.4), (3.2, 4.4)]
+
+
+def test_turn_cut_a_ends_before_the_route_goes_out_of_sight():
+    t = detect_turn(LATE_TURN)
+    (_, a_old), _ = st.turn_cuts(LATE_TURN, t)
+    (_, a_new), (_, b_new) = st.turn_cuts(LATE_TURN, t, disappear_arc_m=2.62)
+    assert st.route_length(a_old) == pytest.approx(t["start_arc_m"] - st.TURN_CUT_BEFORE_M, abs=0.06)
+    assert st.route_length(a_new) == pytest.approx(2.62 - st.TURN_CUT_BEFORE_M, abs=0.06)
+    assert st.route_length(b_new) == pytest.approx(st.route_length(LATE_TURN), abs=0.06)   # B unchanged
+    assert st.turn_cuts(LATE_TURN, t, disappear_arc_m=1.6) == []                            # A would be < MIN_ROUTE_M
+
+
+def test_a_turn_made_out_of_sight_still_gives_a_turn_pair(tmp_path):
+    meta, frame = load_frame(_sample(tmp_path / "f", _wide_box_scene(), [LATE_TURN]))
+    t = detect_turn(LATE_TURN)
+    assert st.hidden_flags(frame, LATE_TURN)[-1]                                         # scene check: ends hidden
+    pairs, reasons = st.stop_pairs(frame, meta, LATE_TURN, turn=t)
+    turn = [p for p in pairs if p["slice"] == "turn"]
+    assert len(turn) == 1, dict(reasons)
+    a, b = turn[0]["routes"]
+    assert a["desc"]["stop"]["type"] not in ("behind", "turn") and a["path"][-1][2] == 1     # A stops in view
+    assert b["desc"]["stop"]["type"] == "turn" and st.exclusive(a, b)
+
+
+def test_frame_pairs_collects_the_objects_of_pairs_dropped_as_unnamed(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    missing = []
+    _, reasons = st.frame_pairs(sd, 0, {}, None, {}, missing=missing)
+    assert reasons["stop:unnamed_object"] > 0 and missing
+    assert {"object_id", "kind_hint", "polygon", "bbox", "crop_box", "area", "depth_fallback"} <= set(missing[0])
+    assert all(m["object_id"].startswith("f:b") for m in missing)
+    assert st.frame_pairs(sd, 0, {}, None, {})[1] == reasons                     # missing is optional
+
+
+def test_gate0_turn_threshold():
+    assert (st.GATE0_MIN_PAIRS, st.GATE0_MIN_TURN_PAIRS) == (150, 35)

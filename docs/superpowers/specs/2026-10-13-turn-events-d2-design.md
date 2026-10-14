@@ -450,6 +450,14 @@ event 86%, the blob hiding the end 88%; 7% of routes have an obstacle event afte
   already expected to fail (~52 viewpoints) and stays the user's decision. Not done: giving "behind" a "no turn"
   condition (the text does not say "straight").
 - The rebuild runs after training, as before; its CPU stage prints pairs per slice next to the previous numbers.
+- **Turn set (user, 2026-10-14, built before the full labelling job).** A CPU dry run on the d1 eval frames gave 473 stop /
+  21 turn viewpoints; naming every object would give 579 / 24 (1,135 pairs were lost to `unnamed_object`, mostly
+  wall-like "behind" anchors that `steer-objects` never names). Two changes: (1) `turn_cuts` ends A at the earlier of
+  the turn start and the route's disappearance (minus 0.3 m), so a hidden turn's A stops in view and the pair is
+  exclusive again — prototype 39 turn viewpoints (586 stop) with every object named; (2) `frame_pairs(missing=)` collects
+  the object rows that left pairs unnamed and `steer` merges them into `steer/objects_eval.jsonl` for `steer_names`, then
+  `steer` runs again. **Gate 0 turn threshold lowered to >= 35 (user)**; the stop slice keeps >= 150. Before finalize the
+  stages read the d1 eval frames (`--frames data/prepared_habitat_instr_v3/eval_desc_entry.json`).
 
 ### T2.5 Gates and run order
 

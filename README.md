@@ -1600,11 +1600,17 @@ d2-turns round; after G1e the run continues with the older block's G2 gate line 
 
 Steering rebuild on v4 (the defaults of `steer`, `steer-select`, `steer-objects` and `finalize-steer` are the d2 paths:
 frames `$D/eval_desc_entry.json`, names `$L/names_*_d2.jsonl`, steer dir `$D/steer`; the ROUND=d2 sbatch stages need no `DATA`):
+Turn set (2026-10-14, after the endings): a hidden turn's first cut ends 0.3 m before the route goes out of sight, so it
+stops in view ("turn right behind X" vs "…stop just after it"); `steer` pass 1 collects the objects (often wall-like
+"behind" anchors, which `steer-objects` skips) that left pairs unnamed, `steer_names` names them, pass 2 builds the pairs.
+Before the full labelling job the v4 eval files do not exist yet: add `--frames data/prepared_habitat_instr_v3/eval_desc_entry.json`
+(the same eval frames) to `steer-objects`, `steer` and `finalize-steer`.
 
     uv run scripts/prepare_habitat_instr.py steer-objects
+    uv run scripts/prepare_habitat_instr.py steer             # pass 1: also adds the objects that left pairs unnamed to $D/steer/objects_eval.jsonl
     ROUND=d2 STEER_DIR=$D/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch   # GPU, ask first
-    uv run scripts/prepare_habitat_instr.py steer
-    uv run scripts/prepare_habitat_instr.py steer-select      # Gate 0: >= 150 pairs, >= 50 turn pairs
+    uv run scripts/prepare_habitat_instr.py steer             # pass 2, with the new names
+    uv run scripts/prepare_habitat_instr.py steer-select      # Gate 0: >= 150 pairs, >= 35 turn pairs
     uv run scripts/audit_instruction_labels.py --mode steer --n 50 --n-turn 20 --events $D/steer/events_steer_eval.jsonl \
         --out outputs/steer_audit_d2.html   # Gate 1: >= 90%
     ROUND=d2 STEER_DIR=$D/steer STAGE=steer sbatch slurm/label_descriptions.sbatch   # GPU, ask first

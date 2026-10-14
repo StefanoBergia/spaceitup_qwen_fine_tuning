@@ -299,3 +299,13 @@ def test_audit_template_has_an_endings_mode():
     assert 'DATA.mode === "endings"' in html and "Endings Audit" in html and "goes out of sight" in html
     v = {x["v"] for x in audit.VERDICTS["endings"]}
     assert {"ok", "object", "stop", "wording", "keep", "unsure"} == v
+
+
+def test_merge_object_rows_adds_only_new_ids(tmp_path):
+    p = tmp_path / "objects_eval.jsonl"
+    _write(p, [{"object_id": "f:b1", "kind_hint": "object"}])
+    added = prep.merge_object_rows(p, [{"object_id": "f:b1", "kind_hint": "wall"}, {"object_id": "f:b2", "kind_hint": "wall"},
+                                       {"object_id": "f:b2", "kind_hint": "wall"}])
+    rows = [json.loads(x) for x in p.read_text().splitlines()]
+    assert added == 1 and [r["object_id"] for r in rows] == ["f:b1", "f:b2"] and rows[0]["kind_hint"] == "object"
+    assert prep.merge_object_rows(tmp_path / "new.jsonl", [{"object_id": "f:b3"}]) == 1
