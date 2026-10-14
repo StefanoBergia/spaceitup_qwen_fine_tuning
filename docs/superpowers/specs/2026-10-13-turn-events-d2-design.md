@@ -489,3 +489,11 @@ On ~12% of routes the fpv path and our 0.8 m projection differ by > 10 px (known
 GT's first hidden waypoint can disagree there, which step 2 measures. Hidden-turn steering pairs are gone.
 
 Plan: `docs/superpowers/plans/2026-10-14-d2-endings.md`.
+
+**G1e result (2026-10-14, https://claude.ai/artifact/N6sEFJWCV6QTyQcs298AgM, 70 train routes, seed 0): 56/70 = 80% raw —
+accepted by the user.** Behind endings 29/30 (the miss: an object name, not the geometry); hidden-turn endings 12/15;
+re-anchored stops 8/10; unchanged visible stops 4/5 (1 "can't tell"); `no_behind_anchor` drops 3/10 right (4 "should not be
+dropped": a sofa / corridor door / chair + sofa / fireplace does hide the end; 3 "should stop in view"). Population-weighted
+over described routes ~92% true. Decision (user): keep the drops (171 train routes, 0.8%; no wrong text enters training)
+and go to G2. Open notes, outside T2: steps missing from the event selection (00647 x2 black sofa, 00611 second pillar,
+00551 a final "through the door"), a ghost "empty space" outline (00792), the drop rule's misses.
