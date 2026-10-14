@@ -215,3 +215,18 @@ def test_turns_audit_sizes_come_from_the_cli(monkeypatch, tmp_path):
                                      "--n-bent", "20", "--n-spur", "20", "--out", str(tmp_path / "p.html")])
     audit.main()
     assert seen == {"seed": 1, "n_visible": 25, "n_hidden": 35, "n_bent": 20, "n_spur": 20}
+
+
+BEHIND_B1 = {"type": "behind", "relation": "behind", "amount": None, "distance_m": None, "object": "f:b1",
+             "disappear_arc_m": 2.0}
+
+
+def test_d2_seed_meta_counts_rewrites(tmp_path):
+    args = _seed_args(tmp_path)
+    _write(args.d1_events_dir / "events_eval.jsonl", [_row("evala", [PASS]), _row("evalc", [PASS])])
+    _write(args.events_dir / "events_eval.jsonl", [_row("evala", [PASS]), _row("evalc", [PASS], stop=BEHIND_B1)])
+    _write(args.labels / "desc_eval_mix_d1.jsonl",
+           [{"id": i, "description": "Go left of the sofa, then stop in front of it.", "passed": True} for i in ("evala", "evalc")])
+    prep.stage_d2_seed(args)
+    meta = json.loads((args.events_dir / "seed_meta.json").read_text())["eval"]
+    assert (meta["reused"], meta["rewritten"], meta["to_compose"], meta["rewrite_failed"]) == (1, 1, 0, {})

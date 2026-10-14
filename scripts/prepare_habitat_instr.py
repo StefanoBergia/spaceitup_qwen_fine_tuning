@@ -502,7 +502,8 @@ COMPOSE_PER_MIN = 14     # Cosmos compose throughput on 3g.40gb (job 92229)
 
 def stage_d2_seed(args):
     """d2: seed the d2 label files with the d1 rows that still hold, so the label job (--resume) names only new
-    objects and composes only changed routes; write the changed eval routes for the gate (spec "Seeding")."""
+    objects and composes only changed routes; behind endings of unchanged routes are rewritten from the d1 text on CPU
+    (Addendum T2); write the changed eval routes for the gate (spec "Seeding")."""
     files = {s: {"gemma": args.labels / f"names_{s}_gemma_d2.jsonl", "cosmos": args.labels / f"names_{s}_d2.jsonl",
                  "desc": desc_path(args.labels, s, "_mix", "d2")} for s in SPLITS}
     existing = [str(p) for f in files.values() for p in f.values() if p.exists() and p.stat().st_size]
@@ -526,7 +527,10 @@ def stage_d2_seed(args):
             _write_jsonl(args.events_dir / "objects_eval_changed.jsonl",
                          [o for o in new_obj if o["object_id"] in wanted])
         named = {r["id"] for r in seed["names"]["gemma"] if r.get("passed")}
-        meta[s] = {"described": sum(r.get("reason") is None for r in new_ev), "reused": len(seed["desc"]),
+        meta[s] = {"described": sum(r.get("reason") is None for r in new_ev),
+                   "reused": sum(r.get("reused_from") == "d1" for r in seed["desc"]),
+                   "rewritten": sum(r.get("rewritten_from") == "d1" for r in seed["desc"]),
+                   "rewrite_failed": seed["rewrite_failed"],
                    "to_compose": len(seed["changed"]),
                    "changed_with_turn": sum(any(e["type"] == "turn" for e in r["events"]) for r in seed["changed"]),
                    "objects": len(new_obj), "objects_named_d1_gemma": len(named),

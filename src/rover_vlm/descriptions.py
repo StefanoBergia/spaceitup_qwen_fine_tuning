@@ -113,6 +113,31 @@ def behind_clause(events, stop, names, verb="proceed"):
     return f"{verb} behind {target}"
 
 
+REWRITE_VERBS = ("proceed", "continue", "carry on", "go on")   # d2 T2: the verb of a rewritten behind ending
+# the connector just before a text's last stop word: ", then" / ", and then" / ", and" / " and" / " then" / ". Then" / ". "
+_CONNECTOR = re.compile(r"(?:\s*[,;]\s*(?:and\s+then|then|and)?|\s+(?:and\s+then|then|and)|\s*\.\s*(?:then|and)?)"
+                        r"\s*(?:please\s+)?$", re.I)
+
+
+def rewrite_ending(text, events, stop, names, route_id):
+    """(new text, None), or (None, reason). A d1 text with its final stop clause -- the last stop word to the end of
+    the text plus the connector before it -- replaced by ", then <verb> behind it / the X" (behind_clause; the verb
+    from REWRITE_VERBS by a stable hash of the route id), keeping the text's own end punctuation. Reasons:
+    "no_stop_clause" (no stop word), "no_connector" (nothing before the stop clause, or no connector), "rejects"
+    (the new text fails description_rejects)."""
+    stops = list(_STOP.finditer(text or ""))
+    if not stops:
+        return None, "no_stop_clause"
+    c = _CONNECTOR.search(text[: stops[-1].start()])
+    head = text[: c.start()].rstrip(" ,;") if c else ""
+    if not head:
+        return None, "no_connector"
+    end = text.rstrip()[-1:]
+    verb = REWRITE_VERBS[_stable_index("verb:" + route_id, len(REWRITE_VERBS))]
+    new = f"{head}, then {behind_clause(events, stop, names, verb)}{end if end in '.?!' else '.'}"
+    return (new, None) if not description_rejects(new, events, stop, names) else (None, "rejects")
+
+
 def template_description(events, stop, names, kinds=None):
     """The canonical sentence for a route; always passes description_rejects. `kinds` (object
     id -> kind_hint) marks walls inside a `between` for the "past the end of the wall" stop."""
@@ -698,24 +723,51 @@ def same_description_geometry(old, new):
     return _geometry_key(old) == _geometry_key(new)
 
 
+def _rewritten(old, new, d1row, named):
+    """(rewritten desc row, None) or (None, reason) for a route whose stop became "behind" (d2 T2): same events as
+    d1, every route object named by the namer the d1 text used, and a rewrite that passes the rules."""
+    if old is None or old.get("reason") is not None or d1row is None:
+        return None, "no_d1_text"
+    if _geometry_key(old)[0] != _geometry_key(new)[0]:
+        return None, "events_changed"
+    names = named["cosmos"] if d1row.get("namer") == "fallback" else named["gemma"]
+    if not _usable(new, names):
+        return None, "unnamed"
+    text, why = rewrite_ending(d1row["description"], new["events"], new["stop"], names, new["id"])
+    if text is None:
+        return None, why
+    return {**d1row, "description": text, "rewritten_from": "d1", "passed": True, "rejects": []}, None
+
+
 def seed_d2_labels(old_events, new_events, new_objects, old_names, old_desc):
-    """What the d2 label job can start from (spec "Seeding"): the d1 name rows of objects that still exist
-    ({"gemma": rows, "cosmos": rows}, error rows left out so they are retried), the d1 desc row of every
-    unchanged described route (tagged "reused_from": "d1"), and the described routes that need composing."""
+    """What the d2 label job can start from (spec "Seeding", Addendum T2): the d1 name rows of objects that still exist
+    ({"gemma": rows, "cosmos": rows}, error rows left out so they are retried); the d1 desc row of every unchanged
+    described route (tagged "reused_from": "d1"); a rewritten d1 row for every route whose events are unchanged and
+    whose stop became "behind" (tagged "rewritten_from": "d1"); and the described routes that need composing.
+    rewrite_failed counts, by reason, the behind routes that could not be rewritten."""
     ids = {o["object_id"] for o in new_objects}
     names = {tag: [r for r in rows if r["id"] in ids and not r.get("error")] for tag, rows in old_names.items()}
+    named = {tag: name_rows_split(rows)[0] for tag, rows in names.items()}
+    named.setdefault("gemma", {})
+    named.setdefault("cosmos", {})
     old = {r["id"]: r for r in old_events}
     desc = {r["id"]: r for r in old_desc if not r.get("error")}
-    reused, changed = [], []
+    reused, rewritten, changed, failed = [], [], [], Counter()
     for r in new_events:
         if r.get("reason") is not None:
             continue
-        o = old.get(r["id"])
-        if o is not None and r["id"] in desc and same_description_geometry(o, r):
-            reused.append({**desc[r["id"]], "reused_from": "d1"})
-        else:
-            changed.append(r)
-    return {"names": names, "desc": reused, "changed": changed}
+        o, d = old.get(r["id"]), desc.get(r["id"])
+        if o is not None and d is not None and same_description_geometry(o, r):
+            reused.append({**d, "reused_from": "d1"})
+            continue
+        if r["stop"]["type"] == "behind":
+            row, why = _rewritten(o, r, d, named)
+            if row is not None:
+                rewritten.append(row)
+                continue
+            failed[why] += 1
+        changed.append(r)
+    return {"names": names, "desc": reused + rewritten, "changed": changed, "rewrite_failed": dict(failed)}
 
 
 def as_form(rec, form):
