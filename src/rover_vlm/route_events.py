@@ -13,6 +13,8 @@ A blob the route runs through (closest distance < TOUCH_M) has no defined side: 
 
 d2 (2026-10-13): a route that ends >= 45 deg off its start->goal line gets a "turn" event (behind / round an object, or bare); routes that double back on themselves are dropped as "spur".
 
+d2 T2 (2026-10-14): a route whose end is out of sight is described up to where it disappears and ends "behind" the object hiding it (or with its hidden turn); events after the disappearance are dropped; a visible "well past" stop re-anchors within 1.5 m.
+
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
@@ -347,7 +349,7 @@ AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
 STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": its max offset from entry->goal must be within this
-REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_events_bent", "error")
+REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_behind_anchor", "no_events_bent", "error")
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 
 
@@ -707,6 +709,33 @@ def fpv_hidden_flags(sample_dir, candidate_index):
     return [bool(r["hidden"]) for r in runs for _ in r["uv"]]
 
 
+BEHIND_READ_M = (0.15, 0.3, 0.5, 0.8)   # where past the disappearance the blob hiding the route is read
+
+
+def behind_anchor(frame, route_xz, disappear_arc_m):
+    """The nameable blob a route goes out of sight behind, or None. The first blob a camera ray hits on the way to the
+    route BEHIND_READ_M past `disappear_arc_m` decides; if it is not nameable, or no read point is hidden on the map,
+    the blob hiding the route's end is tried. Nameable as a turn anchor is (_anchor_outline near the ray's hit)."""
+    rg = route_geometry(route_xz)
+    pts, arc = rg["pts"], rg["arc"]
+    for ds in BEHIND_READ_M:
+        s = disappear_arc_m + ds
+        if s > arc[-1] + 1e-9:
+            break
+        occ, hit = _first_hit(frame, pts[min(int(np.searchsorted(arc, s)), len(pts) - 1)])
+        if occ is not None:
+            got = _anchor_outline(frame, occ, hit)
+            if got:
+                return {"blob": occ, "vis_xz": got[0], "outline": got[1]}
+            break
+    occ, hit = _first_hit(frame, pts[-1])
+    if occ is not None:
+        got = _anchor_outline(frame, occ, hit)
+        if got:
+            return {"blob": occ, "vis_xz": got[0], "outline": got[1]}
+    return None
+
+
 def _anchor_outline(frame, blob, near_xz):
     """(visible cells, outline) of the part of a blob within KEEP_NEAR_ROUTE_M of near_xz, or None when it is
     not nameable (fewer than MIN_VISIBLE_CELLS visible cells, or an outline under MIN_AREA)."""
@@ -782,34 +811,51 @@ def describe_route(sample_dir, candidate_index):
     if not (0 <= candidate_index < len(cm)) or len(cm[candidate_index].get("polyline_xz") or []) < 2:
         return _none("bad_candidate")
     route = cm[candidate_index]["polyline_xz"]
-    return describe_xz(meta, frame, route, turn=detect_turn(route))
+    flags = fpv_hidden_flags(sd, candidate_index)
+    tail = hidden_tail_m(flags, FPV_STEP_M) if flags else None
+    return describe_xz(meta, frame, route, turn=detect_turn(route), hidden_tail=tail)
 
 
-def describe_xz(meta, frame, route, turn=None):
+def describe_xz(meta, frame, route, turn=None, hidden_tail=None):
     """The events + stop phrase for any route polyline (world xz) on a loaded frame (steering pairs describe
     routes that are not candidates of the frame). `turn` is the FULL route's turn (detect_turn): a route
     shorter than its end_arc_m (a steering cut that stops before or inside the turn) gets no turn event, and
-    without `turn` none is emitted. A route that doubles back on itself is dropped as "spur"."""
+    without `turn` none is emitted. A route that doubles back on itself is dropped as "spur".
+    `hidden_tail` (d2 T2) is the length of the route's final hidden stretch (hidden_tail_m), None when its end is in view: a hidden end ends with its turn (when the turn comes after the disappearance) or "behind" the blob it disappears behind (behind_anchor; none -> "no_behind_anchor"), and obstacle events after the disappearance are dropped."""
     route = np.asarray(route, float)
     if has_spur(route):
         return _none("spur")
     cands = candidates(frame, route)
     events = build_events(frame, cands)
-    if turn is not None and route_geometry(route)["arc"][-1] + 1e-6 < turn["end_arc_m"]:
+    route_len = float(route_geometry(route)["arc"][-1])
+    if turn is not None and route_len + 1e-6 < turn["end_arc_m"]:
         turn = None
     anchor = turn_anchor(frame, turn) if turn is not None else None
     if anchor is not None:          # a pass of the anchor alone, after the turn point, is what the turn says
         events = [e for e in events if not (e["type"] == "pass" and len(e["members"]) == 1
                                             and cands[e["members"][0]]["blob"] == anchor["blob"]
                                             and e["arc_m"] >= turn["arc_m"])]
+    dis = None if hidden_tail is None else max(0.0, route_len - hidden_tail)
+    if dis is not None:             # the text describes what is in view
+        events = [e for e in events if e["arc_m"] <= dis + 1e-6]
     if not events:
-        if turn is None and route_geometry(route)["offset"].max() > STRAIGHT_MAX_M:
+        bent = (not _straight_before(route, dis)) if dis is not None else route_geometry(route)["offset"].max() > STRAIGHT_MAX_M
+        if turn is None and bent:
             return _none("no_events_bent")                   # "go straight ahead" would be false
         if turn is not None and not _straight_before(route, turn["start_arc_m"]):
             return _none("no_events_bent")                   # an unexplained swing before the turn
-    stop = stop_phrase(frame, route, events, cands)          # obstacle events only: "just after" / "past" name objects
-    if stop is None:
-        return _none("no_stop_anchor", n_events=len(events) + (turn is not None))
+    if dis is not None and turn is not None and turn["arc_m"] >= dis - 1e-6:
+        stop = {"type": "turn", "relation": None, "anchor": None}          # the hidden turn is the ending
+    elif dis is not None:
+        x = behind_anchor(frame, route, dis)
+        if x is None:
+            return _none("no_behind_anchor", n_events=len(events) + (turn is not None))
+        x["kind"] = "wall" if _wall_like(_blob_cells(frame)[x["blob"]][1]) else "object"
+        stop = {"type": "behind", "relation": "behind", "anchor": x}
+    else:
+        stop = stop_phrase(frame, route, events, cands)      # obstacle events only: "just after" / "past" name objects
+        if stop is None:
+            return _none("no_stop_anchor", n_events=len(events) + (turn is not None))
     # Object rows in explicit passes. Events first: an event member's kind_hint is its event role
     # (pass member -> "object", wall member -> "wall", opening -> "opening"). Then the turn anchor, then the stop
     # anchor: each reuses an existing object row unchanged and sets kind_hint / outline only for a new object.
@@ -849,16 +895,20 @@ def describe_xz(meta, frame, route, turn=None):
         rows.sort(key=lambda r: r["arc_m"])                  # stable: an obstacle event at the same arc stays first
     st = {"type": stop["type"], "relation": stop["relation"], "amount": stop.get("amount"),
           "distance_m": stop.get("distance_m"), "object": None}
+    if dis is not None:
+        st["disappear_arc_m"] = round(dis, 2)
+    if stop.get("reanchored"):
+        st["reanchored"] = True
     if stop["anchor"] is not None:                       # after every event row (see above)
         a = stop["anchor"]
         st["object"] = add(a.get("key", f"b{a['blob']}"), a.get("kind", "object"), a["outline"], a["vis_xz"])
     return {"reason": None, "events": rows, "stop": st, "objects": objects,
             "goal_xz": [round(float(v), 3) for v in route[-1]],
             "pose_xz": [float(v) for v in meta["pose_xz"]], "heading_xz": [float(v) for v in meta["heading_xz"]],
-            "route_len_m": round(float(route_geometry(route)["arc"][-1]), 2)}
+            "route_len_m": round(route_len, 2)}
 
 
-EVENTS_SCHEMA = "d2-turns"  # stamped into events_meta.json by prepare_habitat_instr.py events
+EVENTS_SCHEMA = "d2-endings"  # stamped into events_meta.json by prepare_habitat_instr.py events (d2 T2)
 
 
 def check_events_schema(events_path):

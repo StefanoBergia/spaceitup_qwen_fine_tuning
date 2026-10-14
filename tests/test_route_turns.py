@@ -189,7 +189,7 @@ def test_a_cut_keeps_the_full_routes_turn_only_once_finished(tmp_path, cut, has_
 def test_spur_routes_are_dropped(tmp_path):
     spur = [(2.5, 0.2), (1.9, 1.2), (1.9, 3.0), (1.0, 3.0), (1.9, 3.0), (3.9, 3.0)]
     assert describe_route(write_sample(tmp_path / "s", _behind_state(), [spur]), 0)["reason"] == "spur"
-    assert "spur" in REASONS and EVENTS_SCHEMA == "d2-turns"
+    assert "spur" in REASONS and EVENTS_SCHEMA == "d2-endings"
 
 
 def test_describe_route_passes_the_routes_own_turn(tmp_path):

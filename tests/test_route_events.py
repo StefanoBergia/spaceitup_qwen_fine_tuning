@@ -796,7 +796,7 @@ from rover_vlm.route_events import EVENTS_SCHEMA, check_events_schema  # noqa: E
 
 def test_events_schema_check_accepts_stamped_meta(tmp_path):
     (tmp_path / "events_meta.json").write_text(json.dumps({"schema": EVENTS_SCHEMA, "train": {}}))
-    assert EVENTS_SCHEMA == "d2-turns"
+    assert EVENTS_SCHEMA == "d2-endings"
     check_events_schema(tmp_path / "events_train.jsonl")          # no raise
 
 
