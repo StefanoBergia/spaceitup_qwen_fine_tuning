@@ -125,7 +125,8 @@ VERDICTS["turns"] = [
     {"v": "ok", "label": "True", "help": "Every step (the turn included) and the stop are true; for a dropped route, dropping it is right"},
     {"v": "turn", "label": "Wrong turn", "help": "There is no such turn, or it goes the other way"},
     {"v": "anchor", "label": "Wrong turn object", "help": "'behind / round' the outlined object is not true"},
-    {"v": "step", "label": "Other step or stop wrong", "help": "A pass / wall / between / through step or the stop is wrong"},
+    {"v": "step", "label": "Other step wrong", "help": "A pass / wall / between / through step is wrong"},
+    {"v": "stop", "label": "Wrong stop", "help": "Only the stop is wrong (d1's stop rules; not counted in the turn gate)"},
     {"v": "keep", "label": "Should not be dropped", "help": "A spur or bent drop of a route that is fine"},
     {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
 ]
@@ -468,6 +469,10 @@ def main() -> None:
     ap.add_argument("--labelset-dir", type=Path, default=V2, help="dir holding labelset_<split>.json")
     ap.add_argument("--round", default="d1", help="--mode d1: 'd2' samples half turn routes, d4 prompt only")
     ap.add_argument("--n-turn", type=int, default=0, help="--mode steer: pairs taken from the turn slice")
+    ap.add_argument("--n-visible", type=int, default=20, help="--mode turns: visible turn routes")
+    ap.add_argument("--n-hidden", type=int, default=30, help="--mode turns: hidden turn routes (fills what visible lacks)")
+    ap.add_argument("--n-bent", type=int, default=20, help="--mode turns: routes d1 dropped as no_events_bent that d2 describes")
+    ap.add_argument("--n-spur", type=int, default=30, help="--mode turns: routes dropped as spur")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -510,7 +515,8 @@ def main() -> None:
         split = "eval" if "eval" in args.events.name else "train"
         by_id = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{split}.json").read_text())}
         objects = {o["object_id"]: o for o in jsonl(args.objects)}
-        picked, pop = sample_turns(jsonl(args.events), jsonl(args.d1_events), args.seed)
+        picked, pop = sample_turns(jsonl(args.events), jsonl(args.d1_events), args.seed, n_visible=args.n_visible,
+                                   n_hidden=args.n_hidden, n_bent=args.n_bent, n_spur=args.n_spur)
         items = [turns_item(by_id[r["id"]], r, objects, g) for g, r in picked]
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "turns",
                    "verdicts": VERDICTS["turns"], "source": str(args.events)}

@@ -295,3 +295,35 @@ touched.
   0.8 m camera projection by > 10 px. These are scenes where the floor is not 0.8 m below the camera
   (scene 00831: 50–100 px). This also affects `route_events` outlines and visibility for those frames,
   in d1 as in d2.
+
+## Addendum T1 (2026-10-14): G1 round 1 result, turn point at the first bend, G1 round 2
+
+**G1 r1** (https://claude.ai/artifact/PERNvXynzchRVetGXdYycZ, 83 train routes, seed 0; only 3 rescued bent routes
+exist in train): **69 / 83 true (83%) — below 90%**. Visible turns 18/20, hidden turns 22/30, spur drops 28/30,
+rescued bent 1/3. Diagnosed route by route (top-down renders):
+- **Turn point too late (00641).** A turn made in two bends got its point on the second bend: the final heading is
+  109° off the line, the first bend reaches only ~35°, so "half the final angle" fell on bend 2. The user puts it at
+  bend 1.
+- **"Behind" far from the turn is not the cause.** The user marked OK 12 of the 16 hidden turns whose object is
+  ≥ 3 m before the turn point (train median 3.2 m). Only 00552 is noted: name the post the route passes, not the
+  barrel by the camera.
+- **Stop errors from d1's unchanged stop logic** (00005 ×2, 00330): the stop object is near on the map, but its
+  outline or the hidden end of the route makes it look far in the image. Keeping the stop outline near the stop
+  was prototyped and rejected: it does not change 00330, swaps 00005 for another doubtful stop, and changes 3.5%
+  of stops without bringing outlines closer.
+- Single cases: a missed first turn of a jog (00770; detector A names only the final turn), an ambiguous route
+  that bends both ways (00469), a route through the mapped sofa (00518), 3 "can't tell" on odd renders, 2 spur
+  drops the user would keep (not separable from the 28 agreed drops by leg gap).
+
+**Decision (user, 2026-10-14):** fix the turn point, then a turn-focused G1 r2.
+
+**Rule change.** `detect_turn`'s turn point is the **first bend that takes the route clearly onto the turn side**:
+the first point, after the route last headed along or away from that side of the start→goal line, at least
+`TURN_MIN_DEG / 2` (22.5°) onto it. A route that never heads along or away from the turn side falls back to the
+r1 rule (last crossing of half the final angle). Start / end arcs are computed from the new point as before, so a
+two-bend turn starts at bend 1 and ends after bend 2. Prototype: on 1,000 random train routes 12 of 88 turns move
+≥ 0.5 m, 10 change their anchor or relation; 00641 moves from 6.6 m to 5.1 m.
+
+**G1 r2.** A fresh sample (seed 1) of the re-run events: 25 visible + 35 hidden turns, every rescued bent route,
+20 spur drops. A new verdict "Wrong stop" separates d1-era stop errors from "Other step wrong". **Gate: ok /
+(n − wrong-stop) ≥ 90%**; "can't tell" counts as not true (also reported without it).

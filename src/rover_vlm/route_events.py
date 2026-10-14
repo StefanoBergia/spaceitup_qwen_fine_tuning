@@ -626,18 +626,27 @@ def heading_profile(route_xz, step=ROUTE_STEP_M):
 def detect_turn(route_xz):
     """The route's final turn (spec detector A), or None. The route has turned when its mean heading over the
     last TURN_END_WINDOW_M is at least TURN_MIN_DEG off its start->goal line; a swerve round an obstacle ends
-    back on that line. The turn point is where the heading last crosses half the final angle; it starts at
-    the last earlier point within TURN_HOLD_DEG of the heading TURN_PRE_M before it, and ends at the first
-    later point within TURN_HOLD_DEG of the final heading. Run it on a FULL route: a cut that stops
-    mid-swerve would look like a turn (steering passes the full route's turn to its cuts)."""
+    back on that line. The turn point is the first bend that takes the route clearly onto the turn side: the first
+    point, after the route last headed along or away from that side of the line, at least TURN_MIN_DEG / 2 onto it
+    (G1 r1, 00641: a turn made in two bends belongs at the first one). A route that never heads along or away from
+    the turn side falls back to where the heading last crosses half the final angle. The turn starts at the last
+    earlier point within TURN_HOLD_DEG of the heading TURN_PRE_M before it, and ends at the first later point within
+    TURN_HOLD_DEG of the final heading. Run it on a FULL route: a cut that stops mid-swerve would look like a turn
+    (steering passes the full route's turn to its cuts)."""
     pts, arc, th, g = heading_profile(route_xz)
     if arc[-1] < HEADING_CHORD_M or np.linalg.norm(pts[-1] - pts[0]) < 1e-6:
         return None
     e = float(np.mean(th[arc >= arc[-1] - TURN_END_WINDOW_M]))
     if abs(e) < TURN_MIN_DEG:
         return None
-    not_over = np.nonzero(np.sign(e) * (th - e / 2) <= 0)[0]
-    k = int(min(not_over[-1] + 1, len(pts) - 1)) if len(not_over) else 0
+    onto = np.sign(e) * th                                   # heading onto the turn side of the line, degrees
+    away = np.nonzero(onto <= 0)[0]
+    clear = np.nonzero((np.arange(len(onto)) > away[-1]) & (onto >= TURN_MIN_DEG / 2))[0] if len(away) else []
+    if len(clear):
+        k = int(clear[0])
+    else:
+        not_over = np.nonzero(np.sign(e) * (th - e / 2) <= 0)[0]
+        k = int(min(not_over[-1] + 1, len(pts) - 1)) if len(not_over) else 0
     j = int(np.searchsorted(arc, arc[k] - TURN_PRE_M))
     pre = float(th[j])
     i0 = k

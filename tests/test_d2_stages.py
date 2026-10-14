@@ -192,3 +192,26 @@ def test_events_refuses_to_overwrite_d1_events_unless_forced(tmp_path):
     assert not (d1 / "events_eval.jsonl").exists()
     prep.stage_events(Namespace(out_dir=d1, labelset_dir=None, limit=0, force=True))
     assert json.loads((d1 / "events_meta.json").read_text())["schema"] == prep.EVENTS_SCHEMA
+
+
+def test_turns_audit_records_a_wrong_stop_apart_from_other_steps():
+    # G1 r1 -> r2 (2026-10-14): the gate counts the turn and spur verdicts; a wrong stop (d1's unchanged stop logic)
+    # is recorded on its own verdict so it can be left out of the turn gate.
+    v = {x["v"]: x for x in audit.VERDICTS["turns"]}
+    assert "stop" in v and "step" in v
+    assert "stop" not in v["step"]["help"].lower()
+
+
+def test_turns_audit_sizes_come_from_the_cli(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(audit, "sample_turns", lambda d2, d1, seed, **kw: (seen.update(kw, seed=seed), ([], {}))[1])
+    monkeypatch.setattr(audit, "check_events_schema", lambda p: None)
+    for f in ("events_train.jsonl", "objects_train.jsonl", "d1.jsonl"):
+        (tmp_path / f).write_text("")
+    (tmp_path / "labelset_train.json").write_text("[]")
+    monkeypatch.setattr("sys.argv", ["audit", "--mode", "turns", "--events", str(tmp_path / "events_train.jsonl"),
+                                     "--objects", str(tmp_path / "objects_train.jsonl"), "--d1-events", str(tmp_path / "d1.jsonl"),
+                                     "--labelset-dir", str(tmp_path), "--seed", "1", "--n-visible", "25", "--n-hidden", "35",
+                                     "--n-bent", "20", "--n-spur", "20", "--out", str(tmp_path / "p.html")])
+    audit.main()
+    assert seen == {"seed": 1, "n_visible": 25, "n_hidden": 35, "n_bent": 20, "n_spur": 20}

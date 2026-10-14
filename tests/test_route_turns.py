@@ -47,6 +47,17 @@ def test_a_swerve_that_comes_back_to_the_line_is_not_a_turn():
     assert detect_turn([(0.0, 0.0), (0.8, 1.5), (0.0, 3.0), (0.0, 4.5)]) is None
 
 
+def test_a_turn_in_two_bends_is_placed_at_the_first_bend():
+    # G1 r1 (00641): the route turns right in two bends; its final heading is 118 deg off the start->goal line but
+    # the first bend only reaches 40 deg, so "half the final angle" put the turn on the SECOND bend. A person puts
+    # it where the route first turns clearly onto the turn side.
+    route = [(0.0, 0.0), (0.0, 4.0), (-2.0, 4.5), (-2.5, 3.5)]
+    t = detect_turn(route)
+    assert t["side"] == "right" and t["angle_deg"] == pytest.approx(117.9, abs=1.0)
+    assert t["arc_m"] == pytest.approx(4.0, abs=0.2)                  # the first bend (the second is at 6.06 m)
+    assert t["start_arc_m"] <= t["arc_m"] and t["end_arc_m"] >= 6.0   # it has finished turning only after bend 2
+
+
 def test_swing_one_way_then_turn_the_other():
     route = [(0.0, 0.0), (1.0, 1.5), (1.0, 3.5), (-1.0, 3.5)]
     t = detect_turn(route)
