@@ -327,3 +327,161 @@ two-bend turn starts at bend 1 and ends after bend 2. Prototype: on 1,000 random
 **G1 r2.** A fresh sample (seed 1) of the re-run events: 25 visible + 35 hidden turns, every rescued bent route,
 20 spur drops. A new verdict "Wrong stop" separates d1-era stop errors from "Other step wrong". **Gate: ok /
 (n − wrong-stop) ≥ 90%**; "can't tell" counts as not true (also reported without it).
+
+**G1 r2 result** (https://claude.ai/artifact/Tgds6HXXbcsuaUszc8dFds): **74 / 80 = 92.5% — PASSED** (raw 89%). Spur
+drops 20/20, visible turns 22/25, hidden turns 31/35, rescued bent 1/3. Open notes, not blocking: 2 "round / behind
+object is empty space" (ghost outlines), 2 "the pillar is missing as an object" (00469, 00518), 00106 between vs
+through, 3 d1-era stops.
+
+## Addendum T2 (2026-10-14): endings — "proceed behind X" for routes that end out of sight
+
+**Why.** Before G2 the user found the stop clause too vague. A CPU probe (scratchpad; page
+https://claude.ai/artifact/2TggHhKtBsP8VTpvcuuBPw; 21,096 described d2 train routes, a stratified sample of 1,988
+for visibility, d1's entry-form eval for model behaviour) showed why:
+- 45% of routes say "stop well past X", 28% "a little past X", 17% "just after it", 9% "in front of X". A "past"
+  anchor is the obstacle where the route **starts** (median 1.4 m in front of the camera, 53% within 1.5 m), while
+  "well past" routes end 6.8 m out.
+- **78% of route ends are hidden** in the image (dataset flag; 88% of "well past", 48% even of "in front of X").
+  For 72% of hidden "well past" ends the thing hiding the end is X itself.
+- A hidden end is not where the route disappears: median 0.21 uv away for "well past", almost all of it sideways;
+  only 5% within the eval's 0.03 stop tolerance. No phrase a person can judge from the image pins it.
+- Better anchors near the end are rare where needed: for "well past" another nameable object lies within 1 m of the
+  end on 4% of routes, within 2 m on 16% (94% of those walls).
+- "In front of X" with a hidden end: the end lies outside X's horizontal image extent 79–93% of the time, behind a
+  different, nearer object. This is G1's "near on the map, far in the image" (00005, 00330, 00389, 00475).
+- Turn routes: 73% say "well past" an object passed before the turn (median 7.4 m); they end 2.2 m after the turn
+  (p10 1.3, p90 4.0 m).
+- d1 hits the stop on 20–26% of records in every stop class, precise ones included, and its endpoint loses to the
+  constant goal (0.062 vs 0.054). The miss is sideways (|du| 0.056 vs |dv| 0.016) and 73% end deeper than the GT.
+  About half the endpoint error is the prediction ending off the GT path, so a stop phrase can fix only part of it.
+
+A second probe on the 1,471 hidden-end routes of the sample measured the replacement: 90% of routes go out of sight
+once (visible blips < 0.3 m merged), the hidden tail is a median 2.1 m; the blob hiding the route just past the
+disappearance is found on the map 97% of the time and nameable 95% (**92.5% usable**); it is an object of the last
+event 86%, the blob hiding the end 88%; 7% of routes have an obstacle event after the disappearance; for hidden
+"behind" turns the turn anchor is that blob 82% of the time.
+
+**Decisions (user, 2026-10-14).**
+1. A route whose end is hidden is described up to where it goes out of sight and ends with "…, then proceed behind
+   X" (X = the object it disappears behind). **The answer keeps the full GT route**, hidden waypoints (v = 0)
+   included; only the text changes.
+2. A turn made out of sight is the ending: "…, then turn right behind the table." No stop clause follows.
+3. Visible ends keep today's stop rules, except that a would-be "well past X" re-anchors to a nameable object near
+   the end when one exists.
+4. New texts come from **rewriting the ending of the reused d1 text** (approach B); Cosmos composes only what a
+   rewrite cannot serve. Rewrites use four verbs: proceed / continue / carry on / go on behind.
+5. Steering, gates and the run book follow (below). The spec stays in round d2: no d2 label exists yet, the data dir
+   (v4), label files (`*_d2`) and adapter path are unchanged.
+
+### T2.1 Geometry — the ending (`route_events.py`)
+
+- New input `hidden_from_arc_m`: the arclength where the route's **final hidden stretch** starts, or `None` when the
+  end is visible. Visible blips shorter than `HIDDEN_BLIP_M = 0.3` m inside hidden stretches count as hidden (they
+  are flicker along an occluder's edge). The caller computes it with the flags its own answer uses:
+  - candidates (`describe_route`): `fpv_paths.json` run flags; the fpv points are the route resampled every
+    0.05 m (checked on 6 routes: L / (N − 1) = 0.049–0.055), counted back from the route's end;
+  - steering cuts: `first_blocker` per densified point, as `steering.answer_path` flags them.
+- The ending, first rule that fits:
+  1. **turn ending**: the end is hidden and the route's turn event (if any) has `arc_m ≥ hidden_from_arc_m`. The
+     turn row is unchanged (relation behind / round / none as today); the stop row is
+     `{"type": "turn", "relation": null, "object": null}`.
+  2. **behind**: the end is hidden. X = the nameable blob hiding the route `BEHIND_READ_M = (0.15, 0.3, 0.5, 0.8)` m
+     past the disappearance (first that hits; `_first_hit`, outline by `_anchor_outline` as for turn anchors), else
+     the nameable blob hiding the end. Stop row `{"type": "behind", "relation": "behind", "object": X}`. No
+     nameable X → the route is dropped, reason **`no_behind_anchor`** (expected ~6% of routes).
+  3. **visible end**: `stop_phrase` as today, except that a stop that would be "well past X" first tries the near
+     rule with radius `REANCHOR_M = 1.5` m instead of `STOP_NEAR_M = 1.0` m ("in front of / just past Y", a
+     wall-like Y only "in front of"); if nothing fits it stays "well past X".
+- Behind and turn endings store `disappear_arc_m` in the stop row. Obstacle events with `arc_m >
+  hidden_from_arc_m` are dropped (the text describes what is visible); a turn before the disappearance stays an
+  event and the ending follows it.
+- `EVENTS_SCHEMA = "d2-endings"`; `REASONS` gains `no_behind_anchor`. Expected on train: ~16.4k behind / turn
+  endings, ~4.7k visible stops (a few hundred re-anchored), ~1.2k new drops.
+
+### T2.2 Text (`descriptions.py`)
+
+- **Template**: behind → "…, then proceed behind it." when X is the last object of the last event in the body, else
+  "…, then proceed behind the X."; with no events "Go straight ahead, then proceed behind the X." A turn ending is
+  the body alone ("…, then turn right behind the table."). Visible stops: `stop_text` unchanged.
+- **Rewrite** (CPU, in `d2-seed`) of a reused d1 text whose events are unchanged and whose stop became behind, when
+  X has a d1 name: cut the text's final stop clause (its last "stop" to the end, plus the connector before it:
+  ", then" / ", and then" / ", and" / " and" / ". Then" / ". ") keeping the text's own end punctuation ("?" in question
+  styles), and append ", then <verb> behind it / the <name of X>". The verb is chosen by a stable hash of the route
+  id from {proceed, continue, carry on, go on}. The result must pass `description_rejects` with the new stop;
+  otherwise (or when no stop clause is found) the route is composed. Rows are tagged `"rewritten_from": "d1"`.
+- **Buckets** (`d2-seed`): *reuse* = events and stop identical to d1 (as today); *rewrite* = above; *compose* =
+  turn routes, re-anchored visible stops, routes whose events changed, X without a d1 name, failed rewrites.
+  Estimate: train reuse ~4.4k, rewrite ~12–13k, compose ~4–5k (~5–6 h Cosmos); eval ~10% of that. `seed_meta.json`
+  gains `rewritten`, `rewrite_failed` (by reason); `events_{split}_changed.jsonl` holds the compose bucket only.
+- **Compose prompt d5**: the stop line becomes an ending line — "end with: then proceed behind <X>" / "end with the
+  turn" / today's stop line — and for behind and turn endings "do not say where it stops".
+- **Rejects**: a behind ending needs "behind" and X's name (or "it" when X is an object of the last step, as the
+  turn pronoun rule) in the last clause, and no `\bstop` anywhere (`ending:stop_word`); a turn ending keeps the turn
+  rejects and also forbids `\bstop`; amount words only for visible distance stops (unchanged). Finalize re-checks
+  every text, reused and rewritten included.
+
+### T2.3 Eval (`eval.py`)
+
+- `desc_check` gains `ending`: `{"type": "stop"}`, `{"type": "behind", "outline": <X's image polygon>}` or
+  `{"type": "turn"}`.
+- `description_follow`: **stop** unchanged (last waypoint within `STOP_TOL_UV` of the GT end). **behind**: the
+  prediction ends with v = 0 and the first waypoint of its final v = 0 run lies inside X's outline dilated by
+  `STOP_TOL_UV` ("it went out of sight behind X"; where the hidden tail ends is not judged). **turn**: no ending
+  check beyond the turn event's own. `follows` = every event and the ending.
+- Metrics: `stop_rate` over visible-stop records only; new `behind_rate`, `ending_rate`, and `by_ending` (stop /
+  behind / turn: n, follow rate, GT ceiling, endpoint error median, constant-goal median of the group). Endpoint
+  metrics are unchanged (the GT is the full route).
+- **Ceiling check before any GPU job**: on the v4 eval split the GT paths pass their own behind check at
+  `gt_follow_rate ≥ 0.95`. If the 10-waypoint resampling puts the GT's first hidden waypoint too far past X's edge,
+  the tested point changes (e.g. the midpoint of the last visible and first hidden waypoints), not the tolerance.
+
+### T2.4 Steering (`steering.py`)
+
+- Every cut gets its own `hidden_from_arc_m` from its answer's `first_blocker` flags and is described with T2.1.
+  `stop_key` becomes the ending key: ("stop", relation, amount, object) / ("behind", X) / ("turn",).
+- Visible stop A vs behind B: valid and exclusive (A ends in view, so fails B's behind check; B ends ≥ `MIN_SEP_UV`
+  away, so fails A's stop). Two cuts behind the same X: same text → `same_text`.
+- **Hidden-turn pairs disappear**: A_turn just before a hidden turn reads "proceed behind X", which B_turn also
+  follows, so the pair is not exclusive. The turn slice keeps visible-turn pairs only. Gate 0 (≥ 50 turn pairs) was
+  already expected to fail (~52 viewpoints) and stays the user's decision. Not done: giving "behind" a "no turn"
+  condition (the text does not say "straight").
+- The rebuild runs after training, as before; its CPU stage prints pairs per slice next to the previous numbers.
+
+### T2.5 Gates and run order
+
+| # | Step | Where | Gate |
+|---|---|---|---|
+| 1 | back up v4 events to `data/prepared_habitat_instr_v4/events_d2turns_backup/`; `events` into v4 | CPU | counts by ending and reason |
+| 2 | ending ceilings on eval GT (stop / behind / turn) | CPU | behind `gt_follow_rate ≥ 0.95` |
+| 3 | `d2-seed --force` | CPU | reuse / rewrite / compose counts, Cosmos hours |
+| 4 | **G1e ending audit** (`audit_instruction_labels.py --mode endings`, seed 0): 30 behind endings shown with the actual rewritten sentence, 15 hidden-turn endings, 15 visible stops (10 re-anchored + 5 unchanged), 10 `no_behind_anchor` drops; FPV with route (hidden part dashed) and X outlined. Marks: true / wrong object / should stop in view / wording broken / can't tell | human | **≥ 90% true**, "can't tell" counts as not true |
+| 5 | G2 label gate: `ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch` (compose bucket of eval) | GPU, ask first | accept ≥ 0.90, template ≤ 0.10 |
+| 6 | G3 audit on the gate output | human | ≥ 90% |
+| 7 | full labels (`STAGE=full`; ~5–6 h, possibly two resumed jobs) → `finalize-descriptions --round d2` → train d2 (~6 h) → eval d1 + d2 on v4 with path videos → steering rebuild (Gate 0) → report | GPU, ask before each | as in the d2 spec |
+
+**Success criteria added by T2** (the d2 spec's still hold): G1e ≥ 90% true; behind GT ceiling ≥ 0.95; on v4 eval
+(entry form) d2's `ending_rate` and `behind_rate` beat d1's (d1 never saw "proceed behind": its rate is the
+text-blind floor), with the 95% CI of the difference excluding 0; per-ending endpoint error reported against the
+constant goal of that group.
+
+**Files touched (T2)**: `route_events.py` (ending, `hidden_from_arc_m`, re-anchor, schema),
+`descriptions.py` (template endings, rewrite, rejects, seed buckets, prompt d5, `desc_check` ending), `eval.py`
+(behind check, `by_ending`), `steering.py` (per-cut hidden flags, ending key), `scripts/prepare_habitat_instr.py`
+(`events` reads fpv flags, endings ceiling stage, `d2-seed` rewrite bucket), `scripts/audit_instruction_labels.py`
+(`--mode endings`), README run book (index-only commits).
+
+**Testing** (test-first, CPU, synthetic grids as in the d2 plan): fpv index → arclength; blip merging and the final
+disappearance of a route that reappears; behind X from the disappearance, fallback to the end's occluder,
+`no_behind_anchor`; hidden turn after the disappearance → turn ending; obstacle event after the disappearance
+dropped; visible "well past" re-anchored at 1.2 m, wall-like only "in front of"; template endings (it / the X / no
+events); rewrite on each connector form, a question-style text, a text with no stop clause, a rewrite failing
+rejects; rejects `ending:stop_word` and the pronoun rule; seed buckets; behind check (inside / outside the outline /
+ends visible), turn ending with no stop component, `by_ending`; steering ending key, visible-vs-behind exclusive,
+hidden-turn pair not exclusive.
+
+**Risks.** The behind check leans on the model's v flags (d1 `path_visibility_acc` 0.87). ~7% of hidden-end routes
+lose an out-of-sight event from their text. Rewritten endings use four verbs in one frame (G1e and G3 read them).
+On ~12% of routes the fpv path and our 0.8 m projection differ by > 10 px (known issue above): X's outline and the
+GT's first hidden waypoint can disagree there, which step 2 measures. Hidden-turn steering pairs are gone.
+
+Plan: `docs/superpowers/plans/2026-10-14-d2-endings.md`.
