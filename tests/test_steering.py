@@ -547,3 +547,41 @@ def test_report_rows_per_slice(tmp_path):
     cells = vs.metric_cells(tmp_path, ["d2"])
     assert [c["slice"] for c in cells] == ["all", "stop", "turn"]
     assert cells[2]["steering"]["pair_success"] == 0.0
+
+
+from rover_vlm.route_events import describe_xz, hidden_tail_m  # noqa: E402
+
+
+def test_stop_key_is_the_ending_key():
+    assert st.stop_key({"type": "behind", "relation": "behind", "object": "f:b1"}) == ("behind", "f:b1")
+    assert st.stop_key({"type": "turn", "relation": None, "object": None}) == ("turn",)
+    assert st.stop_key({"type": "near", "relation": "in front of", "amount": None, "object": "f:b2"}) == \
+        ("stop", "in front of", None, "f:b2")
+
+
+def test_a_cut_that_ends_out_of_sight_ends_behind_what_hides_it(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    box = f"{frame.name}:b{int(frame.lab[25, 55])}"                       # box A
+    _, cut = [c for c in st.cuts(STOP_ROUTE) if c[0] == 0.8][0]
+    d = describe_xz(meta, frame, cut, hidden_tail=hidden_tail_m(st.hidden_flags(frame, cut)))
+    assert d["reason"] is None
+    assert [(e["type"], e["side"]) for e in d["events"]] == [("pass", "left")]
+    assert (d["stop"]["type"], d["stop"]["object"]) == ("behind", box)
+    pairs, _ = st.stop_pairs(frame, meta, STOP_ROUTE)
+    mixed = [p for p in pairs if {r["desc"]["stop"]["type"] == "behind" for r in p["routes"]} == {True, False}]
+    assert mixed and all(st.exclusive(*p["routes"]) for p in mixed)       # "stop here" vs "go on behind box A"
+
+
+def test_a_hidden_turn_pair_is_not_exclusive():
+    # A_turn ends out of sight behind X; B_turn goes out of sight there too and turns left: B follows A's text.
+    out = [[0.4, 0.4], [0.6, 0.4], [0.6, 0.75], [0.4, 0.75]]
+    objects = {"f:b1": {"cells_xz": [[2.5, 2.2]], "polygon": out}}
+    base = {"pose_xz": [2.5, 0.2], "heading_xz": [0.0, 1.0], "goal_xz": [2.5, 4.0], "objects": objects}
+    a = {"path": [[0.5, 1.0, 1], [0.5, 0.8, 1], [0.5, 0.7, 0], [0.45, 0.62, 0]],
+         "desc": {**base, "events": [], "stop": {"type": "behind", "relation": "behind", "object": "f:b1"}}}
+    turn = {"type": "turn", "side": "left", "relation": None, "objects": [], "turn_xz": [2.5, 3.0],
+            "pre_heading_xz": [0.0, 1.0], "gt_lateral_m": 2.0}
+    b = {"path": [[0.5, 1.0, 1], [0.5, 0.8, 1], [0.5, 0.7, 0], [0.45, 0.62, 0], [0.2, 0.6, 0]],
+         "desc": {**base, "events": [turn], "stop": {"type": "turn", "relation": None, "object": None}}}
+    assert not st.exclusive(a, b)

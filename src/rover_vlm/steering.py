@@ -10,7 +10,8 @@ described from the rover's pose, as d1's routes; its answer starts where the rou
 image (hidden stretches v = 0). A pair is kept only when each cut fails the other's description
 under the eval's own checker.
 d2 (2026-10-13): a turning GT route also gets two turn cuts (just before
-the turn, 1 m after it); that pair is the viewpoint's pair, slice "turn". Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
+the turn, 1 m after it); that pair is the viewpoint's pair, slice "turn".
+d2 T2 (2026-10-14): a cut that ends out of sight ends "behind" what hides it (or with its hidden turn), so a pair before and after a hidden turn is no longer exclusive. Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-10-07-steering-eval-design.md
 """
 
 import copy
@@ -27,7 +28,7 @@ from .habitat_data import clip_polyline_unit, format_answer_goal, resample_with_
 from .instructions import head_noun
 from .landmarks import CAM_HEIGHT_M, MIN_FWD_M, densify
 from .route_events import (MIN_AREA, MIN_VISIBLE_CELLS, ROUTE_STEP_M, WALL_EXTENT_M, _blob_cells, describe_xz,
-                           detect_turn, first_blocker, load_frame, object_outline, visible_cells)
+                           detect_turn, first_blocker, hidden_tail_m, load_frame, object_outline, visible_cells)
 
 MIN_ROUTE_M = 1.5
 MIN_SEP_UV = 0.1
@@ -84,7 +85,18 @@ def _rounded(xz):
 
 
 def stop_key(stop):
-    return stop["type"], stop["relation"], stop.get("amount"), stop.get("object")
+    """A cut's ending key (d2 T2): two cuts with the same key and the same steps say the same thing."""
+    if stop["type"] == "behind":
+        return "behind", stop["object"]
+    if stop["type"] == "turn":
+        return ("turn",)
+    return "stop", stop["relation"], stop.get("amount"), stop.get("object")
+
+
+def hidden_flags(frame, route_xz):
+    """One flag per point of the route densified at ROUTE_STEP_M (True = an occupied cell between it and the camera),
+    the flags answer_path gives the answer's waypoints: a cut's ending is decided on the same flags (d2 T2)."""
+    return [first_blocker(frame, p) is not None for p in densify(np.asarray(route_xz, float), ROUTE_STEP_M)]
 
 
 def load_names(primary_rows, fallback_rows):
@@ -166,7 +178,7 @@ def stop_pairs(frame, meta, route_xz, turn=None):
     if not made:
         reasons["route_too_short"] += 1
     for f, cut, is_turn in made:
-        desc = describe_xz(meta, frame, cut, turn=turn)
+        desc = describe_xz(meta, frame, cut, turn=turn, hidden_tail=hidden_tail_m(hidden_flags(frame, cut)))
         if desc["reason"]:
             reasons[f"cut:{desc['reason']}"] += 1
             continue
