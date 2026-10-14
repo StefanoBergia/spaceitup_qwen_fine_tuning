@@ -704,7 +704,7 @@ def test_wall_egocentric_form_survives_the_right_adverb_blanking():
 def test_compose_prompt_d2_direction_paragraph():
     from rover_vlm.descriptions import PROMPT_VERSION
     p = " ".join(compose_prompt([WALL_L, PASS2], W_NEAR, NAMES, "a polite request", "one sentence").split())
-    assert PROMPT_VERSION == "d4"
+    assert PROMPT_VERSION == "d5"
     assert (
         "Keep every step in this order and keep each object's name. Copy each step's direction words exactly as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of' / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add one. In a 'turn left' / 'turn right' step, keep 'turn left' / 'turn right' exactly (it is the rover's own turn) and keep its 'behind' / 'round' and its object; never add a turn the steps do not have. Keep where to stop."
     ) in p
@@ -914,7 +914,7 @@ def test_turn_templates():
 
 
 def test_compose_prompt_d4_carries_the_turn_step_and_rule():
-    assert PROMPT_VERSION == "d4"
+    assert PROMPT_VERSION == "d5"
     p = compose_prompt([PASS_R6, TURN_BEHIND6], NEAR, NAMES, "plain", "one sentence")
     assert "2. turn left behind the table" in p
     assert "'turn left' / 'turn right'" in p and "never add a turn" in p

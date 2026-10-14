@@ -1,4 +1,4 @@
-"""Route descriptions (prompt d4 since d2; d2 / d1 before): turning geometry's events into checked sentences.
+"""Route descriptions (prompt d5 since d2 T2; d4 / d1 before): turning geometry's events into checked sentences.
 
 rover_vlm.route_events finds what a route passes and where it stops. This module holds the
 canonical template sentence, the text rules every description must pass (all names present
@@ -42,6 +42,7 @@ _PRONOUN = re.compile(r"\b(?:it|them)\b", re.I)
 # event, never to the next name, and is claimed BEFORE _RIGHT_ADVERB blanks "right after" (Review Focus 1).
 _TURN = re.compile(r"\bturn(?:s|ed|ing)?\s+(?:to\s+(?:the|your)\s+)?(left|right)\b", re.I)
 TURN_RELATION_WORDS = {"behind": r"\bbehind\b", "round": r"\b(?:a)?round\b"}
+_BEHIND = re.compile(r"\bbehind\b", re.I)
 # The words that say each stop relation. The stop clause (the text after the last stop word)
 # must hold one of its own relation's words, so a swapped relation ("a little before the
 # armchair" for a past stop) is rejected as stop:relation. after_last is checked by _AFTER.
@@ -104,6 +105,14 @@ def _stop_line(events, stop, names, kinds=None):
     return stop_text(stop, names.get(stop["object"]), _is_wall(stop["object"], events, kinds))
 
 
+def behind_clause(events, stop, names, verb="proceed"):
+    """The behind ending (d2 T2): '<verb> behind it' when the ending object is the last object of the last step,
+    else '<verb> behind the <name>'."""
+    last = events[-1]["objects"] if events else []
+    target = "it" if last and last[-1] == stop["object"] else f"the {names[stop['object']]}"
+    return f"{verb} behind {target}"
+
+
 def template_description(events, stop, names, kinds=None):
     """The canonical sentence for a route; always passes description_rejects. `kinds` (object
     id -> kind_hint) marks walls inside a `between` for the "past the end of the wall" stop."""
@@ -111,7 +120,12 @@ def template_description(events, stop, names, kinds=None):
     body = ", then ".join(parts) if parts else "go straight ahead"
     if events and events[0]["type"] == "turn":
         body = "go ahead, then " + body              # the route runs straight before it turns (route_events)
-    text = f"{body}, and {_stop_line(events, stop, names, kinds)}."
+    if stop["type"] == "turn":
+        text = f"{body}."                                    # the hidden turn is the ending (d2 T2)
+    elif stop["type"] == "behind":
+        text = f"{body}, then {behind_clause(events, stop, names)}."
+    else:
+        text = f"{body}, and {_stop_line(events, stop, names, kinds)}."
     return text[0].upper() + text[1:]
 
 
@@ -210,6 +224,22 @@ def turn_rejects(text, events):
     return out
 
 
+def ending_rejects(text, stop):
+    """The ending rules that need no names (finalize re-checks reused and rewritten texts with them, d2 T2): a behind
+    or turn ending never says where the route stops, and a behind ending says "behind"."""
+    if stop is None or stop["type"] not in ("behind", "turn"):
+        return []
+    out = ["ending:stop_word"] if _STOP.search(text or "") else []
+    if stop["type"] == "behind" and not _BEHIND.search(text or ""):
+        out.append("ending:behind")
+    return out
+
+
+def d2_rejects(text, ev):
+    """finalize's re-check of a d2 text against its events row: the turn rules and the ending rules."""
+    return turn_rejects(text, ev["events"]) + ending_rejects(text, ev.get("stop"))
+
+
 def description_rejects(text, events, stop, names):
     """Why a description is unusable for these events; [] when it is fine."""
     if not text:
@@ -235,28 +265,41 @@ def description_rejects(text, events, stop, names):
             out.append(f"between:missing:{i}")
         if e["type"] == "through" and not re.search(r"\bthrough\b", text, re.I):
             out.append(f"through:missing:{i}")
-    stops = list(_STOP.finditer(text))
-    clause = stops[-1].end() if stops else len(text)        # the stop clause: text after the stop word
-    if stop["object"]:
-        m = _find_name(text, names[stop["object"]], pos)
-        if m is None and events and stop["object"] in events[-1]["objects"] and clause >= pos:
-            m = _PRONOUN.search(text, clause)                # "...right of the sofa, then stop past it"
-        if m is None:
-            out.append("stop:name")
-        else:
-            spans.append((m.start(), m.end(), "stop"))
-    if not stops:
-        out.append("stop:missing")
+    if stop["type"] in ("behind", "turn"):
+        out += ending_rejects(text, stop)
+        if stop["type"] == "behind":
+            hits = list(_BEHIND.finditer(text))
+            start = hits[-1].end() if hits else len(text)
+            m = _find_name(text, names[stop["object"]], start)
+            if m is None and events and stop["object"] in events[-1]["objects"]:
+                m = _PRONOUN.search(text, start)                 # "...right of the sofa, then carry on behind it"
+            if m is None:
+                out.append("ending:name")
+            else:
+                spans.append((m.start(), m.end(), "stop"))
     else:
-        words = STOP_RELATION_WORDS.get((stop["type"], stop["relation"]))
-        if words and not _words_re(words).search(text, clause):
-            out.append("stop:relation")
-    if stop["type"] == "after_last" and not _AFTER.search(text):
-        out.append("stop:after")
-    if stop["type"] == "distance":
-        words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
-        if not words or not stops or not _words_re(words).search(text, clause):
-            out.append("stop:amount")
+        stops = list(_STOP.finditer(text))
+        clause = stops[-1].end() if stops else len(text)        # the stop clause: text after the stop word
+        if stop["object"]:
+            m = _find_name(text, names[stop["object"]], pos)
+            if m is None and events and stop["object"] in events[-1]["objects"] and clause >= pos:
+                m = _PRONOUN.search(text, clause)                # "...right of the sofa, then stop past it"
+            if m is None:
+                out.append("stop:name")
+            else:
+                spans.append((m.start(), m.end(), "stop"))
+        if not stops:
+            out.append("stop:missing")
+        else:
+            words = STOP_RELATION_WORDS.get((stop["type"], stop["relation"]))
+            if words and not _words_re(words).search(text, clause):
+                out.append("stop:relation")
+        if stop["type"] == "after_last" and not _AFTER.search(text):
+            out.append("stop:after")
+        if stop["type"] == "distance":
+            words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
+            if not words or not stops or not _words_re(words).search(text, clause):
+                out.append("stop:amount")
     # the turn phrase's side word is the turn's: blank it (same length, spans stay valid) before side ownership
     side_text = _TURN.sub(lambda m: " " * len(m.group(0)), text)
     return out + turn_rejects(text, events) + _side_rejects(side_text, events, spans)
@@ -296,7 +339,7 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d4"
+PROMPT_VERSION = "d5"
 
 # d1 speaking styles: the shared STYLES minus the "why or where it leads" one (audit of gate r2: both
 # unnatural labels came from it), plus a step-by-step one. The shared STYLES (i4) is unchanged.
@@ -388,21 +431,33 @@ def choose_shape(route_id):
     return SHAPES[_stable_index("shape:" + route_id, len(SHAPES))]
 
 
+ENDING_RULES = {
+    "behind": "End with the route going on behind the {name} (proceed, continue, carry on or go on behind it); "
+              "never say where it stops.",
+    "turn": "End with the turn; never say where it stops.",
+}
+
+
 def compose_prompt(events, stop, names, style, shape, kinds=None):
     steps = "\n".join(f"{i + 1}. {event_phrase(e, [names[o] for o in e['objects']])}" for i, e in enumerate(events))
     steps = steps or "1. go straight ahead"
+    if stop["type"] == "turn":
+        then, keep = "", ENDING_RULES["turn"]
+    elif stop["type"] == "behind":
+        name = names[stop["object"]]
+        then, keep = f"\nThen: proceed behind the {name}.", ENDING_RULES["behind"].format(name=name)
+    else:
+        then, keep = f"\nThen: {_stop_line(events, stop, names, kinds)}.", "Keep where to stop."
     return f"""You are writing a route description for a small rover, the way a person standing behind
 it would say it. The route, in order:
-{steps}
-Then: {_stop_line(events, stop, names, kinds)}.
+{steps}{then}
 
 Write it as {style}, in {shape}. Keep every step in this order and keep each object's name. Copy each step's direction words exactly
 as written: in a 'keep the ... on your left/right' step, 'on your left' / 'on your right' stays that
 way, whatever the thing is (a wall, a sofa, a counter); in a 'go left of / right of' step, 'left of'
 / 'right of' stays that way; a step with 'between' or 'through' has no left or right, so do not add
 one. In a 'turn left' / 'turn right' step, keep 'turn left' / 'turn right' exactly (it is the rover's own
-turn) and keep its 'behind' / 'round' and its object; never add a turn the steps do not have. Keep where
-to stop. You may add small words
+turn) and keep its 'behind' / 'round' and its object; never add a turn the steps do not have. {keep} You may add small words
 ("then", "carefully", "keep going"), but add no other objects, sides or directions.
 Write numbers as words. At most 45 words.
 
