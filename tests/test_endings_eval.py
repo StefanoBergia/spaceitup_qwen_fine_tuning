@@ -24,6 +24,15 @@ def test_behind_followed():
     assert behind_followed([[0.5, 1.0, 1], [0.62, 0.65, 0]], BOX) == 1                   # within the 0.03 dilation
 
 
+def test_behind_followed_tests_any_waypoint_of_the_final_hidden_run():
+    # CPU ceiling 2026-10-14: the GT's FIRST hidden waypoint misses X's outline on ~10% of routes (it goes out of sight
+    # just past the outline's edge); any waypoint of the final hidden run within 0.03 passes 0.955 eval / 0.968 train.
+    from rover_vlm.eval import BEHIND_POINT
+    path = [[0.5, 1.0, 1], [0.75, 0.8, 1], [0.7, 0.7, 0], [0.55, 0.6, 0]]   # out of sight right of the box, then behind it
+    assert BEHIND_POINT == "any_hidden"
+    assert behind_followed(path, BOX) == 1 and behind_followed(path, BOX, point="first_hidden") == 0
+
+
 def test_behind_followed_midpoint():
     path = [[0.5, 1.0, 1], [0.5, 0.75, 1], [0.5, 0.45, 0]]     # first hidden waypoint above the box
     assert behind_followed(path, BOX) == 0 and behind_followed(path, BOX, point="midpoint") == 1

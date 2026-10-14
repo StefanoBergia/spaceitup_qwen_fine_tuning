@@ -434,6 +434,10 @@ event 86%, the blob hiding the end 88%; 7% of routes have an obstacle event afte
 - **Ceiling check before any GPU job**: on the v4 eval split the GT paths pass their own behind check at
   `gt_follow_rate ≥ 0.95`. If the 10-waypoint resampling puts the GT's first hidden waypoint too far past X's edge,
   the tested point changes (e.g. the midpoint of the last visible and first hidden waypoints), not the tolerance.
+- **Ceiling result (2026-10-14, after the events rerun).** First hidden waypoint: 0.898 eval / 0.885 train (FAIL); the
+  GT mostly goes out of sight 0.03–0.05 uv past the outline's edge (outlines are tighter than the silhouette), a few
+  routes dip behind a nearer object first. Midpoint: the same. **Decision (user): the tested point is any waypoint of
+  the final hidden run** (`BEHIND_POINT = "any_hidden"`, tolerance unchanged at 0.03): 0.955 eval / 0.968 train, PASS.
 
 ### T2.4 Steering (`steering.py`)
 

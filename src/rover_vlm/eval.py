@@ -660,10 +660,12 @@ STOP_TOL_M = 0.75      # floor fallback only: predicted end within this of goal_
 # image units, ~15 px at 512) is a chosen tolerance, not a fitted one.
 STOP_TOL_UV = 0.03
 
-# d2 T2: a behind ending is followed when the path goes out of sight inside the object's outline; the tested point is
-# the first waypoint of its final hidden run ("first_hidden") or the midpoint of that and the last visible one
-# ("midpoint"). The CPU ceiling stage (prepare_habitat_instr.py endings-check) reports both; keep the one >= 0.95.
-BEHIND_POINT = "first_hidden"
+# d2 T2: a behind ending is followed when the path ends out of sight and its final hidden run is behind the object:
+# "any_hidden" = any waypoint of that run inside the outline (dilated by tol); "first_hidden" = its first waypoint;
+# "midpoint" = the midpoint of that and the last visible one. CPU ceiling 2026-10-14 (endings-check, GT paths, tol 0.03):
+# first_hidden 0.898 eval / 0.885 train (the GT goes out of sight just past the outline's edge), any_hidden 0.955 /
+# 0.968 -> any_hidden (user, 2026-10-14; the spec's fallback: change the tested point, not the tolerance).
+BEHIND_POINT = "any_hidden"
 
 
 def point_polygon_distance(p, polygon):
@@ -686,8 +688,8 @@ def point_polygon_distance(p, polygon):
 
 def behind_followed(path, outline, tol=STOP_TOL_UV, point=None):
     """1 when an image path ([x, y, v] waypoints) goes out of sight behind an object: its last waypoint is hidden
-    (v = 0) and the BEHIND_POINT of its final hidden run lies inside `outline` dilated by tol. Where the hidden tail
-    ends is not judged. Malformed paths or outlines give 0."""
+    (v = 0) and the BEHIND_POINT of its final hidden run (default: any of its waypoints) lies inside `outline` dilated
+    by tol. Where the hidden tail ends is not judged. Malformed paths or outlines give 0."""
     point = point or BEHIND_POINT
     try:
         if not path or len(path[-1]) < 3 or int(path[-1][2]) != 0:
@@ -695,6 +697,8 @@ def behind_followed(path, outline, tol=STOP_TOL_UV, point=None):
         k = len(path) - 1
         while k > 0 and len(path[k - 1]) >= 3 and int(path[k - 1][2]) == 0:
             k -= 1
+        if point == "any_hidden":
+            return int(min(point_polygon_distance(w[:2], outline) for w in path[k:]) <= tol)
         q = np.asarray(path[k][:2], float)
         if point == "midpoint" and k > 0:
             q = (q + np.asarray(path[k - 1][:2], float)) / 2
