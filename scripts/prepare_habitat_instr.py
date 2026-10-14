@@ -78,7 +78,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 from rover_vlm.descriptions import (
-    as_form, finalize_descriptions, route_objects, seed_d2_labels, shuffled_texts, turn_rejects)
+    as_form, finalize_descriptions, route_objects, seed_d2_labels, shuffled_texts, d2_rejects)
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
@@ -553,7 +553,7 @@ def stage_finalize_descriptions(args):
         events = {r["id"]: r for r in map(json.loads, (events_dir / f"events_{name}.jsonl").open())}
         objects = {o["object_id"]: o for o in map(json.loads, (events_dir / f"objects_{name}.jsonl").open())}
         desc = _label_rows([desc_path(args.labels, name, args.desc_suffix, args.round)])
-        out = finalize_descriptions(recs, events, desc, objects, recheck=turn_rejects if d2 else None)
+        out = finalize_descriptions(recs, events, desc, objects, recheck=d2_rejects if d2 else None)
         if out["stats"]["unlabelled"] > 0.01 * max(1, out["stats"]["records"] - out["stats"]["dropped_geometry"]) \
                 and not args.allow_missing:
             raise SystemExit(f"{name}: {out['stats']['unlabelled']} described routes have no label row (> 1%) — "

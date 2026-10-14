@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from rover_vlm.descriptions import finalize_descriptions, same_description_geometry, seed_d2_labels, turn_rejects
+from rover_vlm.descriptions import finalize_descriptions, same_description_geometry, seed_d2_labels, d2_rejects
 
 _SPEC = importlib.util.spec_from_file_location(
     "prepare_habitat_instr", Path(__file__).resolve().parent.parent / "scripts" / "prepare_habitat_instr.py")
@@ -96,7 +96,7 @@ def test_finalize_recheck_drops_a_reused_text_that_breaks_a_d2_rule():
     ev = {"a": {**_row("a", [PASS]), "pose_xz": [0, 0], "heading_xz": [0, 1], "goal_xz": [0, 3]}}
     objects = {"f:b1": {"cells_xz": [[0.5, 1.0]]}}
     bad = {"a": {"id": "a", "passed": True, "description": "Go left of the sofa, then turn right.", "instruction_source": "cosmos"}}
-    out = finalize_descriptions([rec], ev, bad, objects, recheck=turn_rejects)
+    out = finalize_descriptions([rec], ev, bad, objects, recheck=d2_rejects)
     assert out["stats"]["recheck_failed"] == 1 and out["kept"] == []
     assert finalize_descriptions([rec], ev, bad, objects)["stats"]["kept"] == 1          # d1 behaviour unchanged
 

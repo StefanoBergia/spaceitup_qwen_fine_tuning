@@ -659,6 +659,48 @@ STOP_TOL_M = 0.75      # floor fallback only: predicted end within this of goal_
 # round-4 answers end at goal_uv_norm, which is not the projection of goal_xz. 0.03 (normalised
 # image units, ~15 px at 512) is a chosen tolerance, not a fitted one.
 STOP_TOL_UV = 0.03
+
+# d2 T2: a behind ending is followed when the path goes out of sight inside the object's outline; the tested point is
+# the first waypoint of its final hidden run ("first_hidden") or the midpoint of that and the last visible one
+# ("midpoint"). The CPU ceiling stage (prepare_habitat_instr.py endings-check) reports both; keep the one >= 0.95.
+BEHIND_POINT = "first_hidden"
+
+
+def point_polygon_distance(p, polygon):
+    """Image distance from p to a polygon (0 inside); inf for a polygon with fewer than 3 vertices."""
+    P = np.asarray(polygon if polygon is not None else [], float).reshape(-1, 2)
+    if len(P) < 3:
+        return float("inf")
+    x, y = float(p[0]), float(p[1])
+    inside = False
+    for (x1, y1), (x2, y2) in zip(P, np.roll(P, -1, axis=0)):
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    if inside:
+        return 0.0
+    ab = np.roll(P, -1, axis=0) - P
+    ap = np.array([x, y]) - P
+    t = np.clip((ap * ab).sum(1) / np.maximum((ab * ab).sum(1), 1e-12), 0.0, 1.0)
+    return float(np.min(np.linalg.norm(ap - t[:, None] * ab, axis=1)))
+
+
+def behind_followed(path, outline, tol=STOP_TOL_UV, point=None):
+    """1 when an image path ([x, y, v] waypoints) goes out of sight behind an object: its last waypoint is hidden
+    (v = 0) and the BEHIND_POINT of its final hidden run lies inside `outline` dilated by tol. Where the hidden tail
+    ends is not judged. Malformed paths or outlines give 0."""
+    point = point or BEHIND_POINT
+    try:
+        if not path or len(path[-1]) < 3 or int(path[-1][2]) != 0:
+            return 0
+        k = len(path) - 1
+        while k > 0 and len(path[k - 1]) >= 3 and int(path[k - 1][2]) == 0:
+            k -= 1
+        q = np.asarray(path[k][:2], float)
+        if point == "midpoint" and k > 0:
+            q = (q + np.asarray(path[k - 1][:2], float)) / 2
+        return int(point_polygon_distance(q, outline) <= tol)
+    except (TypeError, ValueError, IndexError):
+        return 0
 # A pass this close is a graze: its side flips between a dense and a sparse path, so it counts
 # as satisfied whichever side it lands on.
 PASS_TIE_M = 0.15
@@ -755,13 +797,21 @@ def description_follow(pred_path, check, gt_end_uv=None, stop_tol_uv=STOP_TOL_UV
     """Did a predicted path do what its description says? Per event and the stop.
 
     With `gt_end_uv` (the record's GT terminus, image [x, y]) the stop is the path's last
-    waypoint within stop_tol_uv of it; without it, the floor check against goal_xz."""
+    waypoint within stop_tol_uv of it; without it, the floor check against goal_xz.
+    The ending (desc_check "ending", d2 T2; default a stop): a stop as above, "behind" by behind_followed on the
+    object's outline, a "turn" ending adds no check (its turn event is the check). "stop" in the result is the
+    ending's result."""
     floor = _floor_path(pred_path, check)
     n = len(check["events"])
     if len(floor) < 2:
         return {"follows": 0, "events": [0] * n, "stop": 0}
     res = [_event_followed(floor, e) for e in check["events"]]
-    if gt_end_uv is not None:
+    kind = (check.get("ending") or {}).get("type", "stop")
+    if kind == "behind":
+        stop = behind_followed(pred_path, check["ending"].get("outline"), stop_tol_uv)
+    elif kind == "turn":
+        stop = 1
+    elif gt_end_uv is not None:
         end = np.asarray(pred_path[-1][:2], float)
         stop = int(np.linalg.norm(end - np.asarray(gt_end_uv[:2], float)) <= stop_tol_uv)
     else:
@@ -777,6 +827,14 @@ def _gt_end_uv(rec):
     return gt["goal"][:2] if gt.get("goal") else None
 
 
+def _ending_result(chk, f):
+    """(ending type, 0/1): a turn ending's result is its turn event's; others are description_follow's "stop"."""
+    kind = (chk.get("ending") or {}).get("type", "stop")
+    if kind == "turn":
+        return kind, next((ok for e, ok in zip(chk["events"], f["events"]) if e["type"] == "turn"), 0)
+    return kind, f["stop"]
+
+
 def aggregate_description_metrics(records):
     """Summary for records carrying habitat_meta.desc_check, else None. Unparseable
     predictions count as not followed and stay in every denominator. gt_follow_rate runs
@@ -784,7 +842,8 @@ def aggregate_description_metrics(records):
     rows = [r for r in records if (r.get("habitat_meta") or {}).get("desc_check")]
     if not rows:
         return None
-    follows, stops, by_type, pairs, gt_follows, gt_by_id = {}, [], {}, {}, [], {}
+    follows, by_type, pairs, gt_follows, gt_by_id = {}, {}, {}, [], {}
+    endings, gt_endings = {}, {}
     for r in rows:
         chk = r["habitat_meta"]["desc_check"]
         path = (r.get("parsed") or {}).get("path")
@@ -795,7 +854,9 @@ def aggregate_description_metrics(records):
             gt_by_id[r["id"]] = description_follow(r["gt"]["path"], chk, end)["follows"]
             gt_follows.append(gt_by_id[r["id"]])
         follows[r["id"]] = f["follows"]
-        stops.append(f["stop"])
+        endings[r["id"]] = _ending_result(chk, f)
+        if (r.get("gt") or {}).get("path"):
+            gt_endings[r["id"]] = _ending_result(chk, description_follow(r["gt"]["path"], chk, end))[1]
         for e, ok in zip(chk["events"], f["events"]):
             by_type.setdefault(e["type"], []).append(ok)
         if r["habitat_meta"].get("pair_id"):
@@ -816,12 +877,30 @@ def aggregate_description_metrics(records):
                 "point_error_median": float(np.median(pe)) if pe else None}
     full = [p for p in pairs.values() if len(p) == 2]
     goals = np.array([r["gt"]["goal"][:2] for r in rows if r.get("gt") and r.get("metrics")], float)
+
+    def _rate(kind=None):
+        v = [ok for k, ok in endings.values() if kind is None or k == kind]
+        return float(np.mean(v)) if v else None
+
+    mean_goal = goals.mean(0) if len(goals) else None
+
+    def _ending_group(kind):
+        rs = [x for x in rows if endings[x["id"]][0] == kind]
+        g = [np.asarray(x["gt"]["goal"][:2], float) for x in rs if x.get("gt") and x.get("metrics")]
+        gte = [gt_endings[x["id"]] for x in rs if x["id"] in gt_endings]
+        return {**_group(rs), "ending_rate": _rate(kind), "gt_ending_rate": float(np.mean(gte)) if gte else None,
+                "constant_goal_endpoint_error_median": (float(np.median(np.linalg.norm(np.array(g) - mean_goal, axis=1)))
+                                                        if g and mean_goal is not None else None)}
+
     ep = [r["metrics"]["goal_point_error"] for r in rows if r.get("metrics")]
     return {
         "n_records": len(rows),
         "follow_rate": float(np.mean(list(follows.values()))),
         "gt_follow_rate": float(np.mean(gt_follows)) if gt_follows else None,
-        "stop_rate": float(np.mean(stops)),
+        "stop_rate": _rate("stop"),
+        "behind_rate": _rate("behind"),
+        "ending_rate": _rate(),
+        "by_ending": {k: _ending_group(k) for k in sorted({k for k, _ in endings.values()})},
         "event_rate_by_type": {k: float(np.mean(v)) for k, v in sorted(by_type.items())},
         "by_turn": {k: _group(v) for k, v in split.items() if v},
         "n_pairs": len(full),

@@ -656,9 +656,20 @@ def prompt_form(sample_id):
 
 def desc_check(ev, objects):
     """What eval.description_follow needs, carried in the record (no file access at eval time). A turn
-    event also carries its turn point, pre-turn heading and the GT end's lateral offset (d2)."""
+    event also carries its turn point, pre-turn heading and the GT end's lateral offset (d2); the ending says how
+    the route ends (d2 T2)."""
     return {"pose_xz": ev["pose_xz"], "heading_xz": ev["heading_xz"], "goal_xz": ev["goal_xz"],
-            "events": [_check_event(e, objects) for e in ev["events"]]}
+            "events": [_check_event(e, objects) for e in ev["events"]],
+            "ending": _check_ending(ev.get("stop"), objects)}
+
+
+def _check_ending(stop, objects):
+    """The ending the eval checks (d2 T2): a stop in view, out of sight behind X (X's image outline), or a turn."""
+    if stop is None or stop["type"] not in ("behind", "turn"):
+        return {"type": "stop"}
+    if stop["type"] == "turn":
+        return {"type": "turn"}
+    return {"type": "behind", "outline": objects[stop["object"]]["polygon"]}
 
 
 def _check_event(e, objects):
@@ -692,7 +703,7 @@ def finalize_descriptions(label_recs, events_by_id, desc_by_id, objects, recheck
         if not row.get("passed"):
             rejected += 1
             continue
-        if recheck is not None and recheck(row["description"], ev["events"]):
+        if recheck is not None and recheck(row["description"], ev):
             rechecked += 1                    # d2: a reused d1 text that breaks a d2 rule (spec: finalize re-checks)
             continue
         form = prompt_form(rec["habitat_meta"]["sample_id"])
