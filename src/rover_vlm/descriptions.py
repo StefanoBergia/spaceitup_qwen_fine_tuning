@@ -411,7 +411,17 @@ def naming_image(image_path, polygon, crop_box, px=512):
     return buf.getvalue()
 
 
-def naming_prompt(need):
+def naming_prompt(need, version="n1"):
+    """The naming prompt: n1 (A5, today's) or n2 (naming fix, spec 2026-10-15: name what fills the outline, building parts
+    first, no furniture example for long blobs)."""
+    if version == "n1":
+        return _naming_prompt_n1(need)
+    if version == "n2":
+        return _naming_prompt_n2(need)
+    raise ValueError(f"unknown naming prompt version {version!r}")
+
+
+def _naming_prompt_n1(need):
     what = {"opening": "The outlined region is an opening the rover drives through (a doorway, an arch, a gap "
                        "between walls).",
             # final review I3: kind "wall" is any long blob the route runs alongside (median 2.7 m:
@@ -431,6 +441,32 @@ else dimmed. Right: a close-up of that region. {what}
    Name the whole thing the outline covers, not a small part on it (a handle, a switch, a socket, a leg).
 2. Say what kind of thing it is: "object" (furniture, an appliance, a column), "wall" (part of
    a wall) or "opening" (a doorway, an arch, a gap between walls).
+
+{_answer_block('{"name": "<name>", "kind": "object|wall|opening"}')}"""
+
+
+_N2_WHAT = {"opening": "an opening (a doorway, an arch, a gap between walls). The rover drives through it.",
+            "wall": "something long that the rover drives alongside or stops in front of."}
+
+
+def _naming_prompt_n2(need):
+    what = _N2_WHAT.get(need, "something the rover drives past.")
+    return f"""{SCENE_INTRO}
+
+The picture has two panels. Left: the camera view with one region outlined and everything
+else dimmed. Right: a close-up of that region. The outlined region is {what}
+
+1. Name the single thing that fills most of the outline, in 1 to 4 words, the way a person would
+   say it. Look at what is inside the outline, not at what is next to it or behind it.
+   If the outline is mostly part of the building, say which part ("white wall", "brick wall",
+   "stone column", "glass partition", "open doorway", "wooden door", "stair railing").
+   Name furniture or an appliance only if the outline is clearly on it ("grey sofa",
+   "kitchen island", "refrigerator"). Never use the words left or right, and never describe the
+   picture itself (outline, panel, close-up, dimming). Name the whole thing the outline covers,
+   not a small part on it (a handle, a switch, a socket, a leg).
+2. Say what kind of thing it is: "wall" (part of the building: a wall, a column or pillar, a door,
+   a partition, a railing), "object" (furniture, an appliance, any other object) or "opening"
+   (a doorway, an arch, a gap between walls).
 
 {_answer_block('{"name": "<name>", "kind": "object|wall|opening"}')}"""
 
@@ -501,14 +537,15 @@ def parse_compose_reply(raw):
     return None
 
 
-def label_object(ask, obj, seed, image=None):
-    """Name one object: up to two Cosmos calls (seed, seed + 1). Never raises on a bad reply."""
+def label_object(ask, obj, seed, image=None, name_prompt="n1"):
+    """Name one object: up to two calls (seed, seed + 1) with naming prompt `name_prompt`. Never raises on a bad reply."""
     need = obj["kind_hint"]
     image = image if image is not None else naming_image(obj["image"], obj["polygon"], obj["crop_box"] or obj["bbox"])
-    row = {"id": obj["object_id"], "need": need, "prompt_version": PROMPT_VERSION}
+    prompt = naming_prompt(need, name_prompt)
+    row = {"id": obj["object_id"], "need": need, "prompt_version": PROMPT_VERSION, "name_prompt": name_prompt}
     rejects, raws, fin, reply = ["parse"], [], None, None
     for attempt, s in enumerate((seed, seed + 1), 1):
-        raw, fin = ask(image, naming_prompt(need), s)
+        raw, fin = ask(image, prompt, s)
         raws.append(raw)
         reply = parse_name_reply(raw)
         rejects = ["parse"] if reply is None else name_rejects(reply["name"], reply["kind"], need)

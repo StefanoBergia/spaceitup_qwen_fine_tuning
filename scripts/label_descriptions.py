@@ -17,6 +17,7 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
     uv run scripts/label_descriptions.py --stage name --all-objects \
         --objects data/prepared_habitat_instr_v3/steer/objects_eval.jsonl \
         --out outputs/instr_labels_v3/names_steer_gemma_d1.jsonl --concurrency 8 --resume
+    #   --name-prompt n2: the naming-fix prompt (spec 2026-10-15); default n1
     #   --fallback-names OTHER_names.jsonl: used per route when --names leaves an object unnamed or two
     #   objects share a head noun ("name:clash"); rows carry "namer": primary|fallback
     # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
@@ -72,6 +73,8 @@ def main() -> None:
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
                    help="both stages; thinking replies need room to reach </answer>")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--name-prompt", choices=["n1", "n2"], default="n1",
+                   help="stage name: naming prompt (n2 = naming fix, spec 2026-10-15)")
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--overwrite", action="store_true")
@@ -142,7 +145,7 @@ def main() -> None:
                 if gap:
                     return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
-                row = (label_object(ask_image, it, args.seed) if args.stage == "name"
+                row = (label_object(ask_image, it, args.seed, name_prompt=args.name_prompt) if args.stage == "name"
                        else label_route(ask_text, it, names, args.seed, kinds, fb_names))
             except Exception as e:  # noqa: BLE001 — one bad item must not kill the run
                 return {"id": it[key], "error": f"{type(e).__name__}: {e}"}
