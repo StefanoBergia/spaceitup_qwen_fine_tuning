@@ -1623,6 +1623,21 @@ Outputs: `$D/` (events, objects, `meta_d2.json`, `steer/`), `outputs/eval_desc_d
 `outputs/steering_report_d2.html` (rows `all` / `stop` / `turn`; slice rows show pair success + CI only).
 A turn counts as followed when the prediction ends >= `min(0.5 m, half the GT end's lateral offset)` to the stated side.
 
+**Naming fix (2026-10-15, spec `docs/superpowers/specs/2026-10-15-object-naming-design.md`).** Object names cost
+points in every label check (G3 12/100, steering Gate 1 5/50). Four naming variants are compared on 100 random objects
+(+ the objects the user flagged) in a blind audit; the best (>= 95%) renames every d2 object, and the names are
+substituted into the existing texts (failures are composed by the full job). Never re-run `d2-seed` after `rename-texts`.
+
+    uv run scripts/prepare_habitat_instr.py naming-sample --flagged $D/naming_ab/flagged_ids.txt
+    sbatch slurm/naming_variants.sbatch                                # GPU (full A100), ask first: V1 Gemma, V2 Qwen3.6-35B-A3B, V3 Cosmos-Reason2-32B
+    uv run scripts/audit_instruction_labels.py --mode names --out outputs/names_audit.html   # publish with marks; gate: best >= 95%
+    uv run scripts/audit_instruction_labels.py --score-marks <marks dir>                     # per-variant accuracy
+    VARIANTS=<winner> SETS="train eval steer" sbatch slurm/naming_variants.sbatch            # GPU, ask first
+    uv run scripts/prepare_habitat_instr.py rename-texts --variant <winner>
+    uv run scripts/prepare_habitat_instr.py steer --frames data/prepared_habitat_instr_v3/eval_desc_entry.json && \
+        uv run scripts/prepare_habitat_instr.py steer-select
+    # then G3' (label audit, as above) and steering Gate 1' (>= 90% each) before STAGE=steer and STAGE=full
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
