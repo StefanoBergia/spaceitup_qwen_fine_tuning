@@ -104,7 +104,8 @@ def _stage_args(tmp_path, flagged_ids):
     _write(lab / "names_eval_gemma_d2.jsonl", [{"id": "s500:b1", "name": "shelf", "passed": True}])
     _write(lab / "names_gate_gemma_d2.jsonl", [{"id": "s500:b1", "name": "bookshelf", "passed": True}])  # gate wins
     _write(lab / "names_eval_d2.jsonl", [])                     # names_gate_d2.jsonl missing: tolerated
-    _write(lab / "names_steer_gemma_d2.jsonl", [{"id": "s600:b1", "name": "glass door", "passed": True}])
+    _write(lab / "names_steer_gemma_d2.jsonl", [{"id": "s600:b1", "name": "glass door", "passed": True},
+                                                 {"id": "s500:b1", "name": "wall artwork", "passed": True}])  # gate still wins
     fl = tmp_path / "flagged.txt"
     fl.write_text("\n".join(flagged_ids) + "\n")
     return Namespace(events_dir=ev, labels=lab, out_dir=tmp_path / "ab", n=100, seed=0, flagged=fl)
@@ -199,6 +200,8 @@ def test_template_has_a_names_panel():
     assert ".namepick[hidden] { display: none; }" in html
     assert '.legend").style.display = "none"' in html and '$("side").style.display = "none"' in html
     assert {v["v"] for v in audit.VERDICTS["names"]} == {"done", "none"}
+    # a tick after "None is right" undoes it, so the page never shows both while scoring ignores the tick
+    assert 'if (marks[it.id].verdict === "none") delete marks[it.id].verdict;' in html
 
 
 PASS_A = {"type": "pass", "side": "left", "objects": ["f:b1"], "arc_m": 1.0}
@@ -246,7 +249,7 @@ def test_rename_desc_rows_keeps_passing_texts_and_drops_clashes():
                                                                             (desc[1]["description"], "fallback", 0)]
 
 
-def test_rename_texts_refuses_a_second_run(tmp_path):              # Review Focus 3
+def _rename_fixture(tmp_path):
     lab, v4 = tmp_path / "labels", tmp_path / "v4"
     for s in ("train", "eval"):
         _write(lab / f"names_{s}_gemma_d2.jsonl", [{"id": "f:b1", "name": "sofa", "passed": True}])
@@ -255,9 +258,16 @@ def test_rename_texts_refuses_a_second_run(tmp_path):              # Review Focu
         _write(lab / f"desc_{s}_mix_d2.jsonl", [{"id": f"{s}a", "description": "Go left of the sofa, then stop in front of it.",
                                                   "passed": True}])
         _write(v4 / f"events_{s}.jsonl", [_ev(f"{s}a", [PASS_A], stop={**NEAR2, "object": "f:b1"})])
+        _write(v4 / f"objects_{s}.jsonl", [{"object_id": "f:b1", "kind_hint": "wall"}])
+    _write(v4 / "steer" / "objects_eval.jsonl", [])
     _write(lab / "names_steer_gemma_d2.jsonl", [])
     _write(lab / "desc_gate_mix_d2.jsonl", [])
-    args = Namespace(labels=lab, events_dir=v4, variant="V2", force=False)
+    return Namespace(labels=lab, events_dir=v4, variant="V2", force=False, discard_later_work=False)
+
+
+def test_rename_texts_refuses_a_second_run(tmp_path):              # Review Focus 3
+    args = _rename_fixture(tmp_path)
+    lab = args.labels
     with pytest.raises(SystemExit, match="names_steer_V2_n2"):        # the rollout job has not run: nothing touched
         prep.stage_rename_texts(args)
     assert not (lab / "names_train_gemma_d2.pre_n2.jsonl").exists()
@@ -272,6 +282,15 @@ def test_rename_texts_refuses_a_second_run(tmp_path):              # Review Focu
         prep.stage_rename_texts(args)
 
 
+def test_rename_texts_refuses_an_incomplete_winner(tmp_path):       # final review I2: a TIMEOUT / error rows
+    args = _rename_fixture(tmp_path)
+    _write(args.labels / "names_steer_V2_n2.jsonl", [])
+    _write(args.labels / "names_train_V2_n2.jsonl", [{"id": "f:b1", "error": "ReadTimeout"}])
+    with pytest.raises(SystemExit, match="train: 1 of 1 objects have no name row"):
+        prep.stage_rename_texts(args)
+    assert not list(args.labels.glob("*.pre_n2.jsonl"))              # nothing touched
+
+
 def test_rename_desc_rows_keeps_a_text_its_own_names_still_serve():
     # written with the old Cosmos (fallback) names because the old Gemma names clashed; the winner clashes too and the
     # merged old fallback (Gemma over Cosmos) clashes again -- the names the text was written with still serve it
@@ -283,3 +302,46 @@ def test_rename_desc_rows_keeps_a_text_its_own_names_still_serve():
                                           {"f:b1": "white cabinet", "f:b2": "tall cabinet"})
     assert dropped == {} and [(r["description"], r["namer"], r["renamed"]) for r in kept] == \
         [(desc[0]["description"], "fallback", 0)]
+
+
+def test_substitute_names_leaves_an_unchanged_longer_name_alone():     # final review I1
+    old, new = {"f:b1": "wall", "f:b2": "wall shelf"}, {"f:b1": "brick wall", "f:b2": "wall shelf"}
+    assert prep.substitute_names("Go left of the wall shelf, then stop in front of the wall.", old, new) == \
+        "Go left of the wall shelf, then stop in front of the brick wall."
+    old, new = {"f:b1": "tv", "f:b2": "tv stand"}, {"f:b1": "television", "f:b2": None}       # no new name: kept
+    assert prep.substitute_names("Pass the tv stand and the tv.", old, new) == "Pass the tv stand and the television."
+
+
+def test_rename_desc_rows_drops_a_stale_short_mention():          # final review (a shortened mention keeps the old noun)
+    after_last = {**NEAR2, "object": None, "type": "after_last", "relation": "just after"}
+    ev = {"a": _ev("a", [PASS_A], stop=after_last)}
+    desc = [{"id": "a", "description": "Go left of the kitchen island. Stop just after the island.", "passed": True}]
+    old = {"primary": {"f:b1": "kitchen island"}, "fallback": {}}
+    kept, dropped = prep.rename_desc_rows(desc, ev, old, {"f:b1": "white counter"}, {})
+    assert kept == [] and dropped == {"stale_name": 1}
+    kept, dropped = prep.rename_desc_rows(desc, ev, old, {"f:b1": "white island"}, {})   # same head noun: still true
+    assert [r["description"] for r in kept] == ["Go left of the white island. Stop just after the island."]
+
+
+def test_rename_texts_force_redoes_but_never_discards_later_work(tmp_path):   # final review I3
+    args = _rename_fixture(tmp_path)
+    _write(args.labels / "names_steer_V2_n2.jsonl", [])
+    desc = args.labels / "desc_train_mix_d2.jsonl"
+    prep.stage_rename_texts(args)
+    first = desc.read_text()
+    args.force = True
+    prep.stage_rename_texts(args)                                   # nothing changed since: redone from the backups
+    assert desc.read_text() == first
+    with desc.open("a") as f:                                       # the full job's compose --resume appended a row
+        f.write(json.dumps({"id": "composed", "description": "Go left of the white wall.", "passed": True}) + "\n")
+    with pytest.raises(SystemExit, match="desc_train_mix_d2.jsonl"):
+        prep.stage_rename_texts(args)
+    assert "composed" in desc.read_text()
+    args.discard_later_work = True
+    prep.stage_rename_texts(args)
+    assert desc.read_text() == first
+
+
+def test_naming_variants_sbatch_survives_a_failed_pass():         # final review: a server that dies after starting
+    text = (REPO / "slurm" / "naming_variants.sbatch").read_text()
+    assert text.count('--resume || echo "WARN $v $s pass') == 2

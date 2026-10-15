@@ -201,7 +201,8 @@ function renderNames(it, m) {
       pick.has(n) ? pick.delete(n) : pick.add(n);
       b.setAttribute("aria-pressed", String(pick.has(n)));
       marks[it.id] = { ...(marks[it.id] || {}), oid: it.id, right: [...pick] };
-      persist(it.id); tally(); strip();
+      if (marks[it.id].verdict === "none") delete marks[it.id].verdict;   // a tick undoes "None is right"
+      persist(it.id); render();
     };
     box.appendChild(b);
   });

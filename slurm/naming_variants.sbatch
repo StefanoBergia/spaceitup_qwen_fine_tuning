@@ -12,8 +12,9 @@
 #     sbatch slurm/naming_variants.sbatch                                   # comparison: V1 V2 V3 on naming_ab sample
 #     VARIANTS=V2 SETS="train eval steer" sbatch slurm/naming_variants.sbatch  # rollout with the winner (V2 here)
 #
-# A model that fails to start is logged and skipped; the others still run. Every call passes --resume, so a
-# re-submit continues where a TIMEOUT stopped it.
+# A model that fails to start is logged and skipped; a labelling pass that fails (e.g. the server died mid-run) is
+# logged as WARN; the others still run. Every call passes --resume, so a re-submit continues where a TIMEOUT or a
+# failure stopped it (rename-texts refuses a winner file with gaps).
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")/..}"
 mkdir -p outputs/slurm outputs/instr_labels_v3
@@ -68,9 +69,9 @@ for v in $VARIANTS; do
         args=(--stage name --all-objects --objects "$objs" --out "$(out_of "$s" "$v")" --name-prompt "$NAME_PROMPT"
               --endpoint "$BASE/v1" --concurrency "$CONCURRENCY")
         echo; echo "--- $v $s (pass 1) ---"
-        "$UV" run scripts/label_descriptions.py "${args[@]}" --resume
+        "$UV" run scripts/label_descriptions.py "${args[@]}" --resume || echo "WARN $v $s pass 1 failed (exit $?)"
         echo; echo "--- $v $s (pass 2, retries errors) ---"
-        "$UV" run scripts/label_descriptions.py "${args[@]}" --resume
+        "$UV" run scripts/label_descriptions.py "${args[@]}" --resume || echo "WARN $v $s pass 2 failed (exit $?)"
     done
     cosmos3_stop_server
 done
