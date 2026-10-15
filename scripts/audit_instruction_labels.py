@@ -73,7 +73,7 @@ from PIL import Image, ImageDraw
 
 import numpy as np
 
-from rover_vlm.descriptions import PROMPT_VERSION, template_description
+from rover_vlm.descriptions import PROMPT_VERSION, naming_image, template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmarks import Camera
@@ -549,13 +549,106 @@ def d1_title(desc):
     return "Route Description Audit" if Path(desc).name == "desc_gate_d1.jsonl" else f"Route Description Audit \u2014 {stem}"
 
 
+VERDICTS["names"] = [
+    {"v": "done", "label": "Done", "help": "Save the names you ticked as right and go to the next object"},
+    {"v": "none", "label": "None is right", "help": "No candidate name fits the outlined thing (type the right one in the note)"},
+]
+NAMES_PX, NAMES_Q = 768, 75     # page budget: ~120 two-panel images under 16 MB
+
+
+def _naming_jpeg(row):
+    """The two-panel naming image the namer saw, re-encoded small for the page."""
+    raw = naming_image(row["image"], row["polygon"], row["crop_box"] or row["bbox"])
+    img = Image.open(io.BytesIO(raw)).convert("RGB").resize((NAMES_PX, NAMES_PX), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=NAMES_Q)
+    return buf.getvalue()
+
+
+def _key(name):
+    return " ".join((name or "").lower().split())
+
+
+def names_items(sample_rows, variant_names, seed=0):
+    """One audit item per sampled object: the naming image and the distinct names (case-insensitive) the variants gave,
+    shuffled per object with no variant labels."""
+    rng = random.Random(seed)
+    items = []
+    for row in sample_rows:
+        oid, names = row["object_id"], {}
+        for v in sorted(variant_names):
+            n = variant_names[v].get(oid)
+            if n:
+                names.setdefault(_key(n), n)
+        shown = list(names.values())
+        rng.shuffle(shown)
+        items.append({"id": oid, "img": "data:image/jpeg;base64," + base64.b64encode(_naming_jpeg(row)).decode(),
+                      "names": shown, "group": row["group"], "kind_hint": row["kind_hint"],
+                      "instruction": "Which names fit the outlined thing?", "side": "", "kind": f"{row['kind_hint']} · {row['group']}",
+                      "has_alt": False, "target": "object", "reason": None})
+    return items
+
+
+def score_names(sample_rows, variant_names, marks):
+    """Per-variant accuracy from the names-audit marks (spec 2026-10-15): a variant is right on an object when its name
+    (case-insensitive) is among the ticked names; "none", or "done" with nothing ticked, makes every variant wrong; a
+    variant with no name is wrong. An object is marked once it has a verdict or a ticked name (a note alone is not a
+    mark). Random objects give the accuracy (by kind_hint) and the gate (only once every random object is marked);
+    flagged ones a count."""
+    out = {"random": {}, "flagged": {}}
+    marked = [r for r in sample_rows if (marks.get(r["object_id"]) or {}).get("verdict")
+              or (marks.get(r["object_id"]) or {}).get("right")]
+    for v in sorted(variant_names):
+        for group in ("random", "flagged"):
+            rows = [r for r in marked if r["group"] == group]
+            ok = []
+            for r in rows:
+                m = marks[r["object_id"]]
+                right = set() if m.get("verdict") == "none" else {_key(x) for x in m.get("right") or []}
+                ok.append(bool(variant_names[v].get(r["object_id"])) and _key(variant_names[v].get(r["object_id"])) in right)
+            cell = {"n": len(rows), "correct": sum(ok)}
+            if group == "random":
+                by = {}
+                for r, k in zip(rows, ok):
+                    b = by.setdefault(r["kind_hint"], {"n": 0, "correct": 0})
+                    b["n"] += 1
+                    b["correct"] += int(k)
+                cell.update(accuracy=cell["correct"] / cell["n"] if cell["n"] else 0.0, by_kind=by)
+            out[group][v] = cell
+    best = max(out["random"], key=lambda v: out["random"][v]["accuracy"])
+    random_unmarked = sum(r["group"] == "random" for r in sample_rows) - sum(r["group"] == "random" for r in marked)
+    out.update(best=best, best_accuracy=out["random"][best]["accuracy"], unmarked=len(sample_rows) - len(marked),
+               gate=random_unmarked == 0 and out["random"][best]["accuracy"] >= 0.95)   # no reading on a partial audit
+    return out
+
+
+def _variant_names(sample_dir):
+    """{variant: {object_id: name or None}} from <sample_dir>/names_V*.jsonl (passed rows only)."""
+    out = {}
+    for p in sorted(Path(sample_dir).glob("names_V*.jsonl")):
+        out[p.stem[len("names_"):]] = {r["id"]: (r.get("name") if r.get("passed") else None) for r in jsonl(p)}
+    return out
+
+
+def _read_marks(marks_dir):
+    """Marks saved by the Artifact database read: <dir>/marks/<doc id>.json, each the document itself (as the G3 marks
+    were saved on 2026-10-14). The page writes the object id into the mark ("oid"), so a doc id the save mangled
+    (object ids hold ':') still maps back; older marks fall back to the file stem."""
+    out = {}
+    for p in sorted(Path(marks_dir).rglob("*.json")):
+        d = json.loads(p.read_text())
+        out[d.get("oid", p.stem)] = d
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings"], default="labels")
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings", "names"],
+                    default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -578,8 +671,29 @@ def main() -> None:
     ap.add_argument("--n-bent", type=int, default=20, help="--mode turns: routes d1 dropped as no_events_bent that d2 describes")
     ap.add_argument("--n-spur", type=int, default=30, help="--mode turns: routes dropped as spur")
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--sample-dir", type=Path, default=REPO_ROOT / "data" / "prepared_habitat_instr_v4" / "naming_ab",
+                    help="--mode names / --score-marks: objects_sample.jsonl + names_V*.jsonl (naming fix)")
+    ap.add_argument("--score-marks", type=Path, default=None,
+                    help="dir of names-audit mark files: print per-variant accuracy and the gate")
     args = ap.parse_args()
 
+    if args.score_marks:
+        rows = jsonl(args.sample_dir / "objects_sample.jsonl")
+        print(json.dumps(score_names(rows, _variant_names(args.sample_dir), _read_marks(args.score_marks)), indent=2))
+        return
+    if args.mode == "names":
+        rows = jsonl(args.sample_dir / "objects_sample.jsonl")
+        items = names_items(rows, _variant_names(args.sample_dir), args.seed)
+        payload = {"items": items, "population": {"random": sum(r["group"] == "random" for r in rows),
+                                                  "flagged": sum(r["group"] == "flagged" for r in rows)},
+                   "seed": args.seed, "mode": "names", "verdicts": VERDICTS["names"], "source": str(args.sample_dir)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Object Names Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "names_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} objects -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     landmarks = load_landmarks_rows(args.landmarks)
     if args.mode == "steer":
         events = args.events or V3 / "steer" / "events_steer_eval.jsonl"

@@ -49,6 +49,11 @@ blockquote { margin: 0; font-family: var(--quote); font-style: italic; font-weig
 .chip { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; padding: 3px 8px; border-radius: 4px; background: var(--route-soft); color: var(--route); font-weight: 500; }
 .legend { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 .legend i { display: inline-block; width: 22px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 8px; }
+.namepick { display: flex; flex-wrap: wrap; gap: 8px; }
+.namepick[hidden] { display: none; }
+.namepick button { font: inherit; font-size: 16px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+.namepick button[aria-pressed="true"] { background: var(--ok-soft); border-color: var(--ok); }
+.namepick button:focus-visible { outline: 2px solid var(--route); outline-offset: 2px; }
 .verdicts { display: grid; gap: 8px; }
 .verdicts button { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; text-align: left; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; cursor: pointer; }
 .verdicts button:hover { border-color: var(--muted); }
@@ -97,6 +102,7 @@ textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--
         <span id="tgtleg" hidden><i style="background:#00e6ff"></i>outlined target (the geometry's choice)</span>
         <span id="altleg"><i style="background:var(--alt)"></i>the other-side route Cosmos was also shown</span>
       </div>
+      <div class="namepick" id="names" hidden></div>
       <div class="verdicts" id="verdicts"></div>
       <label class="note" for="note">Note (optional, saved when you leave the box)
         <textarea id="note" placeholder="e.g. 'sofa' is actually an armchair"></textarea>
@@ -123,7 +129,7 @@ let idx = 0, db = null, mode = "connecting";
 const $ = (id) => document.getElementById(id);
 const LS = `instr-audit-${DATA.mode || "labels"}-${DATA.seed}`;
 const VERDICTS = DATA.verdicts;
-const tone = (v) => (v === "ok" || v === "none_ok") ? "ok" : v === "unsure" ? "unsure" : "bad";
+const tone = (v) => !v ? "unsure" : (v === "ok" || v === "none_ok" || v === "done") ? "ok" : v === "unsure" ? "unsure" : "bad";
 if (DATA.mode === "geometry") {
   document.title = "Landmark Geometry Audit";
   $("h1").textContent = "Landmark Geometry Audit";
@@ -173,6 +179,32 @@ if (DATA.mode === "steer") {
   $("tgtleg").innerHTML = '<i style="background:#ff00c8"></i>magenta = first text &nbsp; <i style="background:#00c8ff"></i>cyan = second text &nbsp; <i style="background:#ffe600"></i>yellow = stop object';
   $("altleg").hidden = true;
   document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1\u2013${DATA.verdicts.length} mark and advance, \u2190 \u2192 move.`;
+}
+let pick = new Set();
+if (DATA.mode === "names") {
+  document.title = "Object Names Audit";
+  $("h1").textContent = "Object names audit";
+  $("sub").textContent = "Each object is shown as the namer saw it: the frame with the region outlined, and a close-up. Tick every name that fits the outlined thing (letters a, b, c… toggle), then Done (1); if none fits, None is right (2) and type the right name in the note.";
+  document.querySelector(".legend").style.display = "none";
+  $("side").style.display = "none";
+  $("names").hidden = false;
+  document.querySelector(".stripcap span").textContent = "All objects: click to jump. Keys: a, b, c… tick a name, 1 Done, 2 None is right, ← → move.";
+}
+function renderNames(it, m) {
+  pick = new Set(m.right || []);
+  const box = $("names"); box.innerHTML = "";
+  (it.names || []).forEach((n, i) => {
+    const b = document.createElement("button");
+    b.textContent = `${String.fromCharCode(97 + i)}  ${n}`; b.dataset.name = n;
+    b.setAttribute("aria-pressed", String(pick.has(n)));
+    b.onclick = () => {
+      pick.has(n) ? pick.delete(n) : pick.add(n);
+      b.setAttribute("aria-pressed", String(pick.has(n)));
+      marks[it.id] = { ...(marks[it.id] || {}), oid: it.id, right: [...pick] };
+      persist(it.id); tally(); strip();
+    };
+    box.appendChild(b);
+  });
 }
 VERDICTS.forEach((d, i) => {
   const b = document.createElement("button");
@@ -231,6 +263,7 @@ function render() {
     $("side").textContent = "";
     $("kind").textContent = {turn_visible: "visible turn", turn_hidden: "hidden turn", bent: "rescued bent route", spur: "spur drop"}[it.group] || it.group;
   }
+  if (DATA.mode === "names") { $("instr").textContent = "Which of these names fit the outlined thing?"; $("side").textContent = ""; $("kind").textContent = it.kind; renderNames(it, m); }
   document.querySelectorAll("#verdicts button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === m.verdict)));
   if (document.activeElement !== $("note")) $("note").value = m.note || "";
   $("prev").disabled = idx === 0; $("next").disabled = idx === items.length - 1;
@@ -254,7 +287,7 @@ async function persist(id) {
 
 function mark(v) {
   const id = items[idx].id;
-  marks[id] = { ...(marks[id] || {}), verdict: v };
+  marks[id] = { ...(marks[id] || {}), verdict: v, ...(DATA.mode === "names" ? { oid: id, right: v === "done" ? [...pick] : [] } : {}) };
   persist(id);
   if (idx < items.length - 1) go(idx + 1); else render();
 }
@@ -270,6 +303,7 @@ $("note").addEventListener("change", () => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA") return;
+  if (DATA.mode === "names" && /^[a-z]$/.test(e.key)) { const b = $("names").children[e.key.charCodeAt(0) - 97]; if (b) { e.preventDefault(); b.click(); } return; }
   const v = VERDICTS[Number(e.key) - 1]?.v;
   if (v) { e.preventDefault(); mark(v); }
   else if (e.key === "ArrowRight") go(idx + 1);
@@ -291,7 +325,7 @@ go(firstOpen < 0 ? 0 : firstOpen);
   }
   mode = "db";
   db.collection("marks").onSnapshot((snap) => {
-    for (const d of snap.docs) { const { verdict, note } = d.data(); marks[d.id] = { verdict, note }; }
+    for (const d of snap.docs) { const { verdict, note, right, oid } = d.data(); marks[d.id] = { verdict, note, right, oid }; }
     saveLocal(); render();
   }, (e) => { $("status").textContent = `sync stopped (${e.code})`; });
 })();

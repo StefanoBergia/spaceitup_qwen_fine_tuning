@@ -134,3 +134,65 @@ def test_naming_variants_sbatch():
     assert 'NAME_PROMPT="${NAME_PROMPT:-n2}"' in text and '--name-prompt "$NAME_PROMPT"' in text
     assert "( cosmos3_wait_healthy )" in text            # a model that fails to start is skipped (Review Focus 1)
     assert "names_${v}.jsonl" in text and 'names_${s}_${v}_${NAME_PROMPT}.jsonl' in text
+
+
+_ASPEC = importlib.util.spec_from_file_location("audit_instruction_labels", REPO / "scripts" / "audit_instruction_labels.py")
+audit = importlib.util.module_from_spec(_ASPEC)
+_ASPEC.loader.exec_module(audit)
+
+SAMPLE = [{"object_id": "a", "kind_hint": "wall", "group": "random"}, {"object_id": "b", "kind_hint": "object", "group": "random"},
+          {"object_id": "c", "kind_hint": "object", "group": "random"}, {"object_id": "f", "kind_hint": "wall", "group": "flagged"}]
+VNAMES = {"V0": {"a": "grey sofa", "b": "Coffee table", "c": "chair", "f": "bookshelf"},
+          "V1": {"a": "white wall", "b": "coffee table", "c": "armchair", "f": "steel column"},
+          "V2": {"a": "white wall", "b": None, "c": "armchair", "f": "bookshelf"}}
+
+
+def test_names_items_list_distinct_names_shuffled(monkeypatch):
+    monkeypatch.setattr(audit, "_naming_jpeg", lambda row: b"jpg")
+    items = audit.names_items(SAMPLE, VNAMES, seed=0)
+    by = {it["id"]: it for it in items}
+    assert sorted(by["a"]["names"]) == ["grey sofa", "white wall"]
+    assert sorted(n.lower() for n in by["b"]["names"]) == ["coffee table"]            # case-insensitive distinct
+    assert by["f"]["group"] == "flagged" and by["a"]["img"].startswith("data:image/jpeg;base64,")
+
+
+def test_score_names():
+    marks = {"a": {"verdict": "done", "right": ["white wall"]}, "b": {"verdict": "done", "right": ["coffee table"]},
+             "c": {"verdict": "done", "right": []},                                      # done, nothing ticked = none
+             "f": {"verdict": "done", "right": ["steel column"]}}
+    s = audit.score_names(SAMPLE, VNAMES, marks)
+    assert s["random"]["V0"]["correct"] == 1 and s["random"]["V1"]["correct"] == 2
+    assert s["random"]["V2"]["correct"] == 1                       # no name for "b" counts as wrong (Review Focus 1)
+    assert s["random"]["V1"]["accuracy"] == pytest.approx(2 / 3)
+    assert s["random"]["V1"]["by_kind"] == {"wall": {"n": 1, "correct": 1}, "object": {"n": 2, "correct": 1}}
+    assert s["flagged"]["V1"] == {"n": 1, "correct": 1} and s["flagged"]["V0"] == {"n": 1, "correct": 0}
+    assert (s["best"], s["gate"], s["unmarked"]) == ("V1", False, 0)
+
+
+def test_score_names_none_and_unmarked():                          # Review Focus 4
+    s = audit.score_names(SAMPLE, VNAMES, {"a": {"verdict": "none", "right": ["white wall"]}})
+    assert s["random"]["V1"]["correct"] == 0 and s["unmarked"] == 3
+    # names ticked but Done never pressed: the ticks count; a note-only mark is unmarked
+    s = audit.score_names(SAMPLE, VNAMES, {"a": {"right": ["White Wall"]}, "b": {"note": "?"}})
+    assert s["random"]["V1"]["correct"] == 1 and s["random"]["V1"]["n"] == 1 and s["unmarked"] == 3
+    assert s["best_accuracy"] == 1.0 and s["gate"] is False          # no gate reading on a partly marked audit
+
+
+def test_read_marks_takes_the_object_id_from_the_mark(tmp_path):
+    d = tmp_path / "marks"
+    d.mkdir()
+    (d / "x.json").write_text(json.dumps({"oid": "00001-UVdNNRcVyV1_c000:b1", "verdict": "done", "right": ["sofa"]}))
+    (d / "a.json").write_text(json.dumps({"verdict": "none"}))
+    assert audit._read_marks(tmp_path) == {"00001-UVdNNRcVyV1_c000:b1": {"oid": "00001-UVdNNRcVyV1_c000:b1",
+                                                                          "verdict": "done", "right": ["sofa"]},
+                                           "a": {"verdict": "none"}}
+
+
+def test_template_has_a_names_panel():
+    html = audit.TEMPLATE.read_text()
+    assert 'DATA.mode === "names"' in html and 'id="names"' in html and "right:" in html
+    # the template's display rules beat the hidden attribute: the names box must hide in other modes, and the
+    # route legend and side chip must go in names mode
+    assert ".namepick[hidden] { display: none; }" in html
+    assert '.legend").style.display = "none"' in html and '$("side").style.display = "none"' in html
+    assert {v["v"] for v in audit.VERDICTS["names"]} == {"done", "none"}
