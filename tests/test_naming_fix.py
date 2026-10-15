@@ -123,3 +123,14 @@ def test_naming_sample_stage_writes_sample_names_v0_and_flagged(tmp_path):
 def test_naming_sample_stops_on_unknown_flagged_ids(tmp_path):            # Review Focus 5
     with pytest.raises(SystemExit, match="nope:b9"):
         prep.stage_naming_sample(_stage_args(tmp_path, ["s500:b1", "nope:b9"]))
+
+
+def test_naming_variants_sbatch():
+    text = (REPO / "slurm" / "naming_variants.sbatch").read_text()
+    assert "#SBATCH --gres=gpu:a100:1" in text and "#SBATCH --partition=A100" in text
+    for model in ("google/gemma-3-12b-it", "Qwen/Qwen3.6-35B-A3B-FP8", "nvidia/Cosmos-Reason2-32B"):
+        assert model in text
+    assert 'VARIANTS="${VARIANTS:-V1 V2 V3}"' in text and 'SETS="${SETS:-sample}"' in text
+    assert 'NAME_PROMPT="${NAME_PROMPT:-n2}"' in text and '--name-prompt "$NAME_PROMPT"' in text
+    assert "( cosmos3_wait_healthy )" in text            # a model that fails to start is skipped (Review Focus 1)
+    assert "names_${v}.jsonl" in text and 'names_${s}_${v}_${NAME_PROMPT}.jsonl' in text
