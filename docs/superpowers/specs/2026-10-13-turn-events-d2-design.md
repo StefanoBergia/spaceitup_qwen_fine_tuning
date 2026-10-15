@@ -517,3 +517,5 @@ template): 85/100 correct — accepted by the user.** Rewritten 36/40, Cosmos 46
 ending in scene 00831, 2 unsure). The 12 wrong names are the namer's (d1's own label audit was 84/100): 7 are the behind
 object, mostly a wall named as furniture — 68% of behind objects are long blobs and the wall naming prompt offers "a long
 piece of furniture such as a sofa or a counter"; only 27% of them get a wall-type head noun. Open: a wall-first naming pass.
+
+2026-10-15: object naming is re-measured and fixed in `docs/superpowers/specs/2026-10-15-object-naming-design.md` (variants compared on a naming audit; winner renames all d2 objects; names substituted into texts).

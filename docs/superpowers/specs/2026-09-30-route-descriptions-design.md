@@ -403,3 +403,5 @@ Clarifications (final review, 2026-10-01):
 Turn events ("turn left behind the X"), dropping opposite-route spurs and the d2 relabel + retrain are
 designed in `2026-10-13-turn-events-d2-design.md`; it changes `route_events`, `descriptions` and `eval`
 as specified there (schema `d2-turns`, prompt d4).
+
+2026-10-15: the A5 namer is re-measured against new naming variants in `docs/superpowers/specs/2026-10-15-object-naming-design.md`.
