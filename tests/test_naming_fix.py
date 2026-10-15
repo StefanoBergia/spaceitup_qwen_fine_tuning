@@ -196,3 +196,87 @@ def test_template_has_a_names_panel():
     assert ".namepick[hidden] { display: none; }" in html
     assert '.legend").style.display = "none"' in html and '$("side").style.display = "none"' in html
     assert {v["v"] for v in audit.VERDICTS["names"]} == {"done", "none"}
+
+
+PASS_A = {"type": "pass", "side": "left", "objects": ["f:b1"], "arc_m": 1.0}
+BETWEEN = {"type": "between", "side": None, "objects": ["f:b1", "f:b2"], "arc_m": 1.0}
+NEAR2 = {"type": "near", "relation": "in front of", "amount": None, "distance_m": None, "object": "f:b2"}
+
+
+def _ev(rid, events, stop=NEAR2):
+    return {"id": rid, "reason": None, "events": events, "stop": stop}
+
+
+def test_substitute_names_swaps_and_overlaps():                    # Review Focus 2
+    text = "Go between the sofa and the dining table, then stop in front of the bed."
+    old = {"f:b1": "sofa", "f:b2": "dining table", "f:b3": "bed"}
+    new = {"f:b1": "bed", "f:b2": "desk", "f:b3": "table"}
+    assert prep.substitute_names(text, old, new) == "Go between the bed and the desk, then stop in front of the table."
+    assert prep.substitute_names("Keep the Sofa on your left.", {"f:b1": "sofa"}, {"f:b1": "grey wall"}) == \
+        "Keep the Grey wall on your left."                          # a capitalised mention stays capitalised
+    assert prep.substitute_names("Pass the sofabed.", {"f:b1": "sofa"}, {"f:b1": "bed"}) == "Pass the sofabed."
+    assert prep.substitute_names("Pass the table.", {"f:b1": "table", "f:b2": None}, {"f:b1": "desk"}) == "Pass the desk."
+
+
+def test_rename_desc_rows_keeps_passing_texts_and_drops_clashes():
+    ev = {"a": _ev("a", [PASS_A]), "b": _ev("b", [BETWEEN], stop={**NEAR2, "object": None, "type": "after_last",
+                                                                  "relation": "just after"}), "c": _ev("c", [PASS_A])}
+    desc = [{"id": "a", "description": "Go left of the sofa, then stop in front of the fridge.", "passed": True,
+             "namer": "primary", "instruction_source": "cosmos"},
+            {"id": "b", "description": "Go between the sofa and the fridge, then stop just after it.", "passed": True,
+             "instruction_source": "cosmos"},
+            {"id": "c", "description": None, "passed": False, "rejects": ["unnamed_object"]},     # recomposed
+            {"id": "gone", "description": "Go left of the sofa.", "passed": True}]               # route not described now
+    old = {"primary": {"f:b1": "sofa", "f:b2": "fridge"}, "fallback": {}}
+    new_primary = {"f:b1": "white wall", "f:b2": "refrigerator"}
+    kept, dropped = prep.rename_desc_rows(desc, ev, old, new_primary, {})
+    assert [r["id"] for r in kept] == ["a", "b"] and dropped == {"not_passed": 1, "no_route": 1}
+    assert kept[0]["description"] == "Go left of the white wall, then stop in front of the refrigerator."
+    assert kept[0]["renamed"] == 2 and kept[0]["namer"] == "primary"
+    clash = {"f:b1": "white cabinet", "f:b2": "tall cabinet"}           # two objects, one head noun
+    kept, dropped = prep.rename_desc_rows(desc[:2], ev, {"primary": {}, "fallback": {}}, clash, {})
+    assert kept == [] and dropped == {"name:clash": 2}                 # nor are the text's own names known: compose
+    kept, dropped = prep.rename_desc_rows(desc[:2], ev, old, clash, {})
+    assert [r["namer"] for r in kept] == ["fallback", "fallback"] and dropped == {}   # its own names still serve it
+    kept, _ = prep.rename_desc_rows(desc[:2], ev, old, clash, {"f:b1": "sofa", "f:b2": "fridge"})  # old names serve
+    assert [(r["description"], r["namer"], r["renamed"]) for r in kept] == [(desc[0]["description"], "fallback", 0),
+                                                                            (desc[1]["description"], "fallback", 0)]
+
+
+def test_rename_texts_refuses_a_second_run(tmp_path):              # Review Focus 3
+    lab, v4 = tmp_path / "labels", tmp_path / "v4"
+    for s in ("train", "eval"):
+        _write(lab / f"names_{s}_gemma_d2.jsonl", [{"id": "f:b1", "name": "sofa", "passed": True}])
+        _write(lab / f"names_{s}_d2.jsonl", [])
+        _write(lab / f"names_{s}_V2_n2.jsonl", [{"id": "f:b1", "name": "white wall", "passed": True}])
+        _write(lab / f"desc_{s}_mix_d2.jsonl", [{"id": f"{s}a", "description": "Go left of the sofa, then stop in front of it.",
+                                                  "passed": True}])
+        _write(v4 / f"events_{s}.jsonl", [_ev(f"{s}a", [PASS_A], stop={**NEAR2, "object": "f:b1"})])
+    _write(lab / "names_steer_gemma_d2.jsonl", [])
+    _write(lab / "desc_gate_mix_d2.jsonl", [])
+    args = Namespace(labels=lab, events_dir=v4, variant="V2", force=False)
+    with pytest.raises(SystemExit, match="names_steer_V2_n2"):        # the rollout job has not run: nothing touched
+        prep.stage_rename_texts(args)
+    assert not (lab / "names_train_gemma_d2.pre_n2.jsonl").exists()
+    _write(lab / "names_steer_V2_n2.jsonl", [])
+    prep.stage_rename_texts(args)
+    got = [json.loads(x) for x in (lab / "desc_train_mix_d2.jsonl").read_text().splitlines()]
+    assert got[0]["description"] == "Go left of the white wall, then stop in front of it."
+    assert (lab / "names_train_gemma_d2.pre_n2.jsonl").exists()
+    fb = {r["id"]: r for r in map(json.loads, (lab / "names_train_d2.jsonl").read_text().splitlines())}
+    assert fb["f:b1"]["name"] == "sofa" and fb["f:b1"]["passed"]                 # today's name is the fallback
+    with pytest.raises(SystemExit, match="already"):
+        prep.stage_rename_texts(args)
+
+
+def test_rename_desc_rows_keeps_a_text_its_own_names_still_serve():
+    # written with the old Cosmos (fallback) names because the old Gemma names clashed; the winner clashes too and the
+    # merged old fallback (Gemma over Cosmos) clashes again -- the names the text was written with still serve it
+    ev = {"b": _ev("b", [BETWEEN], stop={**NEAR2, "object": None, "type": "after_last", "relation": "just after"})}
+    desc = [{"id": "b", "description": "Go between the sofa and the fridge, then stop just after it.", "passed": True,
+             "namer": "fallback"}]
+    old = {"primary": {"f:b1": "white cabinet", "f:b2": "tall cabinet"}, "fallback": {"f:b1": "sofa", "f:b2": "fridge"}}
+    kept, dropped = prep.rename_desc_rows(desc, ev, old, {"f:b1": "white wall", "f:b2": "brick wall"},
+                                          {"f:b1": "white cabinet", "f:b2": "tall cabinet"})
+    assert dropped == {} and [(r["description"], r["namer"], r["renamed"]) for r in kept] == \
+        [(desc[0]["description"], "fallback", 0)]

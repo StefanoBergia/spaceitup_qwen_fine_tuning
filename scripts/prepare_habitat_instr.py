@@ -76,17 +76,29 @@ GT ceiling of the endings, re-seed:
         --out-dir data/prepared_habitat_instr_v4 --force
     uv run scripts/prepare_habitat_instr.py endings-check      # CEILING: behind >= 0.95
     uv run scripts/prepare_habitat_instr.py d2-seed --force
+
+Naming fix (2026-10-15, docs/superpowers/specs/2026-10-15-object-naming-design.md): sample, compare naming variants on
+an audit, then rename with the winner and substitute names into the texts. After rename-texts, never re-run d2-seed
+(it would overwrite the renamed files).
+
+    uv run scripts/prepare_habitat_instr.py naming-sample --flagged data/prepared_habitat_instr_v4/naming_ab/flagged_ids.txt
+    sbatch slurm/naming_variants.sbatch                                     # GPU, ask first
+    uv run scripts/audit_instruction_labels.py --mode names --out outputs/names_audit.html
+    VARIANTS=V2 SETS="train eval steer" sbatch slurm/naming_variants.sbatch  # GPU, ask first (winner V2 here)
+    uv run scripts/prepare_habitat_instr.py rename-texts --variant V2
 """
 
 import argparse
 import json
+import re
 import statistics
 from collections import Counter
 from multiprocessing import Pool
 from pathlib import Path
 
 from rover_vlm.descriptions import (
-    as_form, finalize_descriptions, route_objects, seed_d2_labels, shuffled_texts, d2_rejects)
+    as_form, choose_names, description_rejects, finalize_descriptions, route_objects, seed_d2_labels, shuffled_texts,
+    d2_rejects)
 from rover_vlm.instructions import (
     assert_scene_disjoint, build_frame, build_pair, build_wrong_side, finalize_general, finalize_pairs,
     render_check_image, render_generation_image, rescore_row, with_instruction,
@@ -631,6 +643,115 @@ def stage_naming_sample(args):
                       "v0_named": sum(r["passed"] for r in v0)}, indent=2))
 
 
+def substitute_names(text, old, new):
+    """Each object's old name replaced by its new one (case-insensitive, whole words; a capitalised mention stays
+    capitalised). Longest old names first and through placeholders, so a name inside a longer one is never edited and
+    swapped names never double-replace. Objects with no old or no new name are left alone."""
+    pairs = [(old[o], new[o]) for o in old if old.get(o) and new.get(o) and old[o].lower() != new[o].lower()]
+    pairs.sort(key=lambda t: -len(t[0]))
+    for i, (a, _) in enumerate(pairs):
+        text = re.sub(r"(?<![\w-])" + re.escape(a) + r"(?![\w-])",
+                      lambda m, i=i: f"\x00{i}{'C' if m.group(0)[0].isupper() else 'l'}\x00", text, flags=re.I)
+    for i, (_, b) in enumerate(pairs):
+        text = text.replace(f"\x00{i}l\x00", b).replace(f"\x00{i}C\x00", b[:1].upper() + b[1:])
+    return text
+
+
+def rename_desc_rows(desc_rows, events_by_id, old_names, new_primary, new_fallback):
+    """(kept rows, drop reasons): every passed desc row's text with its objects' names replaced by the names the A5
+    rule (choose_names) picks under the new name dicts; a row whose route is no longer described, a row that had not
+    passed, a route the new names cannot serve (unnamed / clash) or a new text that breaks a rule is dropped -- the
+    full labelling job (--resume) composes it. old_names = {"primary": {...}, "fallback": {...}}: the names the texts
+    were written with (a row's "namer" says which); when neither new dict serves a route but those names still do, the
+    text is kept as it is (the old A5 rule was per route, Gemma else Cosmos; a merged per-object fallback loses that).
+    Dry run 2026-10-15 with every object renamed to a fresh name: 17,040 of 17,056 passed train texts kept."""
+    kept, dropped = [], Counter()
+    for d in desc_rows:
+        ev = events_by_id.get(d["id"])
+        if ev is None or ev.get("reason") is not None:
+            dropped["no_route"] += 1
+            continue
+        if not d.get("passed") or not d.get("description"):
+            dropped["not_passed"] += 1
+            continue
+        row = {"events": ev["events"], "stop": ev["stop"]}
+        before = old_names["fallback"] if d.get("namer") == "fallback" else old_names["primary"]
+        chosen, namer, reject = choose_names(row, new_primary, new_fallback)
+        if chosen is None and choose_names(row, before)[0] is not None:
+            chosen, namer = before, "fallback"   # the merged old names clash, the ones the text was written with do not
+        if chosen is None:
+            dropped[reject] += 1
+            continue
+        ids = list(dict.fromkeys(route_objects(row)))
+        old = {o: before.get(o) for o in ids}
+        new_text = substitute_names(d["description"], old, {o: chosen[o] for o in ids})
+        if description_rejects(new_text, ev["events"], ev["stop"], chosen) or d2_rejects(new_text, ev):
+            dropped["rejects"] += 1
+            continue
+        changed = sum(1 for o in ids if old.get(o) and old[o].lower() != chosen[o].lower())
+        kept.append({**d, "description": new_text, "namer": namer, "renamed": changed})
+    return kept, dropped
+
+
+def _passed_rows(*paths):
+    """{object id: name row} over the passed rows of the files that exist (later files win)."""
+    return {r["id"]: r for p in paths for r in _rows_if(p) if r.get("passed")}
+
+
+def stage_rename_texts(args):
+    """Naming fix rollout (CPU). The label job and the steering stages read fixed file names, so the winner takes the
+    "gemma" (primary) files and today's names become the fallback files:
+      names_<split>_gemma_d2.jsonl := the winner's rows (names_<split>_<V>_n2.jsonl), tagged "namer_variant": V;
+      names_<split>_d2.jsonl       := today's passed names, one per object -- Cosmos, overridden by Gemma (eval: also
+                                      the gate's name files and the steering Gemma names), tagged "namer_variant": "old";
+      names_steer_gemma_d2.jsonl   := the winner's steering rows;
+      desc_{train,eval}_mix_d2.jsonl and desc_gate_mix_d2.jsonl := their rows renamed by rename_desc_rows (each file
+                                      read with the names it was written with: the gate file with names_gate_*).
+    Every rewritten file is first copied to <stem>.pre_n2.jsonl; a second run refuses (the copies would be lost) unless
+    --force, which redoes it from the copies. After this stage never re-run d2-seed (it would overwrite these files)."""
+    L, v = args.labels, args.variant
+    winners = {s: L / f"names_{s}_{v}_n2.jsonl" for s in (*SPLITS, "steer")}
+    missing = [str(p) for p in winners.values() if not p.exists()]
+    if missing:
+        raise SystemExit(f"winner names missing: {missing} — run VARIANTS={v} SETS=\"train eval steer\" "
+                         "sbatch slurm/naming_variants.sbatch first")
+    files = [L / f"names_{s}_gemma_d2.jsonl" for s in SPLITS] + [L / f"names_{s}_d2.jsonl" for s in SPLITS] + \
+            [L / "names_steer_gemma_d2.jsonl"] + [desc_path(L, s, "_mix", "d2") for s in SPLITS] + \
+            [L / "desc_gate_mix_d2.jsonl"]
+    pre = lambda p: p.with_name(p.stem + ".pre_n2.jsonl")          # noqa: E731
+    if any(pre(p).exists() for p in files) and not args.force:
+        raise SystemExit("rename-texts already ran (backups *.pre_n2.jsonl exist) — pass --force only to redo it from them")
+    for p in files:
+        if not pre(p).exists():
+            pre(p).write_text(p.read_text() if p.exists() else "")
+    meta = {}
+    for s in SPLITS:
+        old = {"primary": {i: r["name"] for i, r in _passed_rows(pre(L / f"names_{s}_gemma_d2.jsonl")).items()},
+               "fallback": {i: r["name"] for i, r in _passed_rows(pre(L / f"names_{s}_d2.jsonl")).items()}}
+        old_gate = {"primary": _passed_names(L / "names_gate_gemma_d2.jsonl"), "fallback": _passed_names(L / "names_gate_d2.jsonl")}
+        extra_cosmos = [L / "names_gate_d2.jsonl"] if s == "eval" else []
+        extra_gemma = [L / "names_gate_gemma_d2.jsonl", pre(L / "names_steer_gemma_d2.jsonl")] if s == "eval" else []
+        fallback = _passed_rows(pre(L / f"names_{s}_d2.jsonl"), *extra_cosmos, pre(L / f"names_{s}_gemma_d2.jsonl"), *extra_gemma)
+        winner = _jsonl(winners[s])
+        _write_jsonl(L / f"names_{s}_gemma_d2.jsonl", [{**r, "namer_variant": v} for r in winner])
+        _write_jsonl(L / f"names_{s}_d2.jsonl", [{**r, "namer_variant": "old"} for r in fallback.values()])
+        new_p = {r["id"]: r["name"] for r in winner if r.get("passed")}
+        new_f = {i: r["name"] for i, r in fallback.items()}
+        events = {r["id"]: r for r in _jsonl(args.events_dir / f"events_{s}.jsonl")}
+        meta[s] = {"winner_rows": len(winner), "winner_named": len(new_p), "fallback_names": len(new_f)}
+        for dp, names_before in [(desc_path(L, s, "_mix", "d2"), old)] + \
+                                ([(L / "desc_gate_mix_d2.jsonl", old_gate)] if s == "eval" else []):
+            rows = _jsonl(pre(dp))
+            kept, dropped = rename_desc_rows(rows, events, names_before, new_p, new_f)
+            _write_jsonl(dp, kept)
+            meta[s][dp.name] = {"rows": len(rows), "kept": len(kept), "renamed": sum(r["renamed"] > 0 for r in kept),
+                                "kept_on_old_names": sum(r["namer"] == "fallback" for r in kept),
+                                "dropped_to_compose": dict(dropped)}
+    _write_jsonl(L / "names_steer_gemma_d2.jsonl", [{**r, "namer_variant": v} for r in _jsonl(winners["steer"])])
+    (args.events_dir / "rename_meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+
+
 def stage_finalize_descriptions(args):
     import random
     d2 = args.round != "d1"
@@ -790,6 +911,11 @@ def main() -> None:
     ns.add_argument("--n", type=int, default=100)
     ns.add_argument("--seed", type=int, default=0)
     ns.add_argument("--flagged", type=Path, default=None, help="object ids the user marked misnamed, one per line")
+    rt = sub.add_parser("rename-texts", help="naming fix: winner names into the d2 name files + texts (CPU)")
+    rt.add_argument("--labels", type=Path, default=D1_LABELS)
+    rt.add_argument("--events-dir", type=Path, default=V4_OUT)
+    rt.add_argument("--variant", required=True, help="the winning variant, e.g. V2 (names_<split>_<V>_n2.jsonl)")
+    rt.add_argument("--force", action="store_true", help="redo from the *.pre_n2.jsonl backups")
     ec = sub.add_parser("endings-check", help="d2 T2: GT ceiling of each ending check on a split (CPU)")
     ec.add_argument("--events-dir", type=Path, default=V4_OUT)
     ec.add_argument("--labelset-dir", type=Path, default=V2_OUT)
@@ -820,7 +946,8 @@ def main() -> None:
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
      "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed,
-     "endings-check": stage_endings_check, "naming-sample": stage_naming_sample}[args.stage](args)
+     "endings-check": stage_endings_check, "naming-sample": stage_naming_sample,
+     "rename-texts": stage_rename_texts}[args.stage](args)
 
 
 if __name__ == "__main__":
