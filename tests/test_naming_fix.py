@@ -61,10 +61,13 @@ import importlib.util  # noqa: E402
 import sys  # noqa: E402
 from argparse import Namespace  # noqa: E402
 
-_SPEC = importlib.util.spec_from_file_location("prepare_habitat_instr", REPO / "scripts" / "prepare_habitat_instr.py")
-prep = importlib.util.module_from_spec(_SPEC)
-sys.modules["prepare_habitat_instr"] = prep
-_SPEC.loader.exec_module(prep)
+# one module object per session: test_d2_stages registers it too, and its stages' Pool pickles functions by module name
+prep = sys.modules.get("prepare_habitat_instr")
+if prep is None:
+    _SPEC = importlib.util.spec_from_file_location("prepare_habitat_instr", REPO / "scripts" / "prepare_habitat_instr.py")
+    prep = importlib.util.module_from_spec(_SPEC)
+    sys.modules["prepare_habitat_instr"] = prep
+    _SPEC.loader.exec_module(prep)
 
 
 def _obj(i, kind):
