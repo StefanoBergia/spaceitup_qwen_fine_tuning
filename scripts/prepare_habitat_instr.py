@@ -570,6 +570,67 @@ def stage_d2_seed(args):
     print(json.dumps(meta, indent=2))
 
 
+NAMING_AB = V4_OUT / "naming_ab"
+NAMING_STRATA = (("wall", 45), ("object", 45), ("opening", 10))   # naming fix (spec 2026-10-15): 100 random objects
+
+
+def naming_sample_rows(objects, strata, seed, flagged_rows):
+    """The naming comparison sample: per (kind_hint, n) stratum, n random objects (all of them if fewer), seeded,
+    never a flagged one (known failures would bias the random accuracy); then the flagged rows. Each row is the
+    object row plus "group": "random" | "flagged"."""
+    import random
+    rng = random.Random(seed)
+    flagged = {o["object_id"] for o in flagged_rows}
+    out = []
+    for kind, n in strata:
+        pool = sorted((o for o in objects if o["kind_hint"] == kind and o["object_id"] not in flagged),
+                      key=lambda o: o["object_id"])
+        out += [{**o, "group": "random"} for o in rng.sample(pool, min(n, len(pool)))]
+    return out + [{**o, "group": "flagged"} for o in flagged_rows]
+
+
+def _rows_if(path):
+    return _jsonl(path) if Path(path).exists() else []
+
+
+def _passed_names(*paths):
+    """{object id: name} over the passed rows of the files that exist (later files win)."""
+    return {r["id"]: r["name"] for p in paths for r in _rows_if(p) if r.get("passed")}
+
+
+def stage_naming_sample(args):
+    """Naming fix step 1 (CPU): objects_sample.jsonl (random train objects + flagged ids), names_V0.jsonl (the name the
+    routes use today: Gemma, else Cosmos; eval objects: the gate's names over the eval files', as the G3 texts used
+    them; steering objects: steer Gemma), flagged_ids.txt. objects_train.jsonl holds exactly the objects of described
+    train routes (29,556 = the route objects, checked 2026-10-15), so it is sampled as is."""
+    train = _jsonl(args.events_dir / "objects_train.jsonl")
+    lookup = {o["object_id"]: o for p in (args.events_dir / "objects_train.jsonl", args.events_dir / "objects_eval.jsonl",
+                                          args.events_dir / "steer" / "objects_eval.jsonl") if p.exists() for o in _jsonl(p)}
+    flagged_ids = [x.strip() for x in args.flagged.read_text().splitlines() if x.strip()] if args.flagged else []
+    missing = [i for i in flagged_ids if i not in lookup]
+    if missing:
+        raise SystemExit(f"flagged ids in no objects file: {missing}")
+    strata = tuple((k, round(n * args.n / 100)) for k, n in NAMING_STRATA)
+    rows = naming_sample_rows(train, strata, args.seed, [lookup[i] for i in flagged_ids])
+    L = args.labels
+    primary = _passed_names(L / "names_train_gemma_d2.jsonl", L / "names_eval_gemma_d2.jsonl",
+                            L / "names_gate_gemma_d2.jsonl", L / "names_steer_gemma_d2.jsonl")
+    fallback = _passed_names(L / "names_train_d2.jsonl", L / "names_eval_d2.jsonl", L / "names_gate_d2.jsonl")
+    v0 = []
+    for r in rows:
+        oid = r["object_id"]
+        name, namer = (primary[oid], "gemma") if oid in primary else (fallback[oid], "cosmos") if oid in fallback else (None, None)
+        v0.append({"id": oid, "name": name, "passed": name is not None, "namer": namer})
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(out / "objects_sample.jsonl", rows)
+    _write_jsonl(out / "names_V0.jsonl", v0)
+    (out / "flagged_ids.txt").write_text("".join(i + "\n" for i in flagged_ids))
+    print(json.dumps({"random": sum(r["group"] == "random" for r in rows), "flagged": len(flagged_ids),
+                      "by_kind": dict(Counter(r["kind_hint"] for r in rows if r["group"] == "random")),
+                      "v0_named": sum(r["passed"] for r in v0)}, indent=2))
+
+
 def stage_finalize_descriptions(args):
     import random
     d2 = args.round != "d1"
@@ -722,6 +783,13 @@ def main() -> None:
     sd2.add_argument("--events-dir", type=Path, default=V4_OUT)
     sd2.add_argument("--labels", type=Path, default=D1_LABELS)
     sd2.add_argument("--force", action="store_true", help="overwrite existing d2 seed files")
+    ns = sub.add_parser("naming-sample", help="naming fix: sample objects + today's names for the naming audit (CPU)")
+    ns.add_argument("--events-dir", type=Path, default=V4_OUT)
+    ns.add_argument("--labels", type=Path, default=D1_LABELS)
+    ns.add_argument("--out-dir", type=Path, default=NAMING_AB)
+    ns.add_argument("--n", type=int, default=100)
+    ns.add_argument("--seed", type=int, default=0)
+    ns.add_argument("--flagged", type=Path, default=None, help="object ids the user marked misnamed, one per line")
     ec = sub.add_parser("endings-check", help="d2 T2: GT ceiling of each ending check on a split (CPU)")
     ec.add_argument("--events-dir", type=Path, default=V4_OUT)
     ec.add_argument("--labelset-dir", type=Path, default=V2_OUT)
@@ -752,7 +820,7 @@ def main() -> None:
      "finalize-general": stage_finalize_general, "landmarks": stage_landmarks, "events": stage_events, "steer": stage_steer, "steer-objects": stage_steer_objects,
      "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
      "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed,
-     "endings-check": stage_endings_check}[args.stage](args)
+     "endings-check": stage_endings_check, "naming-sample": stage_naming_sample}[args.stage](args)
 
 
 if __name__ == "__main__":
