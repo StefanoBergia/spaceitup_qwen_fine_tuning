@@ -458,6 +458,11 @@ event 86%, the blob hiding the end 88%; 7% of routes have an obstacle event afte
   the object rows that left pairs unnamed and `steer` merges them into `steer/objects_eval.jsonl` for `steer_names`, then
   `steer` runs again. **Gate 0 turn threshold lowered to >= 35 (user)**; the stop slice keeps >= 150. Before finalize the
   stages read the d1 eval frames (`--frames data/prepared_habitat_instr_v3/eval_desc_entry.json`).
+- **Turn set result (2026-10-14/15).** names_steer_gemma_d2 seeded from d1's 683 + job 93469 (381 new, accept 0.959);
+  Gate 0 PASS 547 pairs (509 stop / 38 turn). **Gate 1 (https://claude.ai/artifact/Sa8RH4UeoiBYvZTGGxtTYM): 42/50 = 84%** —
+  turn 18/20, stop 24/30; 5 of the 8 misses are object names (door/column/pillar/table named as storage unit / bookshelf /
+  glass door / sofa), 2 stops (00831, the off-height floor scene; 00850 an "in front of" that is not), 1 missing step.
+  **Decision (user): fix naming before the steering compose and the full labelling job.**
 
 ### T2.5 Gates and run order
 
