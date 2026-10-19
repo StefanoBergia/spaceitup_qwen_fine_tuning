@@ -556,6 +556,93 @@ def label_object(ask, obj, seed, image=None, name_prompt="n1"):
             "attempts": 2, "finish": fin, "raw": raws}
 
 
+def _name_key(name):
+    return " ".join((name or "").lower().split())
+
+
+def candidate_names(oid, variant_names):
+    """The chooser's candidates for one object (Addendum C): the distinct names (case-insensitive) the variants gave it,
+    each {"name", "from": [variants]}; variants visited in sorted order, the first spelling kept; shuffled with a seed
+    stable per object, so a re-run shows the same order."""
+    by = {}
+    for v in sorted(variant_names):
+        n = variant_names[v].get(oid)
+        if n:
+            by.setdefault(_name_key(n), {"name": n, "from": []})["from"].append(v)
+    out = list(by.values())
+    random.Random("choose:" + oid).shuffle(out)
+    return out
+
+
+def choose_prompt(need, names, version="c1"):
+    """The chooser prompt (Addendum C): the n2 guidance and per-need hint, the lettered candidate names, "none"."""
+    if version != "c1":
+        raise ValueError(f"unknown choose prompt version {version!r}")
+    what = _N2_WHAT.get(need, "something the rover drives past.")
+    lines = "\n".join(f"{chr(97 + i)}. {n}" for i, n in enumerate(names))
+    return f"""{SCENE_INTRO}
+
+The picture has two panels. Left: the camera view with one region outlined and everything
+else dimmed. Right: a close-up of that region. The outlined region is {what}
+
+Here are names other people gave the outlined thing:
+{lines}
+
+Pick the one name that best names the single thing that fills most of the outline. Look at what
+is inside the outline, not at what is next to it or behind it. If the outline is mostly part of
+the building, the right name says which part (a wall, a column, a door, a partition, a railing);
+a furniture or appliance name is right only if the outline is clearly on it. If no name fits,
+answer "none".
+
+{_answer_block('{"choice": "<letter>|none"}')}"""
+
+
+_choose_text = choose_prompt      # choose_object's parameter of the same name shadows the function
+
+
+def parse_choice_reply(raw, n):
+    """The chosen letter ("a".. the n-th letter), "none", or None: one letter, alone or followed by "." ":" ")" and
+    text ("c. white wall"); a letter past the list, two letters or a name are None."""
+    _, answer = parse_trace(raw)
+    payload = answer_payload(answer)
+    choice = payload.get("choice") if payload is not None else (answer if answer and "{" not in answer else None)
+    if not isinstance(choice, str):
+        return None
+    s = choice.strip().lower()
+    if s.startswith("none"):
+        return "none"
+    m = re.fullmatch(r"\(?([a-z])\)?(?:[.:)]?(?:\s+.*)?)?", s, re.S)
+    return m.group(1) if m and ord(m.group(1)) - 97 < n else None
+
+
+def choose_object(ask, obj, candidates, fallback, seed, image=None, choose_prompt="c1"):
+    """Choose one object's name among `candidates` (candidate_names) with up to two calls (seed, seed + 1); "none" or two
+    unreadable replies give the object `fallback` (today's name) -- per object, written into this row (Addendum C).
+    One candidate is the pick and no candidate means the fallback, both without a call. Never raises on a bad reply."""
+    names = [c["name"] for c in candidates]
+    row = {"id": obj["object_id"], "need": obj["kind_hint"], "candidates": names, "single": len(names) == 1,
+           "choose_prompt": choose_prompt, "rejects": [], "attempts": 0, "finish": None}
+    fall = {"name": fallback, "passed": fallback is not None, "name_source": ["V0_fallback"]}
+    if not names:
+        return {**row, "choice": None, **fall}
+    if len(names) == 1:
+        return {**row, "choice": "a", "name": names[0], "passed": True, "name_source": candidates[0]["from"]}
+    image = image if image is not None else naming_image(obj["image"], obj["polygon"], obj["crop_box"] or obj["bbox"])
+    prompt = _choose_text(obj["kind_hint"], names, choose_prompt)
+    raws = []
+    for attempt, s in enumerate((seed, seed + 1), 1):
+        raw, fin = ask(image, prompt, s)
+        raws.append(raw)
+        choice = parse_choice_reply(raw, len(names))
+        if choice == "none":
+            return {**row, "choice": "none", "attempts": attempt, "finish": fin, **fall}
+        if choice is not None:
+            c = candidates[ord(choice) - 97]
+            return {**row, "choice": choice, "name": c["name"], "passed": True, "name_source": c["from"],
+                    "attempts": attempt, "finish": fin}
+    return {**row, "choice": None, "rejects": ["parse"], "attempts": 2, "finish": fin, "raw": raws, **fall}
+
+
 def route_objects(row):
     ids = [o for e in row["events"] for o in e["objects"]]
     return ids + ([row["stop"]["object"]] if row["stop"]["object"] else [])
@@ -644,6 +731,13 @@ def summarize_d1(rows, stage):
                                       / len(passed), 4) if passed else 0.0
         out["cosmos_rejects"] = dict(Counter(x for r in ok for x in r.get("cosmos_rejects", [])).most_common(15))
         out["namer"] = dict(Counter(r["namer"] for r in passed if r.get("namer")))
+    if stage == "choose":     # Addendum C: how each object got its name
+        out["choices"] = {"picked": sum(r.get("choice") not in (None, "none") and not r.get("single") for r in ok),
+                          "none": sum(r.get("choice") == "none" for r in ok),
+                          "failed": sum(r.get("choice") is None and "parse" in r.get("rejects", []) for r in ok),
+                          "single": sum(bool(r.get("single")) for r in ok),
+                          "no_candidates": sum(not r.get("candidates") for r in ok)}
+        out["from"] = dict(Counter(v for r in ok for v in r.get("name_source") or []))
     return out
 
 
