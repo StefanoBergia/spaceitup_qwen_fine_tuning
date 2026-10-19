@@ -1638,6 +1638,23 @@ substituted into the existing texts (failures are composed by the full job). Nev
         uv run scripts/prepare_habitat_instr.py steer-select
     # then G3' (label audit, as above) and steering Gate 1' (>= 90% each) before STAGE=steer and STAGE=full
 
+**Naming chooser (Addendum C, 2026-10-19).** The names audit's best namer (Qwen3.6, prompt n2) was right on 63% of
+the random objects, but a right name is among the four candidates (today's, Gemma, Qwen3.6, Cosmos-Reason2) for 90% of
+them. So a chooser model picks one candidate per object, or "none" — then that object keeps today's name. Three
+choosers are compared automatically against the audit's marks; the winner is checked by the user on 50 fresh objects.
+
+    uv run scripts/prepare_habitat_instr.py today-names                                    # names_{train,eval,steer}_V0.jsonl
+    MODE=choose sbatch slurm/naming_variants.sbatch                                        # GPU, ask first: C1 C2 C3 on the sample
+    uv run scripts/audit_instruction_labels.py --score-marks <marks dir> --names-glob "choose_C*.jsonl"
+    VARIANTS="V1 V2 V3" SETS="train eval steer" sbatch --time=3-00:00:00 slurm/naming_variants.sbatch   # GPU, ask first
+    uv run scripts/prepare_habitat_instr.py naming-sample --proportional --n 50 --seed 1 \
+        --exclude $D/naming_ab/objects_sample.jsonl --out-dir $D/naming_check
+    MODE=choose CHOOSERS=<winner> SETS=check sbatch slurm/naming_variants.sbatch            # GPU, ask first
+    uv run scripts/audit_instruction_labels.py --mode names --sample-dir $D/naming_check \
+        --names-glob "choose_*.jsonl" --out outputs/names_check.html                        # publish with marks; user decides
+    MODE=choose CHOOSERS=<winner> SETS="train eval steer" sbatch --time=3-00:00:00 slurm/naming_variants.sbatch
+    uv run scripts/prepare_habitat_instr.py rename-texts --variant <winner>                  # then steer, G3', Gate 1'
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
