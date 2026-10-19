@@ -206,16 +206,21 @@ moderate and the job is re-submitted until complete; `rename-texts` already refu
   or behind it; a building part when the outline is mostly part of the building; furniture or an appliance only if the
   outline is clearly on it), the per-need hint of n2, then: pick the one name that best names what fills the outline, or
   "none" when no name fits. Answer `{"choice": "<letter>|none"}` in the usual `<answer>` block.
-- **Output row** per object: `{"id", "name": the picked name or null, "passed": a name was picked, "choice":
-  letter|"none"|null, "candidates": [the names shown, in shown order], "from": [the variants that proposed the pick],
-  "chooser": model id, "choose_prompt": "c1"}`; a row records `"single": true` when there was only one distinct
-  candidate.
+- **Output row** per object: `{"id", "need", "name": the object's final name, "passed": a final name exists,
+  "choice": letter|"none"|null, "name_source": the variants that proposed the pick, or "V0_fallback", "candidates": [the
+  names shown, in shown order], "chooser": model id, "choose_prompt": "c1"}`; a row records `"single": true` when there
+  was only one distinct candidate. The final name is the pick, or today's name (V0) when the chooser said none or failed.
 - **One distinct candidate** (all variants agree; 12 of 119 objects): no call; that name is the pick. **No candidate**:
-  no call; `name` null (→ fallback).
-- **Parse failure**: one retry with seed + 1 (as `label_object`); two failures → `choice: null`, `name` null (→ fallback),
+  no call; the final name is V0 (null if V0 has none either).
+- **Parse failure**: one retry with seed + 1 (as `label_object`); two failures → `choice: null`, final name V0,
   counted and printed, never silent.
-- **Fallback**: a row with no pick leaves the object to today's name through the existing `rename-texts` primary /
-  fallback rule; no new fallback logic.
+- **Fallback is per object (decision 3)**: "none" or a failure gives *that object* today's name, written into the
+  chooser's own row (`name` = V0, `passed: true`, `name_source: "V0_fallback"`). It must not reach the per-route rule:
+  `choose_names` (used by `rename-texts`, compose in `STAGE=full`, and steering) switches a whole route to the fallback
+  names when any one object lacks a primary name, which would throw away the chooser's picks for the route's other
+  objects (7,936 of 21,007 described train routes have two or more objects). The per-route switch still happens on a
+  head-noun clash (route rules are out of scope); `rename-texts` reports it as `kept_on_old_names`. Only an object
+  with neither a pick nor a V0 name has `passed: false`.
 
 ### C3. Choosing the chooser (automatic, no new marks)
 
@@ -249,8 +254,8 @@ Scoring against the existing marks (`audit_instruction_labels.py --score-chooser
 
 Once the user accepts the check: the winning chooser runs on train, eval and steering (all objects); its rows become the
 primary names via `rename-texts` (the chooser output written as, or mapped to, the winner-file shape `rename-texts`
-reads: `{id, name, passed, need, ...}` with rows for every object; "none" rows count as answered), today's names the
-fallback — the rest as in section 4: `steer` + `steer-select`, G3′ and steering Gate 1′ (≥ 90% each), then — asking
+reads: `{id, name, passed, need, ...}` with rows for every object, "none" rows already carrying V0 per C2), today's
+names the fallback — the rest as in section 4: `steer` + `steer-select`, G3′ and steering Gate 1′ (≥ 90% each), then — asking
 before each — `STAGE=steer` and `STAGE=full`.
 
 ### Goals / non-goals
