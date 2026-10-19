@@ -226,3 +226,65 @@ def test_naming_sample_proportional_excludes(tmp_path):
     assert not set(ids) & {f"w{i}" for i in range(10)}
     assert ids == [r["object_id"] for r in run(tmp_path / "b")]
     assert sum(r["kind_hint"] == "object" for r in rows) < 20          # strata would take all 20 objects
+
+
+SBATCH = REPO / "slurm" / "naming_variants.sbatch"
+
+
+def test_naming_variants_sbatch_choose_mode():
+    text = SBATCH.read_text()
+    for model in ("Qwen/Qwen3.6-35B-A3B-FP8", "nvidia/Cosmos-Reason2-32B", "google/gemma-3-12b-it"):
+        assert model in text
+    for s in ('MODE="${MODE:-name}"', 'CHOOSERS="${CHOOSERS:-C1 C2 C3}"', 'CHOOSE_PROMPT="${CHOOSE_PROMPT:-c1}"',
+              'MAX_TOKENS="${MAX_TOKENS:-8192}"', 'CONCURRENCY="${CONCURRENCY:-32}"', 'OUT="${OUT:-outputs/instr_labels_v3}"',
+              '--stage choose', '--max-tokens "$MAX_TOKENS"', "naming_ab/choose_${c}.jsonl", "naming_check/choose_${c}.jsonl",
+              'names_${s}_${c}_${NAME_PROMPT}.jsonl'):
+        assert s in text, s
+
+
+def _free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
+def _dry_env(tmp_path):
+    import os
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "www").mkdir()
+    (tmp_path / "www" / "health").write_text("ok")
+    vllm = tmp_path / "venv" / "bin" / "vllm"
+    vllm.write_text('#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = --port ] && PORT=$2; shift; done\n'
+                    f'cd {tmp_path / "www"} && exec /usr/bin/python3 -m http.server "$PORT" --bind 0.0.0.0\n')
+    (tmp_path / "bin" / "nvidia-smi").write_text("#!/bin/bash\necho fake-nvidia-smi\n")
+    uv = tmp_path / "fake_uv"
+    uv.write_text(f'#!/bin/bash\necho "$*" >> {tmp_path / "calls.txt"}\n')
+    for f in (vllm, tmp_path / "bin" / "nvidia-smi", uv):
+        f.chmod(0o755)
+    data, out = tmp_path / "data", tmp_path / "out"
+    _write(data / "naming_ab" / "objects_sample.jsonl", [_o("a")])
+    for v in ("V0", "V1", "V2", "V3"):
+        _write(data / "naming_ab" / f"names_{v}.jsonl", [])
+    _write(data / "objects_train.jsonl", [_o("t")])
+    _write(out / "names_train_V0.jsonl", [])
+    for v in ("V1", "V2", "V3"):
+        _write(out / f"names_train_{v}_n2.jsonl", [])
+    return {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "VENV": str(tmp_path / "venv"),
+            "ENDPOINT_FILE": str(tmp_path / "endpoint.txt"), "PORT": str(_free_port()), "UV": str(uv),
+            "DATA": str(data), "OUT": str(out), "MODE": "choose", "CHOOSERS": "C1", "SETS": "sample train"}
+
+
+def test_naming_variants_sbatch_choose_dry_run(tmp_path):
+    import subprocess
+    env = _dry_env(tmp_path)
+    r = subprocess.run(["bash", str(SBATCH)], cwd=REPO, env=env, capture_output=True, text=True, timeout=150)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    calls = (tmp_path / "calls.txt").read_text()
+    assert "--stage choose" in calls and f"V0={tmp_path}/data/naming_ab/names_V0.jsonl" in calls
+    assert f"--out {tmp_path}/out/names_train_C1_n2.jsonl" in calls and "--max-tokens 8192" in calls
+    assert f"V2={tmp_path}/out/names_train_V2_n2.jsonl" in calls
+    (tmp_path / "out" / "names_train_V2_n2.jsonl").unlink()            # a missing input: stop before any model starts
+    r = subprocess.run(["bash", str(SBATCH)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0 and "names_train_V2_n2.jsonl" in r.stdout and "node=" not in r.stdout
