@@ -18,6 +18,9 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
         --objects data/prepared_habitat_instr_v3/steer/objects_eval.jsonl \
         --out outputs/instr_labels_v3/names_steer_gemma_d1.jsonl --concurrency 8 --resume
     #   --name-prompt n2: the naming-fix prompt (spec 2026-10-15); default n1
+    # naming chooser (spec 2026-10-15 Addendum C): pick one of the candidate names per object, or "none" (-> V0)
+    uv run scripts/label_descriptions.py --stage choose --objects OBJ --candidates V0=... V1=... V2=... V3=... \
+        --out OUT --resume
     #   --fallback-names OTHER_names.jsonl: used per route when --names leaves an object unnamed or two
     #   objects share a head noun ("name:clash"); rows carry "namer": primary|fallback
     # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
@@ -36,8 +39,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from rover_vlm.descriptions import (
-    d1_gate_failures, label_object, label_route, name_rows_split, names_missing, objects_needing_fallback,
-    route_objects, select_routes,
+    candidate_names, choose_object, d1_gate_failures, label_object, label_route, name_rows_split, names_missing,
+    objects_needing_fallback, route_objects, select_routes,
     summarize_d1,
 )
 from rover_vlm.labelling_io import chat_text, chat_with_image, connect, prepare_output, resolve_endpoint
@@ -56,7 +59,7 @@ def jsonl(path):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=["name", "compose"], required=True)
+    p.add_argument("--stage", choices=["name", "compose", "choose"], required=True)
     p.add_argument("--events", type=Path, help="events_*.jsonl (not with --all-objects)")
     p.add_argument("--all-objects", action="store_true",
                    help="stage name: name every row of --objects; no --events (steering, Addendum A1)")
@@ -73,6 +76,9 @@ def main() -> None:
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
                    help="both stages; thinking replies need room to reach </answer>")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--candidates", nargs="+", default=None, metavar="VARIANT=PATH",
+                   help="stage choose: the candidate name files (V0 = today's names, the fallback, is required)")
+    p.add_argument("--choose-prompt", choices=["c1"], default="c1", help="stage choose: the chooser prompt")
     p.add_argument("--name-prompt", choices=["n1", "n2"], default="n1",
                    help="stage name: naming prompt (n2 = naming fix, spec 2026-10-15)")
     p.add_argument("--concurrency", type=int, default=8)
@@ -83,12 +89,26 @@ def main() -> None:
 
     if args.all_objects and args.stage != "name":
         raise SystemExit("--all-objects is for --stage name")
-    if not args.all_objects:
+    variant_names = None
+    if args.stage == "choose":      # every row of --objects, no routes (Addendum C)
+        if not (args.objects and args.candidates):
+            raise SystemExit("--stage choose needs --objects and --candidates V0=PATH V1=PATH ...")
+        files = dict(c.split("=", 1) for c in args.candidates)
+        if "V0" not in files:
+            raise SystemExit("--stage choose needs V0=<today's names> among --candidates: it is the per-object fallback")
+        variant_names = {v: {r["id"]: r.get("name") for r in jsonl(f) if r.get("passed") and not r.get("error")}
+                         for v, f in files.items()}
+        items = jsonl(args.objects)
+        items = items[: args.limit] if args.limit else items
+        key = "object_id"
+    elif not args.all_objects:
         if not args.events:
             raise SystemExit("--events is required (unless --stage name --all-objects)")
         check_events_schema(args.events)
-    routes = [] if args.all_objects else select_routes(jsonl(args.events), args.limit)
-    if args.stage == "name":
+    routes = [] if args.all_objects or args.stage == "choose" else select_routes(jsonl(args.events), args.limit)
+    if args.stage == "choose":
+        pass
+    elif args.stage == "name":
         if not args.objects:
             raise SystemExit("--stage name needs --objects objects_*.jsonl")
         if args.all_objects:
@@ -145,8 +165,14 @@ def main() -> None:
                 if gap:
                     return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
-                row = (label_object(ask_image, it, args.seed, name_prompt=args.name_prompt) if args.stage == "name"
-                       else label_route(ask_text, it, names, args.seed, kinds, fb_names))
+                if args.stage == "choose":
+                    oid = it["object_id"]
+                    row = choose_object(ask_image, it, candidate_names(oid, variant_names), variant_names["V0"].get(oid),
+                                        args.seed, choose_prompt=args.choose_prompt)
+                    row["chooser"] = model
+                else:
+                    row = (label_object(ask_image, it, args.seed, name_prompt=args.name_prompt) if args.stage == "name"
+                           else label_route(ask_text, it, names, args.seed, kinds, fb_names))
             except Exception as e:  # noqa: BLE001 — one bad item must not kill the run
                 return {"id": it[key], "error": f"{type(e).__name__}: {e}"}
             row["latency_s"] = round(time.time() - t0, 2)
@@ -162,7 +188,7 @@ def main() -> None:
                 rate = i / max(1e-9, time.time() - started)
                 status = (f"ERROR {row['error']}" if row.get("error") else "ok" if row["passed"]
                           else f"FAIL {row['rejects']}")
-                shown = row.get("name") if args.stage == "name" else row.get("description")
+                shown = row.get("name") if args.stage in ("name", "choose") else row.get("description")
                 print(f"[{i}/{len(todo)}] {row['id']}  {rate * 60:.0f}/min  eta {(len(todo) - i) / rate / 60:.0f}m  "
                       f"{shown!r}  {status}", flush=True)
 

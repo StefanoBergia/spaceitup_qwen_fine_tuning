@@ -96,3 +96,80 @@ def test_summarize_choose():
     s = summarize_d1(rows, "choose")
     assert s["choices"] == {"picked": 1, "none": 1, "failed": 1, "single": 1, "no_candidates": 1}
     assert s["from"] == {"V2": 2, "V0_fallback": 3, "V1": 1}
+
+
+import importlib.util  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+_LSPEC = importlib.util.spec_from_file_location("label_descriptions", REPO / "scripts" / "label_descriptions.py")
+label = importlib.util.module_from_spec(_LSPEC)
+_LSPEC.loader.exec_module(label)
+
+
+def _write(p, rows):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def _rows(p):
+    return [json.loads(x) for x in Path(p).read_text().splitlines() if x.strip()]
+
+
+def _cli_fixture(tmp_path):
+    from PIL import Image
+    png = tmp_path / "f.png"
+    Image.new("RGB", (16, 16), (90, 90, 90)).save(png)
+    objs = [{"object_id": f"o{i}", "kind_hint": "wall", "image": str(png), "polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]],
+             "bbox": [0.1, 0.1, 0.9, 0.9], "crop_box": [0.1, 0.1, 0.9, 0.9]} for i in range(4)]
+    _write(tmp_path / "objects.jsonl", objs)
+    _write(tmp_path / "V0.jsonl", [{"id": "o0", "name": "sofa", "passed": True}, {"id": "o2", "name": "old name", "passed": True}])
+    _write(tmp_path / "V1.jsonl", [{"id": "o0", "name": "white wall", "passed": True}, {"id": "o1", "name": "door", "passed": True},
+                                   {"id": "o2", "name": "bad", "passed": False}])
+    return tmp_path
+
+
+def _run(monkeypatch, tmp_path, answer, *extra, candidates=("V0", "V1"), calls=None):
+    calls = [] if calls is None else calls
+
+    def fake_chat(client, model, image, prompt, max_tokens=None, seed=None):
+        calls.append(prompt)
+        if isinstance(answer, Exception):
+            raise answer
+        return _r(answer), "stop"
+    monkeypatch.setattr(label, "resolve_endpoint", lambda *a, **k: "http://x/v1")
+    monkeypatch.setattr(label, "connect", lambda *a, **k: (None, "fake-model"))
+    monkeypatch.setattr(label, "chat_with_image", fake_chat)
+    monkeypatch.setattr(sys, "argv", ["label_descriptions.py", "--stage", "choose", "--objects", str(tmp_path / "objects.jsonl"),
+                                      "--candidates", *[f"{v}={tmp_path / (v + '.jsonl')}" for v in candidates],
+                                      "--out", str(tmp_path / "out.jsonl"), *extra])
+    label.main()
+    return calls
+
+
+def test_choose_stage_writes_one_row_per_object(monkeypatch, tmp_path):
+    calls = _run(monkeypatch, _cli_fixture(tmp_path), "a")
+    rows = {r["id"]: r for r in _rows(tmp_path / "out.jsonl")}
+    assert set(rows) == {"o0", "o1", "o2", "o3"} and len(calls) == 1    # only o0 has two candidates
+    assert all(r["chooser"] == "fake-model" for r in rows.values())
+    assert rows["o0"]["name"] in ("sofa", "white wall") and rows["o0"]["attempts"] == 1
+    assert rows["o1"]["name"] == "door" and rows["o1"]["single"]
+    assert (rows["o2"]["name"], rows["o2"]["name_source"]) == ("old name", ["V0"])   # V0 is a candidate (V1's failed)
+    assert rows["o3"]["passed"] is False and rows["o3"]["candidates"] == []          # Review Focus 2: named nowhere
+
+
+def test_choose_stage_resumes_after_errors(monkeypatch, tmp_path):     # Review Focus 3
+    _run(monkeypatch, _cli_fixture(tmp_path), RuntimeError("server gone"))
+    assert [r["id"] for r in _rows(tmp_path / "out.jsonl") if r.get("error")] == ["o0"]
+    _run(monkeypatch, tmp_path, "b", "--resume")
+    rows = _rows(tmp_path / "out.jsonl")
+    assert not any(r.get("error") for r in rows) and {r["id"] for r in rows} == {"o0", "o1", "o2", "o3"}
+    assert next(r for r in rows if r["id"] == "o0")["passed"]
+
+
+def test_choose_stage_needs_v0(monkeypatch, tmp_path):               # Review Focus 4
+    calls = []
+    with pytest.raises(SystemExit, match="V0"):
+        _run(monkeypatch, _cli_fixture(tmp_path), "a", candidates=("V1",), calls=calls)
+    assert calls == [] and not (tmp_path / "out.jsonl").exists()
