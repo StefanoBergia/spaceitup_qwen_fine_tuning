@@ -173,3 +173,56 @@ def test_choose_stage_needs_v0(monkeypatch, tmp_path):               # Review Fo
     with pytest.raises(SystemExit, match="V0"):
         _run(monkeypatch, _cli_fixture(tmp_path), "a", candidates=("V1",), calls=calls)
     assert calls == [] and not (tmp_path / "out.jsonl").exists()
+
+
+from argparse import Namespace  # noqa: E402
+
+prep = sys.modules.get("prepare_habitat_instr")      # one module object per session (test_d2_stages' Pool pickles by name)
+if prep is None:
+    _PSPEC = importlib.util.spec_from_file_location("prepare_habitat_instr", REPO / "scripts" / "prepare_habitat_instr.py")
+    prep = importlib.util.module_from_spec(_PSPEC)
+    sys.modules["prepare_habitat_instr"] = prep
+    _PSPEC.loader.exec_module(prep)
+
+
+def _o(oid, kind="wall"):
+    return {"object_id": oid, "kind_hint": kind, "image": "/x.png", "polygon": [], "bbox": [0, 0, 1, 1], "crop_box": None}
+
+
+def test_today_names_stage_covers_every_object(tmp_path):
+    v4, lab = tmp_path / "v4", tmp_path / "labels"
+    _write(v4 / "objects_train.jsonl", [_o("t1"), _o("t2", "object")])
+    _write(v4 / "objects_eval.jsonl", [_o("e1"), _o("e2")])
+    _write(v4 / "steer" / "objects_eval.jsonl", [_o("s1")])
+    _write(lab / "names_train_gemma_d2.jsonl", [{"id": "t1", "name": "white wall", "passed": True}])
+    _write(lab / "names_train_d2.jsonl", [{"id": "t2", "name": "grey sofa", "passed": True}])        # Cosmos only
+    _write(lab / "names_eval_gemma_d2.jsonl", [])
+    _write(lab / "names_gate_gemma_d2.jsonl", [{"id": "e1", "name": "tall dark cabinet", "passed": True}])
+    _write(lab / "names_steer_gemma_d2.jsonl", [{"id": "e1", "name": "wall artwork", "passed": True},  # gate wins
+                                                 {"id": "s1", "name": "glass door", "passed": True}])
+    prep.stage_today_names(Namespace(labels=lab, events_dir=v4))
+    got = {s: {r["id"]: r for r in _rows(lab / f"names_{s}_V0.jsonl")} for s in ("train", "eval", "steer")}
+    assert got["train"]["t1"] == {"id": "t1", "need": "wall", "name": "white wall", "passed": True, "namer": "gemma"}
+    assert (got["train"]["t2"]["name"], got["train"]["t2"]["namer"], got["train"]["t2"]["need"]) == ("grey sofa", "cosmos", "object")
+    assert got["eval"]["e1"]["name"] == "tall dark cabinet"
+    assert got["eval"]["e2"] == {"id": "e2", "need": "wall", "name": None, "passed": False, "namer": None}
+    assert got["steer"]["s1"]["name"] == "glass door" and set(got["steer"]) == {"s1"}
+
+
+def test_naming_sample_proportional_excludes(tmp_path):
+    v4, lab = tmp_path / "v4", tmp_path / "labels"
+    _write(v4 / "objects_train.jsonl", [_o(f"w{i}") for i in range(180)] + [_o(f"b{i}", "object") for i in range(20)])
+    _write(lab / "names_train_gemma_d2.jsonl", [])
+    ex = tmp_path / "earlier.jsonl"
+    _write(ex, [_o(f"w{i}") for i in range(10)])
+
+    def run(out):
+        prep.stage_naming_sample(Namespace(events_dir=v4, labels=lab, out_dir=out, n=50, seed=1, flagged=None,
+                                           proportional=True, exclude=ex))
+        return _rows(out / "objects_sample.jsonl")
+    rows = run(tmp_path / "a")
+    ids = [r["object_id"] for r in rows]
+    assert len(rows) == 50 and all(r["group"] == "random" for r in rows)
+    assert not set(ids) & {f"w{i}" for i in range(10)}
+    assert ids == [r["object_id"] for r in run(tmp_path / "b")]
+    assert sum(r["kind_hint"] == "object" for r in rows) < 20          # strata would take all 20 objects

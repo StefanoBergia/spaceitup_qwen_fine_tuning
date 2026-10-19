@@ -86,6 +86,12 @@ an audit, then rename with the winner and substitute names into the texts. After
     uv run scripts/audit_instruction_labels.py --mode names --out outputs/names_audit.html
     VARIANTS=V2 SETS="train eval steer" sbatch slurm/naming_variants.sbatch  # GPU, ask first (winner V2 here)
     uv run scripts/prepare_habitat_instr.py rename-texts --variant V2
+
+Naming chooser (Addendum C, 2026-10-19): a model picks one of the four candidate names per object (or none -> today's).
+
+    uv run scripts/prepare_habitat_instr.py today-names                       # names_{train,eval,steer}_V0.jsonl
+    uv run scripts/prepare_habitat_instr.py naming-sample --proportional --n 50 --seed 1 \
+        --exclude data/prepared_habitat_instr_v4/naming_ab/objects_sample.jsonl --out-dir data/prepared_habitat_instr_v4/naming_check
 """
 
 import argparse
@@ -610,6 +616,36 @@ def _passed_names(*paths):
     return {r["id"]: r["name"] for p in paths for r in _rows_if(p) if r.get("passed")}
 
 
+def today_names(labels):
+    """{object id: (name, "gemma" | "cosmos")}: the name each object's routes use today (A5: Gemma, else Cosmos). Later
+    files win and the gate's names come last: the same eval object can carry different Gemma names in different files
+    (gate vs steer 25 of 55 differ), and the G3 texts were written with the gate's."""
+    L = Path(labels)
+    gemma = _passed_names(L / "names_train_gemma_d2.jsonl", L / "names_eval_gemma_d2.jsonl",
+                          L / "names_steer_gemma_d2.jsonl", L / "names_gate_gemma_d2.jsonl")
+    cosmos = _passed_names(L / "names_train_d2.jsonl", L / "names_eval_d2.jsonl", L / "names_gate_d2.jsonl")
+    return {**{o: (n, "cosmos") for o, n in cosmos.items()}, **{o: (n, "gemma") for o, n in gemma.items()}}
+
+
+def stage_today_names(args):
+    """Naming chooser (Addendum C, CPU): today's name (V0, the chooser's fourth candidate and its fallback) for every
+    object of the train, eval and steering objects files -> <labels>/names_{train,eval,steer}_V0.jsonl."""
+    today = today_names(args.labels)
+    sets = {"train": args.events_dir / "objects_train.jsonl", "eval": args.events_dir / "objects_eval.jsonl",
+            "steer": args.events_dir / "steer" / "objects_eval.jsonl"}
+    meta = {}
+    for s, f in sets.items():
+        rows = []
+        for o in _jsonl(f):
+            name, namer = today.get(o["object_id"], (None, None))
+            rows.append({"id": o["object_id"], "need": o["kind_hint"], "name": name, "passed": name is not None,
+                         "namer": namer})
+        _write_jsonl(args.labels / f"names_{s}_V0.jsonl", rows)
+        meta[s] = {"objects": len(rows), "unnamed": sum(not r["passed"] for r in rows),
+                   "namer": dict(Counter(r["namer"] for r in rows if r["namer"]))}
+    print(json.dumps(meta, indent=2))
+
+
 def stage_naming_sample(args):
     """Naming fix step 1 (CPU): objects_sample.jsonl (random train objects + flagged ids), names_V0.jsonl (the name the
     routes use today: Gemma, else Cosmos; eval objects: the gate's names over the eval files', as the G3 texts used
@@ -622,19 +658,22 @@ def stage_naming_sample(args):
     missing = [i for i in flagged_ids if i not in lookup]
     if missing:
         raise SystemExit(f"flagged ids in no objects file: {missing}")
-    strata = tuple((k, round(n * args.n / 100)) for k, n in NAMING_STRATA)
-    rows = naming_sample_rows(train, strata, args.seed, [lookup[i] for i in flagged_ids])
-    L = args.labels
-    # later files win; the gate's names last: the same eval object can carry different Gemma names in different files
-    # (gate vs steer 25 of 55 differ), and the G3 texts were written with the gate's
-    primary = _passed_names(L / "names_train_gemma_d2.jsonl", L / "names_eval_gemma_d2.jsonl",
-                            L / "names_steer_gemma_d2.jsonl", L / "names_gate_gemma_d2.jsonl")
-    fallback = _passed_names(L / "names_train_d2.jsonl", L / "names_eval_d2.jsonl", L / "names_gate_d2.jsonl")
+    exclude = getattr(args, "exclude", None)
+    skip = {o["object_id"] for o in _jsonl(exclude)} if exclude else set()
+    pool = [o for o in train if o["object_id"] not in skip]
+    if getattr(args, "proportional", False):    # Addendum C fresh check: plain random, population-weighted
+        import random
+        rows = [{**o, "group": "random"} for o in random.Random(args.seed).sample(
+            sorted(pool, key=lambda o: o["object_id"]), min(args.n, len(pool)))]
+        rows += [{**lookup[i], "group": "flagged"} for i in flagged_ids]
+    else:
+        strata = tuple((k, round(n * args.n / 100)) for k, n in NAMING_STRATA)
+        rows = naming_sample_rows(pool, strata, args.seed, [lookup[i] for i in flagged_ids])
+    today = today_names(args.labels)
     v0 = []
     for r in rows:
-        oid = r["object_id"]
-        name, namer = (primary[oid], "gemma") if oid in primary else (fallback[oid], "cosmos") if oid in fallback else (None, None)
-        v0.append({"id": oid, "name": name, "passed": name is not None, "namer": namer})
+        name, namer = today.get(r["object_id"], (None, None))
+        v0.append({"id": r["object_id"], "name": name, "passed": name is not None, "namer": namer})
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
     _write_jsonl(out / "objects_sample.jsonl", rows)
@@ -969,6 +1008,12 @@ def main() -> None:
     ns.add_argument("--n", type=int, default=100)
     ns.add_argument("--seed", type=int, default=0)
     ns.add_argument("--flagged", type=Path, default=None, help="object ids the user marked misnamed, one per line")
+    ns.add_argument("--proportional", action="store_true",
+                    help="plain random --n train objects (population-weighted), not the 45/45/10 strata (Addendum C)")
+    ns.add_argument("--exclude", type=Path, default=None, help="an objects_sample.jsonl whose objects are never sampled")
+    tn = sub.add_parser("today-names", help="naming chooser: today's name for every d2 object -> names_<set>_V0.jsonl (CPU)")
+    tn.add_argument("--labels", type=Path, default=D1_LABELS)
+    tn.add_argument("--events-dir", type=Path, default=V4_OUT)
     rt = sub.add_parser("rename-texts", help="naming fix: winner names into the d2 name files + texts (CPU)")
     rt.add_argument("--labels", type=Path, default=D1_LABELS)
     rt.add_argument("--events-dir", type=Path, default=V4_OUT)
@@ -1007,7 +1052,7 @@ def main() -> None:
      "steer-select": stage_steer_select, "finalize-steer": stage_finalize_steer,
      "finalize-descriptions": stage_finalize_descriptions, "d2-seed": stage_d2_seed,
      "endings-check": stage_endings_check, "naming-sample": stage_naming_sample,
-     "rename-texts": stage_rename_texts}[args.stage](args)
+     "rename-texts": stage_rename_texts, "today-names": stage_today_names}[args.stage](args)
 
 
 if __name__ == "__main__":
