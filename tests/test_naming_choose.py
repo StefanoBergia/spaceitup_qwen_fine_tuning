@@ -288,3 +288,50 @@ def test_naming_variants_sbatch_choose_dry_run(tmp_path):
     (tmp_path / "out" / "names_train_V2_n2.jsonl").unlink()            # a missing input: stop before any model starts
     r = subprocess.run(["bash", str(SBATCH)], cwd=REPO, env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode != 0 and "names_train_V2_n2.jsonl" in r.stdout and "node=" not in r.stdout
+
+
+_ASPEC = importlib.util.spec_from_file_location("audit_instruction_labels", REPO / "scripts" / "audit_instruction_labels.py")
+audit = importlib.util.module_from_spec(_ASPEC)
+_ASPEC.loader.exec_module(audit)
+
+
+def _sample_dir(tmp_path):
+    d = tmp_path / "check"
+    _write(d / "objects_sample.jsonl", [{**_o("a"), "group": "random"}, {**_o("b", "object"), "group": "random"},
+                                        {**_o("c", "object"), "group": "random"}])
+    _write(d / "names_V0.jsonl", [{"id": o, "name": "old", "passed": True} for o in "abc"])
+    _write(d / "choose_C1.jsonl", [
+        {"id": "a", "name": "white wall", "passed": True, "choice": "b", "single": False, "candidates": ["x", "white wall"],
+         "rejects": [], "name_source": ["V2"]},
+        {"id": "b", "name": "old", "passed": True, "choice": "none", "single": False, "candidates": ["x", "y"],
+         "rejects": [], "name_source": ["V0_fallback"]},
+        {"id": "c", "name": "old", "passed": True, "choice": None, "single": False, "candidates": ["x", "y"],
+         "rejects": ["parse"], "name_source": ["V0_fallback"]}])
+    return d
+
+
+def test_score_choosers(tmp_path):
+    d = _sample_dir(tmp_path)
+    marks = {"a": {"verdict": "done", "right": ["white wall"]}, "b": {"verdict": "none"},
+             "c": {"verdict": "done", "right": ["chair"]}}
+    s = audit.score_dir(d, marks, "choose_*.jsonl")
+    assert s["random"]["C1"]["correct"] == 1 and s["random"]["C1"]["n"] == 3 and set(s["random"]) == {"C1"}
+    assert s["choosers"]["C1"]["picked"] == 1 and s["choosers"]["C1"]["none"] == 1 and s["choosers"]["C1"]["failed"] == 1
+    assert s["choosers"]["C1"]["from"] == {"V2": 1, "V0_fallback": 2}
+    assert "choosers" not in audit.score_dir(d, marks, "names_V*.jsonl")        # name files carry no choice
+
+
+def test_names_glob_picks_only_the_chooser_file(tmp_path, monkeypatch):     # Review Focus 5
+    d = _sample_dir(tmp_path)
+    vn = audit._variant_names(d, "choose_*.jsonl")
+    assert set(vn) == {"C1"} and set(audit._variant_names(d)) == {"V0"}
+    monkeypatch.setattr(audit, "_naming_jpeg", lambda row: b"jpg")
+    items = audit.names_items(_rows(d / "objects_sample.jsonl"), vn, seed=0)
+    assert [it["names"] for it in items] == [["white wall"], ["old"], ["old"]]
+
+
+def test_page_sanitizes_doc_ids():
+    html = audit.TEMPLATE.read_text()
+    assert 'const docId = (id) => id.replace(/[^A-Za-z0-9_\\-.~:@+]/g, "_");' in html
+    assert 'db.collection("marks").doc(docId(id)).set(' in html
+    assert "marks[oid || d.id] = { verdict, note, right, oid };" in html

@@ -73,7 +73,7 @@ from PIL import Image, ImageDraw
 
 import numpy as np
 
-from rover_vlm.descriptions import PROMPT_VERSION, naming_image, template_description
+from rover_vlm.descriptions import PROMPT_VERSION, naming_image, summarize_d1, template_description
 from rover_vlm.habitat_choice import _draw_badge, _font
 from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_instruction
 from rover_vlm.landmarks import Camera
@@ -622,11 +622,25 @@ def score_names(sample_rows, variant_names, marks):
     return out
 
 
-def _variant_names(sample_dir):
-    """{variant: {object_id: name or None}} from <sample_dir>/names_V*.jsonl (passed rows only)."""
+def _variant_names(sample_dir, glob="names_V*.jsonl"):
+    """{variant: {object_id: name or None}} from the <sample_dir> files matching `glob` (passed rows only); the key is
+    the file stem after its first "_" (names_V2 -> V2, choose_C1 -> C1)."""
     out = {}
-    for p in sorted(Path(sample_dir).glob("names_V*.jsonl")):
-        out[p.stem[len("names_"):]] = {r["id"]: (r.get("name") if r.get("passed") else None) for r in jsonl(p)}
+    for p in sorted(Path(sample_dir).glob(glob)):
+        out[p.stem.split("_", 1)[1]] = {r["id"]: (r.get("name") if r.get("passed") else None) for r in jsonl(p)}
+    return out
+
+
+def score_dir(sample_dir, marks, glob="names_V*.jsonl"):
+    """score_names over the <sample_dir> files matching `glob`; chooser files (rows with "choice", Addendum C) also
+    report how each object got its name. A chooser row's name is already the final one (the pick, or V0)."""
+    rows = jsonl(Path(sample_dir) / "objects_sample.jsonl")
+    out = score_names(rows, _variant_names(sample_dir, glob), marks)
+    for p in sorted(Path(sample_dir).glob(glob)):
+        file_rows = jsonl(p)
+        if any("choice" in r for r in file_rows):
+            st = summarize_d1(file_rows, "choose")
+            out.setdefault("choosers", {})[p.stem.split("_", 1)[1]] = {**st["choices"], "from": st["from"]}
     return out
 
 
@@ -673,17 +687,18 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--sample-dir", type=Path, default=REPO_ROOT / "data" / "prepared_habitat_instr_v4" / "naming_ab",
                     help="--mode names / --score-marks: objects_sample.jsonl + names_V*.jsonl (naming fix)")
+    ap.add_argument("--names-glob", default="names_V*.jsonl",
+                    help='--mode names / --score-marks: which name files of --sample-dir ("choose_*.jsonl": choosers)')
     ap.add_argument("--score-marks", type=Path, default=None,
                     help="dir of names-audit mark files: print per-variant accuracy and the gate")
     args = ap.parse_args()
 
     if args.score_marks:
-        rows = jsonl(args.sample_dir / "objects_sample.jsonl")
-        print(json.dumps(score_names(rows, _variant_names(args.sample_dir), _read_marks(args.score_marks)), indent=2))
+        print(json.dumps(score_dir(args.sample_dir, _read_marks(args.score_marks), args.names_glob), indent=2))
         return
     if args.mode == "names":
         rows = jsonl(args.sample_dir / "objects_sample.jsonl")
-        items = names_items(rows, _variant_names(args.sample_dir), args.seed)
+        items = names_items(rows, _variant_names(args.sample_dir, args.names_glob), args.seed)
         payload = {"items": items, "population": {"random": sum(r["group"] == "random" for r in rows),
                                                   "flagged": sum(r["group"] == "flagged" for r in rows)},
                    "seed": args.seed, "mode": "names", "verdicts": VERDICTS["names"], "source": str(args.sample_dir)}

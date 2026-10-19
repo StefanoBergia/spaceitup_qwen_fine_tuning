@@ -127,6 +127,8 @@ const items = DATA.items;
 const marks = {};           // id -> {verdict, note}
 let idx = 0, db = null, mode = "connecting";
 const $ = (id) => document.getElementById(id);
+// artifact-db doc ids allow only these characters (object ids may hold ","); the real id stays in the mark's oid
+const docId = (id) => id.replace(/[^A-Za-z0-9_\-.~:@+]/g, "_");
 const LS = `instr-audit-${DATA.mode || "labels"}-${DATA.seed}`;
 const VERDICTS = DATA.verdicts;
 const tone = (v) => !v ? "unsure" : (v === "ok" || v === "none_ok" || v === "done") ? "ok" : v === "unsure" ? "unsure" : "bad";
@@ -279,7 +281,7 @@ async function persist(id) {
   if (!db) { $("status").textContent = mode === "local" ? "saved in this browser" : "saving…"; return; }
   $("status").textContent = "saving…";
   try {
-    await db.collection("marks").doc(id).set({ ...m, t: new Date().toISOString() });
+    await db.collection("marks").doc(docId(id)).set({ ...m, t: new Date().toISOString() });
     $("status").textContent = "saved";
   } catch (e) {
     $("status").textContent = `not saved (${e.code || "error"})`;
@@ -326,7 +328,7 @@ go(firstOpen < 0 ? 0 : firstOpen);
   }
   mode = "db";
   db.collection("marks").onSnapshot((snap) => {
-    for (const d of snap.docs) { const { verdict, note, right, oid } = d.data(); marks[d.id] = { verdict, note, right, oid }; }
+    for (const d of snap.docs) { const { verdict, note, right, oid } = d.data(); marks[oid || d.id] = { verdict, note, right, oid }; }
     saveLocal(); render();
   }, (e) => { $("status").textContent = `sync stopped (${e.code})`; });
 })();
