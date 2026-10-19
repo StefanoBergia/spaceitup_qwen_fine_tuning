@@ -601,8 +601,9 @@ _choose_text = choose_prompt      # choose_object's parameter of the same name s
 
 
 def parse_choice_reply(raw, n):
-    """The chosen letter ("a".. the n-th letter), "none", or None: one letter, alone or followed by "." ":" ")" and
-    text ("c. white wall"); a letter past the list, two letters or a name are None."""
+    """The chosen letter ("a".. the n-th letter), "none", or None: one letter, alone, in brackets, or followed by
+    "." ":" ")" and text ("c. white wall"); a letter past the list, two letters ("b or c"), a name ("a white wall") or
+    prose are None."""
     _, answer = parse_trace(raw)
     payload = answer_payload(answer)
     choice = payload.get("choice") if payload is not None else (answer if answer and "{" not in answer else None)
@@ -611,7 +612,7 @@ def parse_choice_reply(raw, n):
     s = choice.strip().lower()
     if s.startswith("none"):
         return "none"
-    m = re.fullmatch(r"\(?([a-z])\)?(?:[.:)]?(?:\s+.*)?)?", s, re.S)
+    m = re.fullmatch(r"\(?([a-z])\)?(?:[.:)]\s*.*)?", s, re.S)
     return m.group(1) if m and ord(m.group(1)) - 97 < n else None
 
 

@@ -43,8 +43,10 @@ def test_parse_choice_reply():                                       # Review Fo
     assert parse_choice_reply("<answer>b</answer>", 3) == "b"              # a bare answer counts
     assert parse_choice_reply(_r("none"), 3) == "none"
     assert parse_choice_reply(_r("None of these"), 3) == "none"
-    for bad in ("d", "b, c", "white wall", ""):                            # past the list, two, a name, empty
+    for bad in ("d", "b, c", "white wall", "",                               # past the list, two, a name, empty
+                "b or c", "b and c", "b\nc", "a b", "a white wall", "a good fit is c"):   # final review I2
         assert parse_choice_reply(_r(bad), 3) is None, bad
+    assert parse_choice_reply(_r("(b)"), 3) == "b" and parse_choice_reply(_r("b)"), 3) == "b"
     assert parse_choice_reply("I think it is a wall", 3) is None
 
 
@@ -124,9 +126,10 @@ def _cli_fixture(tmp_path):
     objs = [{"object_id": f"o{i}", "kind_hint": "wall", "image": str(png), "polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]],
              "bbox": [0.1, 0.1, 0.9, 0.9], "crop_box": [0.1, 0.1, 0.9, 0.9]} for i in range(4)]
     _write(tmp_path / "objects.jsonl", objs)
-    _write(tmp_path / "V0.jsonl", [{"id": "o0", "name": "sofa", "passed": True}, {"id": "o2", "name": "old name", "passed": True}])
+    _write(tmp_path / "V0.jsonl", [{"id": "o0", "name": "sofa", "passed": True}, {"id": "o1", "name": None, "passed": False},
+                                   {"id": "o2", "name": "old name", "passed": True}, {"id": "o3", "name": None, "passed": False}])
     _write(tmp_path / "V1.jsonl", [{"id": "o0", "name": "white wall", "passed": True}, {"id": "o1", "name": "door", "passed": True},
-                                   {"id": "o2", "name": "bad", "passed": False}])
+                                   {"id": "o2", "name": "bad", "passed": False}, {"id": "o3", "name": None, "passed": False}])
     return tmp_path
 
 
@@ -335,3 +338,24 @@ def test_page_sanitizes_doc_ids():
     assert 'const docId = (id) => id.replace(/[^A-Za-z0-9_\\-.~:@+]/g, "_");' in html
     assert 'db.collection("marks").doc(docId(id)).set(' in html
     assert "marks[oid || d.id] = { verdict, note, right, oid };" in html
+
+
+def test_choose_stage_refuses_incomplete_candidate_files(monkeypatch, tmp_path):   # final review I1
+    _cli_fixture(tmp_path)
+    rows = [r for r in _rows(tmp_path / "V1.jsonl") if r["id"] != "o3"] + [{"id": "o1", "error": "ReadTimeout"}]
+    _write(tmp_path / "V1.jsonl", [r for r in rows if r["id"] != "o1"] + [{"id": "o1", "error": "ReadTimeout"}])
+    calls = []
+    with pytest.raises(SystemExit, match="V1: 2 of 4 objects have no row"):
+        _run(monkeypatch, tmp_path, "a", calls=calls)
+    assert calls == [] and not (tmp_path / "out.jsonl").exists()
+    _run(monkeypatch, tmp_path, "a", "--allow-partial-candidates")                # a deliberate partial run
+    assert {r["id"] for r in _rows(tmp_path / "out.jsonl")} == {"o0", "o1", "o2", "o3"}
+
+
+def test_score_choosers_reports_error_and_missing_rows(tmp_path):     # final review (graded up): a crashed chooser
+    d = _sample_dir(tmp_path)
+    rows = _rows(d / "choose_C1.jsonl")
+    _write(d / "choose_C1.jsonl", [rows[0], {"id": "c", "error": "ReadTimeout"}])             # b missing, c an error
+    s = audit.score_dir(d, {o: {"verdict": "done", "right": ["white wall"]} for o in "abc"}, "choose_*.jsonl")
+    assert (s["choosers"]["C1"]["errors"], s["choosers"]["C1"]["missing"]) == (1, 2)
+    assert s["random"]["C1"]["correct"] == 1

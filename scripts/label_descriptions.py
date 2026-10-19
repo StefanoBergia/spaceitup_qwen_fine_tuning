@@ -79,6 +79,8 @@ def main() -> None:
     p.add_argument("--candidates", nargs="+", default=None, metavar="VARIANT=PATH",
                    help="stage choose: the candidate name files (V0 = today's names, the fallback, is required)")
     p.add_argument("--choose-prompt", choices=["c1"], default="c1", help="stage choose: the chooser prompt")
+    p.add_argument("--allow-partial-candidates", action="store_true",
+                   help="stage choose: run although a candidate file lacks rows for some objects (they get fewer names)")
     p.add_argument("--name-prompt", choices=["n1", "n2"], default="n1",
                    help="stage name: naming prompt (n2 = naming fix, spec 2026-10-15)")
     p.add_argument("--concurrency", type=int, default=8)
@@ -96,10 +98,22 @@ def main() -> None:
         files = dict(c.split("=", 1) for c in args.candidates)
         if "V0" not in files:
             raise SystemExit("--stage choose needs V0=<today's names> among --candidates: it is the per-object fallback")
-        variant_names = {v: {r["id"]: r.get("name") for r in jsonl(f) if r.get("passed") and not r.get("error")}
-                         for v, f in files.items()}
+        cand_rows = {v: jsonl(f) for v, f in files.items()}
+        variant_names = {v: {r["id"]: r.get("name") for r in rows if r.get("passed") and not r.get("error")}
+                         for v, rows in cand_rows.items()}
         items = jsonl(args.objects)
         items = items[: args.limit] if args.limit else items
+        # a namer run cut short (TIMEOUT, error rows) would let the chooser decide on fewer names, for good: --resume
+        # never revisits a decided row and rename-texts only sees the chooser's file. A rejected name is a row.
+        gaps = []
+        for v, rows in sorted(cand_rows.items()):
+            answered = {r["id"] for r in rows if not r.get("error")}
+            n = sum(1 for it in items if it["object_id"] not in answered)
+            if n:
+                gaps.append(f"{v}: {n} of {len(items)} objects have no row in {files[v]}")
+        if gaps and not args.allow_partial_candidates:
+            raise SystemExit("incomplete candidate files — " + "; ".join(gaps) + " — finish (re-submit) the namer runs, "
+                             "or pass --allow-partial-candidates")
         key = "object_id"
     elif not args.all_objects:
         if not args.events:

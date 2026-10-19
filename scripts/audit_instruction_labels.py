@@ -638,9 +638,13 @@ def score_dir(sample_dir, marks, glob="names_V*.jsonl"):
     out = score_names(rows, _variant_names(sample_dir, glob), marks)
     for p in sorted(Path(sample_dir).glob(glob)):
         file_rows = jsonl(p)
-        if any("choice" in r for r in file_rows):
+        if p.stem.startswith("choose_") or any("choice" in r for r in file_rows):
             st = summarize_d1(file_rows, "choose")
-            out.setdefault("choosers", {})[p.stem.split("_", 1)[1]] = {**st["choices"], "from": st["from"]}
+            answered = {r["id"] for r in file_rows if not r.get("error")}
+            # an object with an error row or no row scores as wrong: say how many, so a crashed chooser is visible
+            out.setdefault("choosers", {})[p.stem.split("_", 1)[1]] = {
+                **st["choices"], "from": st["from"], "errors": st["errors"],
+                "missing": sum(1 for r in rows if r["object_id"] not in answered)}
     return out
 
 
