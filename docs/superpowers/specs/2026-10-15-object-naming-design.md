@@ -154,3 +154,114 @@ dated pointers in the two specs above.
 Which blob gets named (outline geometry, ghost "empty space" outlines, missing steps), the `no_behind_anchor` drop rule,
 the off-height-floor scene 00831, any change to compose. If the audit shows names failing because the outline itself
 covers the wrong thing, that is reported, not fixed here.
+
+## Addendum C (2026-10-19): choose among the candidate names
+
+### Why
+
+The names audit (https://claude.ai/artifact/NUcQg8M3DmTCEpUKmDZ629, 117 of 119 objects marked) failed the 95% gate:
+
+| | random 100 (98 marked) | wall / object / opening | flagged fixed |
+|---|---|---|---|
+| V0 today | 45 (0.459) | 27/45, 17/45, 1/8 | 0/19 |
+| V1 Gemma n2 | 55 (0.561) | 31/45, 23/45, 1/8 | 4/19 |
+| V2 Qwen3.6 n2 | 62 (0.633) | 34/45, 27/45, 1/8 | 10/19 |
+| V3 Cosmos-Reason2-32B n2 | 49 (0.500) | 24/45, 24/45, 1/8 | 9/19 |
+
+- n2 fixed the targeted error (building part named as furniture: V0 18 → V2 2 of the 90 non-opening random objects); V2's
+  remaining misses are other wrong objects (20) and blanks (6, thinking cut at `--max-tokens 4096`).
+- The four variants disagree a lot (V1 = V2 = V3 on 15 of 119 objects), and a right name is among the candidates far more
+  often than any one variant gives it: on the 90 non-opening random objects a right name is among all four candidates
+  for 81 (90%); V0+V1+V2 77, V1+V2+V3 78, V1+V2 74.
+- Openings fail for every variant (1/8): the user's notes call 7 of 8 "empty space" — outline geometry, out of scope.
+- 2 marks were lost: object ids with ',' (`gap1@-8.0,-1.3`) are not valid artifact-db doc ids.
+
+### Decisions (user, 2026-10-19)
+
+1. A second model **chooses** among the candidate names, or says none fits (option 2 of the result report).
+2. **Target: as close to 90% as possible** (the ceiling of choosing among the four), on the random sample.
+3. **"None fits" → today's name (V0) stays** — the existing rename-texts fallback.
+4. **GPU time is not a constraint**: all four candidates for every object.
+5. **A fresh 50-object check** of the winning chooser's final names, by the user, before renaming everything.
+
+### C1. Candidates for every d2 object
+
+V1, V2 and V3 name every object d2 uses — train 29,556, eval 3,033, steering 1,064 — with prompt n2
+(`VARIANTS="V1 V2 V3" SETS="train eval steer" sbatch slurm/naming_variants.sbatch`, outputs
+`outputs/instr_labels_v3/names_{train,eval,steer}_V<k>_n2.jsonl`). Changes to the job: `--max-tokens 8192` (env
+`MAX_TOKENS`, default 8192; V2 lost 7 of 119 to the 4096 cut) and a higher `CONCURRENCY` default (32; the builder
+measures throughput on the first minutes of the run and may set it differently). V0 is today's name per object, by the
+same precedence as `names_V0.jsonl` (gate names last), for every object in the three sets.
+
+Estimated cost at the comparison job's settings (8 concurrent requests): V1 ~2.5 h, V2 ~30 h, V3 ~30 h (25 s per object
+each); higher concurrency should cut V2/V3 severalfold. The job resumes after a TIMEOUT (`--resume`), so `--time` may stay
+moderate and the job is re-submitted until complete; `rename-texts` already refuses incomplete candidate files.
+
+### C2. The chooser
+
+- **Input**: the same two-panel naming image the namers saw; the object's distinct candidate names (V0–V3, case-
+  insensitive, only names that passed the name rejects), shuffled with a seed stable per object, lettered a, b, c, d;
+  plus "none of these fits". No model labels on the names.
+- **Prompt (c1)**: the n2 guidance (name the single thing that fills most of the outline; look inside it, not next to it
+  or behind it; a building part when the outline is mostly part of the building; furniture or an appliance only if the
+  outline is clearly on it), the per-need hint of n2, then: pick the one name that best names what fills the outline, or
+  "none" when no name fits. Answer `{"choice": "<letter>|none"}` in the usual `<answer>` block.
+- **Output row** per object: `{"id", "name": the picked name or null, "passed": a name was picked, "choice":
+  letter|"none"|null, "candidates": [the names shown, in shown order], "from": [the variants that proposed the pick],
+  "chooser": model id, "choose_prompt": "c1"}`; a row records `"single": true` when there was only one distinct
+  candidate.
+- **One distinct candidate** (all variants agree; 12 of 119 objects): no call; that name is the pick. **No candidate**:
+  no call; `name` null (→ fallback).
+- **Parse failure**: one retry with seed + 1 (as `label_object`); two failures → `choice: null`, `name` null (→ fallback),
+  counted and printed, never silent.
+- **Fallback**: a row with no pick leaves the object to today's name through the existing `rename-texts` primary /
+  fallback rule; no new fallback logic.
+
+### C3. Choosing the chooser (automatic, no new marks)
+
+One GPU job runs three choosers on the 119 audited objects with prompt c1: **C1 = Qwen3.6-35B-A3B-FP8, C2 =
+Cosmos-Reason2-32B, C3 = Gemma 3 12B** (`--max-tokens 8192`), outputs `naming_ab/choose_C<k>.jsonl`.
+
+Scoring against the existing marks (`audit_instruction_labels.py --score-choosers`):
+- **Final-name accuracy** (the gate number): the name the object would end up with — the pick, or V0 when the chooser
+  said none or failed — is among the user's ticked names; an object marked "none is right" (or Done with nothing
+  ticked) counts as wrong for every chooser (no candidate was right; the fallback name is wrong too). Reported on the 98
+  marked random objects, by kind, with the 90-object non-opening figure and the ceiling (81/90) beside it; flagged
+  objects as a count.
+- Also reported: how often each chooser said none, failed to parse, and picked each source variant.
+- **Winner**: the highest final-name accuracy on the random objects (ties → the faster model). Prompt changes after
+  seeing the scores are allowed at most once (c2), on the same three or fewer choosers, to limit tuning to these 98
+  objects; the fresh check below is the guard.
+
+### C4. The fresh 50-object check (user)
+
+- **Sample**: 50 random train objects not among the 119, **population-weighted** (plain random over `objects_train.jsonl`,
+  seed 1 — not the 45/45/10 strata), so the check estimates what training sees; openings appear at their ~1% share.
+- **Needs**: the four candidates for those objects (from C1's train run), then the winning chooser on them.
+- **Page**: the names audit page (`--mode names`) with one candidate per object — the final name (pick, or V0 on
+  "none") — tick it if right, "none is right" otherwise, note for the right name.
+- **Report**: accuracy with a 95% interval next to the C3 estimate. No hard gate: the user decides whether to go on.
+- **Page fix first**: artifact-db doc ids may hold only letters, digits and `_ - . ~ : @ +`; the page stores each mark
+  under a sanitized doc id (other characters → `_`) and keeps the real object id in the mark's `oid`, which
+  `--score-marks` already prefers.
+
+### C5. Rollout
+
+Once the user accepts the check: the winning chooser runs on train, eval and steering (all objects); its rows become the
+primary names via `rename-texts` (the chooser output written as, or mapped to, the winner-file shape `rename-texts`
+reads: `{id, name, passed, need, ...}` with rows for every object; "none" rows count as answered), today's names the
+fallback — the rest as in section 4: `steer` + `steer-select`, G3′ and steering Gate 1′ (≥ 90% each), then — asking
+before each — `STAGE=steer` and `STAGE=full`.
+
+### Goals / non-goals
+
+- Goal: final names as close to 90% right as possible on the random sample, confirmed on 50 fresh objects.
+- Non-goals: writing new names (the chooser only picks); fixing outlines (openings that are "empty space", outlines over
+  several things) — reported, not fixed; changing compose or the route rules.
+- Anti-goal: a score that only holds on the 98 tuned objects — hence one prompt revision at most, and the fresh check.
+
+### Left to the builder
+
+The exact c1 wording beyond the points above; where the choose stage lives (`label_descriptions.py --stage choose`
+or its own script); how chooser rows map to the winner-file name `rename-texts` reads; the concurrency value; how the
+50-object sample is built (a `naming-sample` option or a new stage) — all with tests first, as before.
