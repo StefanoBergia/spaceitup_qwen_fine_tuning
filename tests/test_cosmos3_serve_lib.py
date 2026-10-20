@@ -92,6 +92,21 @@ def test_stop_server_without_server_is_noop(fake):
     assert run(fake, None, "cosmos3_stop_server").returncode == 0
 
 
+def test_startup_timeout_dumps_where_the_server_is_stuck(fake):
+    # jobs 94222/94251: Cosmos-R2's server printed nothing for 40 minutes; the timeout must say where it hung
+    (fake / "venv" / "bin" / "vllm").write_text("#!/usr/bin/env python3\nimport time\n\n\ndef hang_here():\n"
+                                                "    time.sleep(60)\n\n\nhang_here()\n")
+    (fake / "bin" / "curl").write_text("#!/bin/bash\nexit 1\n")
+    (fake / "bin" / "curl").chmod(0o755)
+    r = run(fake, None, "set -euo pipefail; STARTUP_POLLS=1 STARTUP_POLL_S=1; cosmos3_start_server >/dev/null; "
+                        "cosmos3_wait_healthy")                # the jobs run under set -euo pipefail
+    assert r.returncode == 1
+    assert "did not become healthy" in r.stderr
+    assert "in hang_here" in r.stderr                     # faulthandler's traceback of the stuck server
+    assert "vllm" in r.stdout and "hang_here" not in r.stdout   # its ps line (state, wchan) is in the log too
+    assert "ulimit -c 0" in LIB.read_text()               # the SIGABRT must not write a 60 GB core file
+
+
 @pytest.mark.parametrize("name", ["cosmos3_serve_lib.sh", "label_descriptions.sbatch"])
 def test_bash_syntax(name):
     r = subprocess.run(["bash", "-n", str(ROOT / "slurm" / name)], capture_output=True, text=True)

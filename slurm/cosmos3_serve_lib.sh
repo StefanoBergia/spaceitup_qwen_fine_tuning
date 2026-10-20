@@ -34,6 +34,8 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 export HF_HUB_OFFLINE=1          # weights come from the shared NFS cache, never the network
 export VLLM_LOGGING_LEVEL=INFO
+# A server stuck at startup prints every thread's traceback on SIGABRT (cosmos3_dump_stuck).
+export PYTHONFAULTHANDLER=1
 
 # A100 is SM80, which FlashInfer claims to support, so vLLM picks its top-k/top-p sampler
 # by default — and that kernel is JIT-compiled on first use, needing `ninja` and `nvcc` at
@@ -51,6 +53,7 @@ cosmos3_start_server() {
     fi
     # A stale file from a previous job would point the client at a dead host.
     rm -f "$ENDPOINT_FILE"
+    ulimit -c 0     # cosmos3_dump_stuck's SIGABRT must not write a 60 GB core file
     BASE="http://$(hostname):$PORT"
     echo "node=$(hostname) port=$PORT model=$MODEL max_model_len=$MAX_MODEL_LEN"
     nvidia-smi
@@ -91,7 +94,8 @@ cosmos3_wait_healthy() {
     # Model load is slow (35 GB off NFS); poll rather than guess a sleep. Bail out early if
     # the server dies so the failure shows up here rather than as a 40-minute timeout.
     echo "waiting for $BASE/health ..."
-    for i in $(seq 1 240); do
+    local polls="${STARTUP_POLLS:-240}" every="${STARTUP_POLL_S:-10}"
+    for i in $(seq 1 "$polls"); do
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             echo "ERROR: vllm exited during startup — see the traceback above." >&2
             wait "$SERVER_PID"
@@ -99,12 +103,26 @@ cosmos3_wait_healthy() {
         fi
         if curl -sf "$BASE/health" >/dev/null 2>&1; then
             echo "$BASE/v1" > "$ENDPOINT_FILE"
-            echo "READY after ~$((i * 10))s -> $ENDPOINT_FILE ($BASE/v1)"
+            echo "READY after ~$((i * every))s -> $ENDPOINT_FILE ($BASE/v1)"
             nvidia-smi --query-gpu=memory.used,memory.total --format=csv
             return 0
         fi
-        sleep 10
+        sleep "$every"
     done
-    echo "ERROR: server did not become healthy within 40 minutes." >&2
+    echo "ERROR: server did not become healthy within $((polls * every / 60)) minutes; where it is stuck:" >&2
+    cosmos3_dump_stuck
     exit 1
+}
+
+cosmos3_dump_stuck() {
+    # Jobs 94222/94251: Cosmos-R2's server printed nothing at all for 40 minutes. Log each server process's
+    # state and kernel wait channel (D = stuck in I/O, e.g. NFS) and its last open files, then SIGABRT it:
+    # PYTHONFAULTHANDLER prints its Python tracebacks into this log.
+    local p
+    for p in $(pgrep -P "$SERVER_PID") "$SERVER_PID"; do
+        ps -o pid=,stat=,wchan:32=,etime=,args= -p "$p" | cut -c1-200 || true    # it may exit meanwhile (set -e)
+        ls -l "/proc/$p/fd" 2>/dev/null | grep -v -e "pipe:" -e "socket:" -e "/dev/" | tail -5 || true
+        kill -ABRT "$p" 2>/dev/null || true
+    done
+    sleep 5
 }
