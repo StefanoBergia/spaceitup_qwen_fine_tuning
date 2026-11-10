@@ -35,7 +35,7 @@ HALL_MAX_W = 2.2
 HALL_BACK_M = (0.0, 1.0, 2.0)
 HALL_END_M = 1.5
 HALL_OPEN_W = 3.2             # wider than this ahead = the hallway opens into a room
-HALL_MID_BACK_M = (0.0, 1.0)  # "in the hallway": the corridor is this narrow at the goal and 1 m back (Addendum A1)
+HALL_ALONG_M = 1.0            # "in the hallway": the corridor is as narrow this far along its axis (Addendum A1)
 WALL_M = 1.5                  # "by the wall": the nearest wall within this (Addendum A1; was 1.0, "against the wall")
 WALL_DOMINANT_M = 0.5         # ... alone, or this much nearer than any other wall within WALL_M
 ROOM_CLEAR_M = 1.5
@@ -197,20 +197,24 @@ def _hallway_end(grid, route, goal, h):
     return None
 
 
-def _hallway(grid, route, goal, h, walls):
-    """In the hallway (Addendum A1): two facing walls at the rover's left and right, the corridor <= HALL_MAX_W wide at
-    the goal and HALL_MID_BACK_M back (the end of the hallway is tried before this)."""
-    sides = [(a, d) for a, d in walls if _gap(a, 90.0) <= 30.0 or _gap(a, -90.0) <= 30.0]
-    if not any(_gap(a, b) >= 150.0 and da + db <= HALL_MAX_W for i, (a, da) in enumerate(sides) for b, db in sides[i + 1:]):
-        return None
-    widths = []
-    for back in HALL_MID_BACK_M:
-        p = _point_back(route, back)
-        w = None if p is None else width_across(grid, p, h)
-        if w is None or w > HALL_MAX_W:
-            return None
-        widths.append(w)
-    return {"width_m": round(max(widths), 2)}
+def _hallway(grid, goal, h, walls):
+    """In the hallway (Addendum A1): two facing walls (>= 150 deg apart) at most HALL_MAX_W apart, and the corridor as
+    narrow HALL_ALONG_M along its own axis on at least one side (it goes on; the end of the hallway is tried before
+    this). The axis need not follow the rover's heading: the probe's corridors mostly ran across or diagonal to it."""
+    right = np.array([-h[1], h[0]])
+    for i, (a, da) in enumerate(walls):
+        for b, db in walls[i + 1:]:
+            if _gap(a, b) < 150.0 or da + db > HALL_MAX_W:
+                continue
+            r = np.radians(a)
+            n = np.cos(r) * h + np.sin(r) * right                 # towards wall a
+            axis = np.array([-n[1], n[0]])
+            for side in (1, -1):
+                p = goal + side * HALL_ALONG_M * axis
+                (oa, wa), (ob, wb) = _march(grid, p, n, RAY_MAX_M), _march(grid, p, -n, RAY_MAX_M)
+                if oa == "occ" and ob == "occ" and wa + wb <= HALL_MAX_W:
+                    return {"width_m": round(da + db, 2)}
+    return None
 
 
 def _wall(walls):
@@ -244,7 +248,7 @@ def place_at(grid, route_xz):
     for place, found in (("doorway", lambda: _doorway(grid, goal, h)),
                          ("corner", lambda: _corner(grid, goal, h, walls)),
                          ("hallway_end", lambda: _hallway_end(grid, route, goal, h)),
-                         ("hallway", lambda: _hallway(grid, route, goal, h, walls)),
+                         ("hallway", lambda: _hallway(grid, goal, h, walls)),
                          ("wall", lambda: _wall(walls)),
                          ("room_middle", lambda: _room_middle(grid, goal))):
         m = found()

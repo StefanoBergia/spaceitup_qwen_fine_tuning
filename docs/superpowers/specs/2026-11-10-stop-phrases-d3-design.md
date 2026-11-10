@@ -209,9 +209,10 @@ helped. Under the best tuning (below, before the new types) 33.5% were still dro
 
 1. **Rays see through unknown cells** to find walls (an OCC cell beyond unknown ones is still a wall), but a ray that
    crossed unknown never reports "free"; unknown cells still never count as free space.
-2. **"in the hallway"** (new place): two facing walls (directions ≥ 150° apart, each within 30° of the rover's left or
-   right), the corridor ≤ `HALL_MAX_W` (2.2 m) wide at the goal and 1 m back, not at its end (the end of the hallway is
-   tried first). Place order: doorway → corner → end of the hallway → in the hallway → by the wall → middle of the room.
+2. **"in the hallway"** (new place): two facing walls (directions ≥ 150° apart) at most `HALL_MAX_W` (2.2 m) apart,
+   and the corridor as narrow 1 m along its own axis on at least one side, not at its end (the end of the hallway is
+   tried first). The axis need not follow the rover's heading: requiring the walls at the rover's left and right fired
+   for 0.5% of the probe, because most corridors ran across or diagonal to the final heading (ruling while building). Place order: doorway → corner → end of the hallway → in the hallway → by the wall → middle of the room.
 3. **"by the wall"** replaces "against the wall": the nearest wall within `WALL_M` = 1.5 m (was 1.0), when it is
    alone or at least 0.5 m nearer than any other wall within that reach.
 4. **The middle of the room** needs ≥ 45% of its 1.5 m disc seen free (was 60%).

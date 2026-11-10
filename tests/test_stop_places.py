@@ -188,3 +188,14 @@ def test_room_middle_at_45_percent_seen():
     s = np.full((100, 100), UNKNOWN, np.uint8)
     s[:, 50:] = FREE                                                   # half the space seen, no wall
     assert _place(s, 2.5) == "room_middle"
+
+
+def test_hallway_running_across_the_heading():
+    """A corridor whose axis is 40 deg off the rover's final heading (walls 1.0 m either side) is still a hallway."""
+    s = _free()
+    n = np.array([np.sin(np.radians(50.0)), np.cos(np.radians(50.0))])      # wall normal, 50 deg right of +z... in xz
+    zz, xx = np.mgrid[0:100, 0:100]
+    off = (xx + 0.5) * 0.05 - 2.5, (zz + 0.5) * 0.05 - 2.5
+    proj = off[0] * n[0] + off[1] * n[1]
+    s[(np.abs(proj) >= 1.0) & (np.abs(proj) <= 1.15)] = OCC
+    assert _place(s, 2.5) == "hallway"
