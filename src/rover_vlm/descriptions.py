@@ -22,6 +22,7 @@ from .instructions import (
     _DRAWING, _EGOCENTRIC, _TRAILING, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index,
     head_noun, normalize_name,
 )
+from .route_events import stop_kind
 from .traces import SCENE_INTRO, answer_payload, parse_trace
 
 DESC_WORDS = (5, 45)
@@ -51,7 +52,20 @@ STOP_RELATION_WORDS = {
     ("near", "just past"): ("just past", "right past", "just beyond", "just after"),
     ("distance", "before"): ("before", "short of"),
     ("distance", "past"): ("past", "after", "beyond"),
+    ("object", "in front of"): ("in front of",),            # d3 (spec 2026-11-10): an object within 1.5 m
+    ("object", "behind"): ("behind",),
+    ("object", "next to"): ("next to", "beside"),
 }
+# d3 places (rover_vlm.stop_places.PLACES): the canonical clause, and the words a text may use for it
+PLACE_TEXT = {"doorway": "in the doorway", "corner": "in the corner", "hallway_end": "at the end of the hallway",
+              "wall": "against the wall", "room_middle": "in the middle of the room"}
+PLACE_WORDS = {"doorway": ("doorway", "door opening"), "corner": ("corner",),
+               "hallway_end": ("end of the hallway", "end of the corridor", "end of the hall"),
+               "wall": ("against the wall", "beside the wall", "by the wall"),
+               "room_middle": ("middle of the room", "centre of the room", "center of the room")}
+# a d3 visible stop says where the rover ends up, never how far: these distance words are rejected after the stop word
+_DISTANCE = re.compile(r"\b(?:a little|a bit|slightly|well|far|a good way)\s+(?:past|before|beyond|after|short of)\b"
+                       r"|\bjust\s+(?:past|after|beyond)\b|\bshort of\b|\b(?:metres?|meters?|steps?)\b", re.I)
 # The words that say each coarse distance-stop amount (route_events.AMOUNT_STEPS); the stop
 # clause must hold one of its own amount's words (Addendum A 1).
 STOP_AMOUNT_WORDS = {
@@ -84,7 +98,11 @@ def event_phrase(ev, names):
 def stop_text(stop, name, wall=False):
     """The stop clause. A distance stop needs its coarse `amount` (rows from before Addendum A
     carry only distance_m: they raise instead of being mis-rendered). A "past" stop measured
-    from a wall (`wall`) is past the END of the wall."""
+    from a wall (`wall`) is past the END of the wall. d3: an object stop says its relation, a place stop its place."""
+    if stop["type"] == "object":
+        return f"stop {stop['relation']} the {name}"
+    if stop["type"] == "place":
+        return "stop " + PLACE_TEXT[stop["place"]]
     if stop["type"] == "near":
         return f"stop {stop['relation']} the {name}"
     if stop["type"] == "after_last":
@@ -265,6 +283,35 @@ def d2_rejects(text, ev):
     return turn_rejects(text, ev["events"]) + ending_rejects(text, ev.get("stop"))
 
 
+def _d3_clause_rejects(text, stop, clause):
+    """A d3 stop clause (the text after the last stop word, from `clause`): no distance words, and a place stop says
+    one of its place's words."""
+    out = ["stop:distance"] if _DISTANCE.search(text, clause) else []
+    if stop["type"] == "place" and not _words_re(PLACE_WORDS[stop["place"]]).search(text, clause):
+        out.append("stop:place")
+    return out
+
+
+def visible_stop_rejects(text, stop):
+    """The names-free checks of a d3 visible stop (finalize re-checks reused texts with them): a stop word, then no
+    distance words, the place's words (place) or the relation's words (object). [] for every other stop."""
+    if stop_kind(stop) is None:
+        return []
+    stops = list(_STOP.finditer(text or ""))
+    if not stops:
+        return ["stop:missing"]
+    clause = stops[-1].end()
+    out = _d3_clause_rejects(text, stop, clause)
+    if stop["type"] == "object" and not _words_re(STOP_RELATION_WORDS[("object", stop["relation"])]).search(text, clause):
+        out.append("stop:relation")
+    return out
+
+
+def d3_rejects(text, ev):
+    """finalize's re-check of a d3 text against its events row: d2_rejects plus the visible-stop checks."""
+    return d2_rejects(text, ev) + visible_stop_rejects(text, ev.get("stop"))
+
+
 def description_rejects(text, events, stop, names):
     """Why a description is unusable for these events; [] when it is fine."""
     if not text:
@@ -325,6 +372,8 @@ def description_rejects(text, events, stop, names):
             words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
             if not words or not stops or not _words_re(words).search(text, clause):
                 out.append("stop:amount")
+        if stop["type"] in ("object", "place") and stops:
+            out += _d3_clause_rejects(text, stop, clause)
     # the turn phrase's side word is the turn's: blank it (same length, spans stay valid) before side ownership
     side_text = _TURN.sub(lambda m: " " * len(m.group(0)), text)
     return out + turn_rejects(text, events) + _side_rejects(side_text, events, spans)
@@ -364,7 +413,7 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d5"
+PROMPT_VERSION = "d6"
 
 # d1 speaking styles: the shared STYLES minus the "why or where it leads" one (audit of gate r2: both
 # unnatural labels came from it), plus a step-by-step one. The shared STYLES (i4) is unchanged.
@@ -796,9 +845,11 @@ def desc_check(ev, objects):
 
 
 def _check_ending(stop, objects):
-    """The ending the eval checks (d2 T2): a stop in view, out of sight behind X (X's image outline), or a turn."""
+    """The ending the eval checks (d2 T2): a stop in view, out of sight behind X (X's image outline), or a turn.
+    A d3 stop in view also carries its kind ("object:next to", "place:corner") for the eval's by_stop split."""
     if stop is None or stop["type"] not in ("behind", "turn"):
-        return {"type": "stop"}
+        kind = stop_kind(stop)
+        return {"type": "stop", "stop": kind} if kind else {"type": "stop"}
     if stop["type"] == "turn":
         return {"type": "turn"}
     return {"type": "behind", "outline": objects[stop["object"]]["polygon"]}

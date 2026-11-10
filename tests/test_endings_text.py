@@ -22,7 +22,7 @@ NAMES = {"f:b1": "grey sofa", "f:b2": "dining table"}
 
 
 def test_prompt_version():
-    assert PROMPT_VERSION == "d5"
+    assert PROMPT_VERSION == "d6"
 
 
 @pytest.mark.parametrize("events,stop,text", [
