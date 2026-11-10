@@ -46,6 +46,24 @@ export PYTHONFAULTHANDLER=1
 # runtime compilation out of the picture — cf. the Triton/Python.h trap in CLAUDE.md.
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
+# Since thor's 2026-10-20 migration SLURM hands a MIG slice over as CUDA_VISIBLE_DEVICES=MIG-<uuid>, and vLLM 0.21
+# int()s that variable (vllm/platforms/interface.py, device_id_to_physical_device_id): jobs 95027/95028 died at
+# startup on 3g.40gb slices with "invalid literal for int() with base 10: 'MIG-...'". The job's cgroup exposes only
+# its own slice, so CUDA's device 0 is that slice (the October jobs got a plain index). Only when nvidia-smi -L lists
+# exactly that one slice is the UUID swapped for 0; anything else stops the job rather than guess a device.
+cosmos3_mig_index() {
+    case "${CUDA_VISIBLE_DEVICES:-}" in MIG-*) ;; *) return 0 ;; esac
+    local seen
+    seen=$(nvidia-smi -L | grep -o 'MIG-[0-9a-fA-F-]*' || true)
+    if [ "$seen" != "$CUDA_VISIBLE_DEVICES" ]; then
+        echo "ERROR: CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES, but this job sees the MIG devices [${seen//$'\n'/ }]:" \
+             "not exactly that one slice, so index 0 may be another one (vLLM cannot take the UUID itself)." >&2
+        exit 1
+    fi
+    echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES -> 0 (the only MIG slice this job sees; vLLM needs an index)"
+    export CUDA_VISIBLE_DEVICES=0
+}
+
 cosmos3_start_server() {
     if [ ! -x "$VENV/bin/vllm" ]; then
         echo "ERROR: $VENV missing. Run 'bash slurm/cosmos3_env.sh' on the login node first." >&2
@@ -57,6 +75,7 @@ cosmos3_start_server() {
     BASE="http://$(hostname):$PORT"
     echo "node=$(hostname) port=$PORT model=$MODEL max_model_len=$MAX_MODEL_LEN"
     nvidia-smi
+    cosmos3_mig_index
 
     # --hf-overrides loads only the reasoner tower out of the shared MoT checkpoint, and
     # --mm-encoder-tp-mode data is the Cosmos vision tower's mode; both are Cosmos-only, so a

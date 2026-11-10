@@ -107,6 +107,51 @@ def test_startup_timeout_dumps_where_the_server_is_stuck(fake):
     assert "ulimit -c 0" in LIB.read_text()               # the SIGABRT must not write a 60 GB core file
 
 
+# --- MIG slices: since thor's 2026-10-20 migration SLURM passes a slice as CUDA_VISIBLE_DEVICES=MIG-<uuid>, and
+# vLLM 0.21 int()s that variable at startup (jobs 95027/95028 died on 3g.40gb slices, 2026-11-05) ---------------
+MIG = "MIG-9d95aad1-c150-5d8e-b377-7bac5fee0e2e"
+
+
+def _mig_fake(fake, listed):
+    """nvidia-smi -L lists one GPU and the given MIG UUIDs; vllm records the CUDA_VISIBLE_DEVICES it was given."""
+    lines = ["GPU 0: NVIDIA A100-SXM4-80GB (UUID: GPU-11111111-2222-3333-4444-555555555555)"]
+    lines += [f"  MIG 3g.40gb     Device  {i}: (UUID: {u})" for i, u in enumerate(listed)]
+    (fake / "bin" / "nvidia-smi").write_text('#!/bin/bash\n[ "$1" = -L ] && cat <<"EOF"\n' + "\n".join(lines)
+                                             + "\nEOF\nexit 0\n")
+    (fake / "venv" / "bin" / "vllm").write_text(
+        f'#!/bin/bash\necho "${{CUDA_VISIBLE_DEVICES-unset}}" > {fake}/cvd.txt\nexec sleep 60\n')
+
+
+def _start_with_cvd(fake, cvd):
+    return run(fake, None, f"export CUDA_VISIBLE_DEVICES={cvd}; cosmos3_start_server >/dev/null; sleep 0.5; "
+                           "cosmos3_stop_server")
+
+
+def test_mig_uuid_becomes_index_zero(fake):
+    _mig_fake(fake, [MIG])
+    r = _start_with_cvd(fake, MIG)
+    assert r.returncode == 0, r.stderr
+    assert (fake / "cvd.txt").read_text().strip() == "0"
+
+
+@pytest.mark.parametrize("listed", [["MIG-00000000-1111-2222-3333-444444444444"],
+                                    [MIG, "MIG-00000000-1111-2222-3333-444444444444"], []])
+def test_mig_uuid_refused_unless_it_is_the_only_visible_slice(fake, listed):
+    # index 0 is only safe when the job's cgroup shows exactly its own slice
+    _mig_fake(fake, listed)
+    r = _start_with_cvd(fake, MIG)
+    assert r.returncode == 1
+    assert "CUDA_VISIBLE_DEVICES" in r.stderr
+    assert not (fake / "cvd.txt").exists()          # vllm was never started
+
+
+def test_numeric_cuda_visible_devices_untouched(fake):
+    _mig_fake(fake, [])                             # the full A100: SLURM gives an index, as before
+    r = _start_with_cvd(fake, "0")
+    assert r.returncode == 0, r.stderr
+    assert (fake / "cvd.txt").read_text().strip() == "0"
+
+
 @pytest.mark.parametrize("name", ["cosmos3_serve_lib.sh", "label_descriptions.sbatch"])
 def test_bash_syntax(name):
     r = subprocess.run(["bash", "-n", str(ROOT / "slurm" / name)], capture_output=True, text=True)
