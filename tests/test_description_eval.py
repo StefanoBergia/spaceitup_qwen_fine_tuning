@@ -333,3 +333,31 @@ def test_steering_by_slice():
     assert m["slice"] == "all" and m["by_slice"]["stop"]["pair_success"] == 1.0
     assert m["by_slice"]["turn"]["n_pairs"] == 1 and m["by_slice"]["turn"]["pair_success"] == 0.0
     assert aggregate_steering_metrics(_pair(A_GT, B_GT))["slice"] == "stop"
+
+
+# --- d3: description metrics by stop kind (spec 2026-11-10-stop-phrases-d3-design.md "Eval") ---------------------
+def _stop_rec(rid, kind, end):
+    chk = {"pose_xz": [0.0, 0.0], "heading_xz": [0.0, 1.0], "goal_xz": [0.0, 4.0], "events": [],
+           "ending": {"type": "stop", "stop": kind} if kind else {"type": "stop"}}
+    gt = [[0.5, 1.0, 1], [0.5, 0.7, 1]]
+    return {"id": rid, "parsed": {"path": [[0.5, 1.0, 1], end]}, "gt": {"path": gt, "goal": gt[-1]},
+            "metrics": {"goal_point_error": 0.1, "mean_point_error": 0.05},
+            "habitat_meta": {"desc_check": chk, "pair_id": None}}
+
+
+def test_by_stop_groups_visible_stops_by_kind():
+    hit, miss = [0.5, 0.7, 1], [0.5, 0.9, 1]
+    recs = [_stop_rec("c1", "place:corner", hit), _stop_rec("c2", "place:corner", hit),
+            _stop_rec("c3", "place:corner", miss), _stop_rec("n1", "object:next to", miss),
+            _stop_rec("n2", "object:next to", miss)]
+    by = aggregate_description_metrics(recs)["by_stop"]
+    assert set(by) == {"place:corner", "object:next to"}
+    assert by["place:corner"]["n"] == 3 and by["place:corner"]["ending_rate"] == pytest.approx(2 / 3)
+    assert by["object:next to"]["n"] == 2 and by["object:next to"]["ending_rate"] == 0.0
+    assert {"follow_rate", "gt_follow_rate", "endpoint_error_median", "constant_goal_endpoint_error_median",
+            "gt_ending_rate"} <= set(by["place:corner"])
+
+
+def test_by_stop_is_empty_for_d2_records():
+    recs = [_stop_rec("a", None, [0.5, 0.7, 1]), _stop_rec("b", None, [0.5, 0.9, 1])]
+    assert aggregate_description_metrics(recs)["by_stop"] == {}
