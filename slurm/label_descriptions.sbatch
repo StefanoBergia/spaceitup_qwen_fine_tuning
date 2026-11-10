@@ -42,6 +42,9 @@
 #     ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix sbatch slurm/label_descriptions.sbatch            # gate
 #     ROUND=d2 DATA=data/prepared_habitat_instr_v4 NAMER=mix STAGE=full sbatch slurm/label_descriptions.sbatch
 #     ROUND=d2 STEER_DIR=data/prepared_habitat_instr_v4/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch
+# d3 stop phrases (2026-11-10, spec docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md): as d2 with ROUND=d3
+#     ROUND=d3 DATA=data/prepared_habitat_instr_v5 NAMER=mix sbatch slurm/label_descriptions.sbatch            # gate
+#     ROUND=d3 DATA=data/prepared_habitat_instr_v5 NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch
 #SBATCH --job-name=cosmos3-label-desc
 #SBATCH --partition=A100
 #SBATCH --gres=gpu:3g.40gb:1
@@ -60,14 +63,14 @@ OUT=outputs/instr_labels_v3
 CONCURRENCY="${CONCURRENCY:-8}"
 UV="${UV:-$HOME/.local/bin/uv}"
 STAGE="${STAGE:-gate}"
-ROUND="${ROUND:-d1}"     # label-file tag: d1, or d2 (turn events; files seeded by prepare_habitat_instr.py d2-seed)
+ROUND="${ROUND:-d1}"     # label-file tag: d1, d2 (turn events) or d3 (stop phrases); d2 / d3 files seeded by prepare_habitat_instr.py <round>-seed
 GATE_SPLIT=eval          # d2 gates only the changed eval routes (events_eval_changed.jsonl, written by d2-seed)
-case "$ROUND" in d1|d2) ;; *) echo "ROUND must be d1 or d2, got '$ROUND'"; exit 1 ;; esac
+case "$ROUND" in d1|d2|d3) ;; *) echo "ROUND must be d1, d2 or d3, got '$ROUND'"; exit 1 ;; esac
 if [ "$ROUND" != d1 ]; then
     GATE_SPLIT=eval_changed
     if [ "$STAGE" = gate ]; then   # only the gate reads the changed-eval files (steer stages need no DATA)
         for f in events objects; do
-            [ -f "$D/${f}_eval_changed.jsonl" ] || { echo "missing $D/${f}_eval_changed.jsonl — run prepare_habitat_instr.py d2-seed"; exit 1; }
+            [ -f "$D/${f}_eval_changed.jsonl" ] || { echo "missing $D/${f}_eval_changed.jsonl — run prepare_habitat_instr.py ${ROUND}-seed"; exit 1; }
         done
     fi
 fi
