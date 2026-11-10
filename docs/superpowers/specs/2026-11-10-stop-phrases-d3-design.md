@@ -193,3 +193,32 @@ steering cuts with new stops. The full suite (1,249 at the start) stays green.
 7. The place thresholds above are starting values, calibrated in the dry run and at G1.
 8. Relation order behind → in front of → next to, and place order doorway → corner → hallway end → wall →
    middle of the room; the first fit wins.
+
+## Addendum A1 (2026-11-10): the dry-run gate, more places, the wall as a backup
+
+**Finding.** After the final review's fixes, a probe of the d3 code on 800 v4 routes that end in view (400 eval +
+400 train, seed 0) dropped **45%** as `no_stop_place` (gate: 15%): against a wall 31%, corner 11%, middle of the room
+6%, object relations ~6% in all, doorway 1%, end of the hallway 0%. Why: the explored grid is mostly unknown around the
+end (a median 13 of 16 rays stopped on an unknown cell before reaching a wall that was there); a third of the drops had
+their nearest wall 1.0–1.5 m away (too far for "against the wall", too close for the middle of the room); the rest were
+open space less than 60% seen. Skipping the goal's own cell (45%) or letting rays cross ≤ 2 unknown cells (43.6%) barely
+helped. Under the best tuning (below, before the new types) 33.5% were still dropped: corridors without their end
+11.9%, 2–4 walls at similar distances 11.9%, one clearly nearest wall 4.6%, open but < 45% seen 3.6%.
+
+**Decision (user, 2026-11-10): option 3 (more place types) with option 2 (the wall as an anchor) as a backup.**
+
+1. **Rays see through unknown cells** to find walls (an OCC cell beyond unknown ones is still a wall), but a ray that
+   crossed unknown never reports "free"; unknown cells still never count as free space.
+2. **"in the hallway"** (new place): two facing walls (directions ≥ 150° apart, each within 30° of the rover's left or
+   right), the corridor ≤ `HALL_MAX_W` (2.2 m) wide at the goal and 1 m back, not at its end (the end of the hallway is
+   tried first). Place order: doorway → corner → end of the hallway → in the hallway → by the wall → middle of the room.
+3. **"by the wall"** replaces "against the wall": the nearest wall within `WALL_M` = 1.5 m (was 1.0), when it is
+   alone or at least 0.5 m nearer than any other wall within that reach.
+4. **The middle of the room** needs ≥ 45% of its 1.5 m disc seen free (was 60%).
+5. **Backup (option 2):** when no place fits, a visible wall-like blob within `CLOSE_M` ahead of the goal (along >
+   |lateral|, as `_near_stop`) gives "stop in front of the <wall name>" (stop type `wall`, kind "wall:in front of").
+   Only then; otherwise the route is dropped. Open space less than 45% seen stays dropped (calling it open would be a
+   guess).
+
+Expected on the probe sample: ~17% dropped without the backup, ~13% with it. The calibration gate of the plan (Task 9)
+still applies to the full events run.
