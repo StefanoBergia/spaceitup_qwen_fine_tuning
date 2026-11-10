@@ -419,8 +419,8 @@ STEER_WORKERS = 4
 _STEER = {}
 
 
-def _steer_init(names, fallback, kinds):
-    _STEER.update(names=names, fallback=fallback, kinds=kinds)
+def _steer_init(names, fallback, kinds, stops="d2"):
+    _STEER.update(names=names, fallback=fallback, kinds=kinds, stops=stops)
 
 
 def steer_frame(item):
@@ -428,7 +428,7 @@ def steer_frame(item):
     missing = []
     try:
         pairs, reasons = frame_pairs(item["sample_dir"], item["candidate_index"], _STEER["names"],
-                                     _STEER["fallback"], _STEER["kinds"], missing=missing)
+                                     _STEER["fallback"], _STEER["kinds"], missing=missing, stops=_STEER["stops"])
         for p in pairs:
             p.update({k: item[k] for k in ("sample_id", "viewpoint", "is_aug", "scene_id", "image", "sample_dir")})
     except Exception as e:  # noqa: BLE001 — one bad frame is a counted reason, not a dead stage
@@ -496,7 +496,8 @@ def _run_steer_pool(args):
     if args.limit:
         items = items[: args.limit]
     prim, (names, fallback, kinds) = _steer_names(args)
-    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=(names, fallback, kinds)) as pool:
+    init = (names, fallback, kinds, getattr(args, "stops", "d2"))
+    with Pool(STEER_WORKERS, initializer=_steer_init, initargs=init) as pool:
         return items, prim, pool.map(steer_frame, items, chunksize=8)
 
 
@@ -1056,6 +1057,7 @@ def main() -> None:
     ec.add_argument("--labelset-dir", type=Path, default=V2_OUT)
     ec.add_argument("--split", default="eval", choices=list(SPLITS))
     m = sub.add_parser("steer", help="steering: stop pairs per d1 eval frame (CPU)")
+    m.add_argument("--stops", default="d2", choices=["d2", "d3"], help="stop rule for a cut whose end is in view")
     m.add_argument("--frames", type=Path, default=V4_OUT / "eval_desc_entry.json")
     m.add_argument("--names", type=Path, default=D1_LABELS / "names_eval_gemma_d2.jsonl")
     m.add_argument("--steer-names", type=Path, default=D1_LABELS / "names_steer_gemma_d2.jsonl")

@@ -634,3 +634,38 @@ def test_frame_pairs_collects_the_objects_of_pairs_dropped_as_unnamed(tmp_path):
 
 def test_gate0_turn_threshold():
     assert (st.GATE0_MIN_PAIRS, st.GATE0_MIN_TURN_PAIRS) == (150, 35)
+
+
+# --- d3 stop phrases (spec 2026-11-10-stop-phrases-d3-design.md "Steering") -----------------------------------------
+def test_stop_key_tells_places_apart():                                   # plan Review Focus 5
+    a = {"type": "place", "relation": None, "amount": None, "place": "corner", "object": None}
+    assert st.stop_key(a) != st.stop_key({**a, "place": "room_middle"})
+    assert st.stop_key({"type": "object", "relation": "next to", "amount": None, "place": None, "object": "f:b2"}) == \
+        ("stop", "next to", None, "f:b2")
+
+
+def test_stop_pairs_use_d3_stops(tmp_path):
+    sd = _sample(tmp_path / "f", _stop_scene(), [STOP_ROUTE])
+    meta, frame = load_frame(sd)
+    pairs, reasons = st.stop_pairs(frame, meta, STOP_ROUTE, stops="d3")
+    assert pairs, dict(reasons)
+    stops = [r["desc"]["stop"] for p in pairs for r in p["routes"]]
+    assert all(s["type"] in ("object", "place", "behind", "turn") for s in stops)
+    assert any(s["type"] in ("object", "place") for s in stops)
+    assert st.stop_pairs(frame, meta, STOP_ROUTE)[0] == st.stop_pairs(frame, meta, STOP_ROUTE, stops="d2")[0]
+
+
+def test_steer_frame_passes_stops(monkeypatch):
+    prep = _prep()
+    seen = {}
+
+    def fake(sample_dir, candidate_index, names, fallback, kinds, missing=None, stops="d2"):
+        seen["stops"] = stops
+        return [], {}
+    monkeypatch.setattr(prep, "frame_pairs", fake)
+    prep._steer_init({}, None, {}, "d3")
+    prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "candidate_index": 0})
+    assert seen["stops"] == "d3"
+    prep._steer_init({}, None, {})
+    prep.steer_frame({"sample_id": "x", "sample_dir": "/nope", "candidate_index": 0})
+    assert seen["stops"] == "d2"

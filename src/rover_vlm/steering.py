@@ -90,7 +90,8 @@ def stop_key(stop):
         return "behind", stop["object"]
     if stop["type"] == "turn":
         return ("turn",)
-    return "stop", stop["relation"], stop.get("amount"), stop.get("object")
+    key = ("stop", stop["relation"], stop.get("amount"), stop.get("object"))
+    return key + (stop["place"],) if stop.get("place") else key       # d3: two places are two texts
 
 
 def hidden_flags(frame, route_xz):
@@ -168,13 +169,14 @@ def _event_keys(events):
     return [(e["type"], e["side"], tuple(e["objects"])) for e in events]
 
 
-def stop_pairs(frame, meta, route_xz, turn=None):
+def stop_pairs(frame, meta, route_xz, turn=None, stops="d2"):
     """(pairs, reasons): every two cuts of one route whose texts differ (stop or events), whose answer ends lie
     at least MIN_SEP_UV apart, and whose answers each fail the other's description. Tags A (the
     earlier stop) / B. prefix_events: A's events are the first ones of B's (a pure stop pair; False when
     the texts also differ in a step). Frame-level reasons: route_too_short (no cut keeps MIN_ROUTE_M),
     lt2_cuts (fewer than two cuts survive). With `turn` (route_events.detect_turn) the route also gets its two
-    turn cuts; the pair of those two is slice "turn", every other pair "stop"."""
+    turn cuts; the pair of those two is slice "turn", every other pair "stop". `stops` is describe_xz's rule for a cut
+    whose end is in view ("d3": object relation or place, spec 2026-11-10)."""
     reasons, routes = Counter(), []
     disappear = None
     if turn:
@@ -185,7 +187,7 @@ def stop_pairs(frame, meta, route_xz, turn=None):
     if not made:
         reasons["route_too_short"] += 1
     for f, cut, is_turn in made:
-        desc = describe_xz(meta, frame, cut, turn=turn, hidden_tail=hidden_tail_m(hidden_flags(frame, cut)))
+        desc = describe_xz(meta, frame, cut, turn=turn, hidden_tail=hidden_tail_m(hidden_flags(frame, cut)), stops=stops)
         if desc["reason"]:
             reasons[f"cut:{desc['reason']}"] += 1
             continue
@@ -243,7 +245,7 @@ def name_pair(pair, names, fallback, kinds):
     return None
 
 
-def frame_pairs(sample_dir, candidate_index, names, fallback, kinds, missing=None):
+def frame_pairs(sample_dir, candidate_index, names, fallback, kinds, missing=None, stops="d2"):
     """The stop pairs of one frame's ground-truth route, named, with drop reasons ("no_state",
     "bad_candidate", "stop:<reason>", "stop:kept"). With a `missing` list, the object rows (outline, kind; no image)
     of every object that left a pair unnamed are appended to it, so the steer_names job can name them (d2 T2: cuts
@@ -262,7 +264,7 @@ def frame_pairs(sample_dir, candidate_index, names, fallback, kinds, missing=Non
     names = {o: n for o, n in names.items() if o.startswith(pre)}
     fallback = {o: n for o, n in (fallback or {}).items() if o.startswith(pre)}
     route = cm[candidate_index]["polyline_xz"]
-    pairs, why = stop_pairs(frame, meta, route, turn=detect_turn(route))
+    pairs, why = stop_pairs(frame, meta, route, turn=detect_turn(route), stops=stops)
     reasons.update({f"stop:{k}": v for k, v in why.items()})
     kept = []
     for p in pairs:
