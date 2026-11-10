@@ -1655,6 +1655,58 @@ choosers are compared automatically against the audit's marks; the winner is che
     MODE=choose CHOOSERS=<winner> SETS="train eval steer" sbatch --time=3-00:00:00 slurm/naming_variants.sbatch
     uv run scripts/prepare_habitat_instr.py rename-texts --variant <winner>                  # then steer, G3', Gate 1'
 
+## Stop phrases and d3 (2026-11-10)
+
+Spec `docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md`, plan `docs/superpowers/plans/2026-11-10-stop-phrases-d3.md`.
+d2 fixed the "behind" endings but routes that end **in view** still said how far ("stop a little / well past X"):
+a quarter of the eval routes, met about one time in five by d1 and d2 alike. d3 says where the rover ends up instead:
+"stop **behind / in front of / next to** X" for a non-wall object within 1.5 m of the end
+(`route_events.object_relation`), otherwise a **place** read from the occupancy grid (`stop_places.place_at`):
+in a doorway, in a corner, at the end of the hallway, against a wall, in the middle of the room. The grid is the
+rover's explored map, so unknown cells are no evidence either way; an end no place fits is dropped
+(`no_stop_place`). Hidden "behind" endings, turn endings, route events and names stay as in d2. Distance words are
+rejected in every d3 stop (`descriptions._DISTANCE`, prompt d6); `desc_check` carries the stop kind and the eval
+reports `by_stop` (each relation and place, with the fixed-guess baseline).
+
+Run order (`$V5` = `data/prepared_habitat_instr_v5`, `$L` = `outputs/instr_labels_v3`; every sbatch: ask first, max 3 jobs):
+
+    export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
+    V5=data/prepared_habitat_instr_v5; L=outputs/instr_labels_v3
+    uv run scripts/prepare_habitat_instr.py events --stops d3 --labelset-dir data/prepared_habitat_instr_v2 --out-dir $V5   # ~45 min
+    #   events_meta.json: stop_kinds + visible_drop_share per split; > 0.15 (or a place < 2% / > 60%) -> stop, recalibrate
+    uv run scripts/audit_instruction_labels.py --mode stops --events $V5/events_train.jsonl --objects $V5/objects_train.jsonl \
+        --out outputs/stops_audit.html                      # G1: publish with marks; >= 90% true, each stop kind reported
+    uv run scripts/audit_instruction_labels.py --mode stops --events $V5/events_train.jsonl --objects $V5/objects_train.jsonl \
+        --score-marks <marks dir>                           # per-kind score + GATE line ("next to" failing -> user decides)
+    uv run scripts/prepare_habitat_instr.py d3-seed         # rewrites d2 stop clauses on CPU; seed_meta.json: to_compose
+    ROUND=d3 DATA=$V5 NAMER=mix sbatch slurm/label_descriptions.sbatch                       # G2: accept >= 0.90, template <= 0.10
+    uv run scripts/audit_instruction_labels.py --mode d1 --round d3 --events $V5/events_eval.jsonl --objects $V5/objects_eval.jsonl \
+        --desc $L/desc_gate_mix_d3.jsonl $L/desc_eval_mix_d3.jsonl --out outputs/instr_d3_audit.html   # G3: >= 90% (human)
+    ROUND=d3 DATA=$V5 NAMER=mix STAGE=full sbatch --time=12:00:00 slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d3 --desc-suffix _mix   # meta_d3.json
+    sbatch slurm/train_habitat.sbatch $V5/train_desc.json outputs/runs_desc/d3 --epochs 2 --save-steps 500 --resume
+
+Steering on v5 (stop pairs whose cuts use the d3 stops; the turn slice is unchanged):
+
+    uv run scripts/prepare_habitat_instr.py steer-objects --frames $V5/eval_desc_entry.json --out-dir $V5/steer
+    uv run scripts/prepare_habitat_instr.py steer --stops d3 --frames $V5/eval_desc_entry.json --out-dir $V5/steer \
+        --names $L/names_eval_gemma_d3.jsonl --fallback-names $L/names_eval_d3.jsonl
+    #   (+ ROUND=d3 STEER_DIR=$V5/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch if objects are unnamed, then steer again)
+    uv run scripts/prepare_habitat_instr.py steer-select --out-dir $V5/steer               # Gate 0
+    uv run scripts/audit_instruction_labels.py --mode steer --n 50 --n-turn 20 --events $V5/steer/events_steer_eval.jsonl \
+        --out outputs/steer_audit_d3.html                                                  # Gate 1: >= 90%
+    ROUND=d3 STEER_DIR=$V5/steer STAGE=steer sbatch slurm/label_descriptions.sbatch
+    uv run scripts/prepare_habitat_instr.py finalize-steer --frames $V5/eval_desc_entry.json --steer-dir $V5/steer \
+        --desc $L/desc_steer_eval_d3.jsonl --out-dir $V5                                   # Gate 2: >= 85% composed
+
+Eval d3 **and d2** on the same v5 sets (`outputs/eval_desc_d3/<set>/<tag>/metrics.json`, `description.by_stop`):
+
+    DATA=$V5 OUT_DIR=outputs/eval_desc_d3 ADAPTER=outputs/runs_desc/d3/adapter TAG=d3 sbatch slurm/eval_descriptions.sbatch
+    DATA=$V5 OUT_DIR=outputs/eval_desc_d3 ADAPTER=outputs/runs_desc/d2/adapter TAG=d2 sbatch slurm/eval_descriptions.sbatch
+    # the same two with SETS=steer; then path videos and the report:
+    uv run scripts/render_desc_videos.py --set <set> --tag d3 --eval-dir outputs/eval_desc_d3 --data-dir $V5
+    uv run scripts/visualize_steering.py --tags d3 d2 --eval-dir outputs/eval_desc_d3 --data-dir $V5 --out outputs/steering_report_d3.html
+
 ## Visualizations — where each one lives
 
 Every report is a **single self-contained HTML file** (inline CSS/JS, base64 images,
