@@ -67,6 +67,7 @@ import base64
 import io
 import json
 import random
+from collections import Counter
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -79,7 +80,7 @@ from rover_vlm.instructions import _answer_path, render_generation_jpeg, with_in
 from rover_vlm.landmarks import Camera
 from rover_vlm.landmark_check import OPENING_WORDS, beside_categories, name_matches, target_categories
 from rover_vlm.overlay import draw_polyline
-from rover_vlm.route_events import check_events_schema
+from rover_vlm.route_events import check_events_schema, stop_kind
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 V2 = REPO_ROOT / "data" / "prepared_habitat_instr_v2"
@@ -147,6 +148,14 @@ VERDICTS["endings"] = [
     {"v": "stop", "label": "Should stop in view", "help": "The end is in view: the text should say where it stops"},
     {"v": "wording", "label": "Wording broken", "help": "The sentence is ungrammatical, or its ending does not fit the rest"},
     {"v": "keep", "label": "Should not be dropped", "help": "A dropped route that could be described"},
+    {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
+]
+VERDICTS["stops"] = [
+    {"v": "ok", "label": "True", "help": "The stop says where the route ends (and every step is true); for a dropped route, dropping it is right"},
+    {"v": "relation", "label": "Wrong relation", "help": "The route ends by the green object, but not behind / in front of / next to it as the text says"},
+    {"v": "place", "label": "Wrong place", "help": "The end is not in a doorway / corner / at the end of a hallway / against a wall / in the middle of the room as said"},
+    {"v": "object", "label": "Wrong object", "help": "The green object is not what the end is by, or its outline is wrong"},
+    {"v": "keep", "label": "Should not be dropped", "help": "A dropped route whose end could be described"},
     {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
 ]
 VERDICTS["d2"] = [dict(v, label="Wrong ending", help="The stop, 'behind X' or final turn is wrong") if v["v"] == "stop"
@@ -221,6 +230,79 @@ def endings_item(rec, row, objects, group, text=None):
     return {"id": rec["id"], "instruction": instruction, "side": m.get("side"), "kind": m.get("kind"),
             "has_alt": False, "scene": m.get("scene_id"), "target": "object", "reason": row.get("reason"),
             "group": group, "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
+
+
+STOP_KIND_LABELS = {"object:behind": "stops behind an object", "object:in front of": "stops in front of an object",
+                    "object:next to": "stops next to an object", "place:doorway": "place: in a doorway",
+                    "place:corner": "place: in a corner", "place:hallway_end": "place: at the end of the hallway",
+                    "place:wall": "place: against a wall", "place:room_middle": "place: in the middle of the room",
+                    "drop": "dropped: no place fits"}
+
+
+def sample_stops(rows, seed, n=100, min_per_kind=10, n_drop=10):
+    """G1 of d3 (spec 2026-11-10): routes with a d3 stop in view, at least min_per_kind of every stop kind that has
+    them, the rest at random up to n, plus n_drop routes dropped as "no_stop_place". Shuffled, seeded.
+    Returns ([(kind or "drop", row)], {kind: population})."""
+    rng = random.Random(seed)
+    ok = [r for r in rows if r["reason"] is None and stop_kind(r["stop"])]
+    pools = {}
+    for r in ok:
+        pools.setdefault(stop_kind(r["stop"]), []).append(r)
+    picked = [r for k in sorted(pools) for r in rng.sample(pools[k], min(min_per_kind, len(pools[k])))]
+    taken = {r["id"] for r in picked}
+    rest = [r for r in ok if r["id"] not in taken]
+    picked += rng.sample(rest, max(0, min(n - len(picked), len(rest))))
+    drops = [r for r in rows if r["reason"] == "no_stop_place"]
+    out = [(stop_kind(r["stop"]), r) for r in picked] + [("drop", r) for r in rng.sample(drops, min(n_drop, len(drops)))]
+    rng.shuffle(out)
+    return out, {**{k: len(v) for k, v in sorted(pools.items())}, "drop": len(drops)}
+
+
+def stops_item(rec, row, objects, kind):
+    """One G1 item of d3: the route, the stop object outlined green (object stops) or the end ringed (place stops),
+    the template text and, in the caption, the stop kind and the geometry the rule measured; a drop shows the route
+    alone and asks whether dropping it is right."""
+    path = _answer_path(rec)
+    img = Image.open(rec["image"][0]).convert("RGB").resize((IMG_PX, IMG_PX), Image.LANCZOS)
+    draw_route(img, path)
+    caption = STOP_KIND_LABELS.get(kind, kind)
+    if kind == "drop":
+        instruction = "DROPPED: no place fits the end of this route. Is dropping it right?"
+    else:
+        draw_numbered(img, objects, placeholder_names(row), stop_id=row["stop"]["object"])
+        instruction = template_text(row, objects)
+        if row["stop"]["type"] == "place":
+            _ring(img, path[-1])
+        measures = row["stop"].get("measures") or {}
+        if measures:
+            caption += " (" + ", ".join(f"{k.replace('_', ' ')} {v:g}" for k, v in measures.items()) + ")"
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80)
+    m = rec["habitat_meta"]
+    return {"id": rec["id"], "instruction": instruction, "side": m.get("side"), "kind": m.get("kind"),
+            "has_alt": False, "scene": m.get("scene_id"), "target": "object", "reason": row.get("reason"),
+            "group": kind, "caption": caption,
+            "img": "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()}
+
+
+STOPS_GATE = 0.9
+
+
+def score_stops(items, marks):
+    """Per stop kind and overall: marked items that are not "can't tell" (n), how many are "True" (ok), the rate;
+    the G1 gate is the overall rate >= STOPS_GATE."""
+    acc = {}
+    for it in items:
+        v = (marks.get(it["id"]) or {}).get("verdict")
+        if not v or v == "unsure":
+            continue
+        a = acc.setdefault(it["group"], [0, 0])
+        a[0] += 1
+        a[1] += v == "ok"
+    kinds = {k: {"n": n, "ok": ok, "rate": round(ok / n, 4)} for k, (n, ok) in sorted(acc.items())}
+    n, ok = sum(v["n"] for v in kinds.values()), sum(v["ok"] for v in kinds.values())
+    rate = round(ok / n, 4) if n else 0.0
+    return {"kinds": kinds, "all": {"n": n, "ok": ok, "rate": rate}, "gate": "PASS" if n and rate >= STOPS_GATE else "FAIL"}
 
 
 def _turn(row):
@@ -485,6 +567,25 @@ def select_d2_rows(ok, events_by_id, n, seed, rewritten_share=0.4):
     return picked
 
 
+def select_d3_rows(ok, events_by_id, n, seed, rewritten_share=0.4):
+    """G3 of d3: passed d3 rows, ~rewritten_share of them d2 texts whose stop clause was rewritten (rewritten_from
+    "d2"; reused rows are left out even when they carry an older rewritten_from "d1") and the rest composed with the
+    current prompt, split evenly between object and place stops where both pools allow."""
+    rng = random.Random(seed)
+    rows = [r for r in ok if r["id"] in events_by_id and not r.get("reused_from")]
+    rewritten = [r for r in rows if r.get("rewritten_from") == "d2"]
+    new = [r for r in rows if r.get("prompt_version") == PROMPT_VERSION and not r.get("rewritten_from")]
+    k_rw = min(len(rewritten), round(n * rewritten_share) if new else n)
+    m = n - k_rw
+    obj = [r for r in new if (stop_kind(events_by_id[r["id"]]["stop"]) or "").startswith("object:")]
+    obj_ids = {r["id"] for r in obj}
+    rest = [r for r in new if r["id"] not in obj_ids]
+    k = min(len(obj), max(m // 2, m - len(rest)))
+    picked = rng.sample(rewritten, k_rw) + rng.sample(obj, k) + rng.sample(rest, min(m - k, len(rest)))
+    rng.shuffle(picked)
+    return picked
+
+
 def read_ids(path):
     """Route ids from a text file, one per line; blank lines and surrounding whitespace ignored."""
     return [ln.strip() for ln in Path(path).read_text().splitlines() if ln.strip()]
@@ -665,7 +766,8 @@ def main() -> None:
     ap.add_argument("--opposite-share", type=float, default=0.2,
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings", "names"],
+    ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings", "names",
+                                       "stops"],
                     default="labels")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
@@ -682,7 +784,8 @@ def main() -> None:
                     help="route ids, one per line (--mode d1): audit exactly these passed routes, in order; ignores --n")
     ap.add_argument("--d1-events", type=Path, default=None, help="d1 events_*.jsonl (--mode turns: the rescued-bent group)")
     ap.add_argument("--labelset-dir", type=Path, default=V2, help="dir holding labelset_<split>.json")
-    ap.add_argument("--round", default="d1", help="--mode d1: 'd2' samples half turn routes, d4 prompt only")
+    ap.add_argument("--round", default="d1", help="--mode d1: 'd2' samples half turn routes, d4 prompt only; "
+                    "'d3' d2 texts with a rewritten stop + d6 texts, half object / half place stops")
     ap.add_argument("--n-turn", type=int, default=0, help="--mode steer: pairs taken from the turn slice")
     ap.add_argument("--n-visible", type=int, default=20, help="--mode turns: visible turn routes")
     ap.add_argument("--n-hidden", type=int, default=30, help="--mode turns: hidden turn routes (fills what visible lacks)")
@@ -694,9 +797,35 @@ def main() -> None:
     ap.add_argument("--names-glob", default="names_V*.jsonl",
                     help='--mode names / --score-marks: which name files of --sample-dir ("choose_*.jsonl": choosers)')
     ap.add_argument("--score-marks", type=Path, default=None,
-                    help="dir of names-audit mark files: print per-variant accuracy and the gate")
+                    help="dir of mark files: names audit (per-variant accuracy) or, with --mode stops, the stop audit "
+                         "(per stop kind, with the same --events / --seed as the page)")
     args = ap.parse_args()
 
+    if args.mode == "stops":
+        if not (args.events and args.objects):
+            raise SystemExit("--mode stops needs --events and --objects (the d3 events_<split>.jsonl / objects_<split>.jsonl)")
+        check_events_schema(args.events)
+        split = "eval" if "eval" in args.events.name else "train"
+        by_id = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{split}.json").read_text())}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        picked, pop = sample_stops(jsonl(args.events), args.seed, n=args.n)
+        if args.score_marks:
+            items = [{"id": r["id"], "group": g} for g, r in picked]
+            s = score_stops(items, _read_marks(args.score_marks))
+            print(json.dumps(s, indent=2))
+            print(f"GATE (true >= {STOPS_GATE:.0%} of judged): {s['all']['ok']}/{s['all']['n']} = {s['all']['rate']:.1%} "
+                  f"-> {s['gate']}")
+            return
+        items = [stops_item(by_id[r["id"]], r, objects, g) for g, r in picked]
+        payload = {"items": items, "population": pop, "seed": args.seed, "mode": "stops",
+                   "verdicts": VERDICTS["stops"], "source": str(args.events)}
+        html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
+        html = html.replace("<title>Instruction Label Audit</title>", "<title>Stop Phrases Audit</title>", 1)
+        out = args.out or REPO_ROOT / "outputs" / "stops_audit.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        print(f"{len(items)} items (population {pop}) -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+        return
     if args.score_marks:
         print(json.dumps(score_dir(args.sample_dir, _read_marks(args.score_marks), args.names_glob), indent=2))
         return
@@ -798,18 +927,22 @@ def main() -> None:
             rows, missing = select_d2_rows(ok, ev, args.n, args.seed), 0
             n_turn = sum(any(e["type"] == "turn" for e in ev[r["id"]]["events"]) for r in rows)
             print(f"G3: {n_turn} with a turn, {len(rows) - n_turn} without (population {len(ok)} passed)")
+        elif args.round == "d3":
+            rows, missing = select_d3_rows(ok, ev, args.n, args.seed), 0
+            kinds = Counter(stop_kind(ev[r["id"]]["stop"]) or ev[r["id"]]["stop"]["type"] for r in rows)
+            print(f"G3 d3: {dict(kinds)} (population {len(ok)} passed)")
         else:
             rows, missing = select_d1_rows(ok, read_ids(args.ids) if args.ids else None, args.n, args.seed)
         if args.ids:
             print(f"--ids: {len(rows)} shown, {missing} id(s) missing or not passed in {args.desc}")
-        items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"], dashed=args.round == "d2")
+        items = [events_item(by_id[r["id"]], ev[r["id"]], objects, text=r["description"], dashed=args.round in ("d2", "d3"))
                  for r in rows]
         for it, r in zip(items, rows):
-            it["source"] = "rewritten d1 text" if r.get("rewritten_from") else r["instruction_source"]
+            it["source"] = f"rewritten {r['rewritten_from']} text" if r.get("rewritten_from") else r["instruction_source"]
         pop = {"passed": len(ok), "template": sum(r["instruction_source"] == "template" for r in ok)}
-        title = "d2 Label Audit" if args.round == "d2" else d1_title(args.desc[0])
+        title = {"d2": "d2 Label Audit", "d3": "d3 Label Audit"}.get(args.round) or d1_title(args.desc[0])
         payload = {"items": items, "population": pop, "seed": args.seed, "mode": "d1",
-                   "verdicts": VERDICTS["d2" if args.round == "d2" else "d1"], "source": " ".join(map(str, args.desc)),
+                   "verdicts": VERDICTS["d2" if args.round in ("d2", "d3") else "d1"], "source": " ".join(map(str, args.desc)),
                    "title": title}
         html = TEMPLATE.read_text().replace("/*__DATA__*/null", json.dumps(payload))
         html = html.replace("<title>Instruction Label Audit</title>", f"<title>{title}</title>", 1)

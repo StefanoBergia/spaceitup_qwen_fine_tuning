@@ -173,6 +173,15 @@ if (DATA.mode === "endings") {
   $("altleg").hidden = true;
   document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1\u2013${DATA.verdicts.length} mark and advance, \u2190 \u2192 move.`;
 }
+if (DATA.mode === "stops") {
+  document.title = "Stop Phrases Audit";
+  $("h1").textContent = "Stop phrases audit";
+  $("sub").textContent = "Each item is a route that ends in view with its d3 stop: 'behind / in front of / next to' the green object, or a place (in a doorway, in a corner, at the end of the hallway, against a wall, in the middle of the room), whose end is ringed. Does the stop say where the route ends, and is every step true? For a dropped route: is dropping it right?";
+  $("tgtleg").hidden = false;
+  $("tgtleg").innerHTML = '<i style="background:#ffaa00"></i>orange = steps, in route order &nbsp; <i style="background:#3cdc3c"></i>green = the stop\'s object &nbsp; <i style="background:#ff3c3c"></i>red ring = the end of a place stop';
+  $("altleg").hidden = true;
+  document.querySelector(".stripcap span").textContent = `All samples: click to jump. Keys: 1\u2013${DATA.verdicts.length} mark and advance, \u2190 \u2192 move.`;
+}
 if (DATA.mode === "steer") {
   document.title = "Steering Pair Audit";
   $("h1").textContent = "Steering pair audit";
@@ -251,10 +260,10 @@ function render() {
   $("instr").textContent = it.instruction ? `“${it.instruction}”`
     : it.target === "none" ? `No target (${(it.reason || "").replaceAll("_", " ")})`
     : `“Go ${it.side} around the outlined object.”`;
-  $("tgtleg").hidden = (DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "steer" || DATA.mode === "endings" || DATA.mode === "turns") ? false : (!it.target || it.target === "none");
+  $("tgtleg").hidden = (DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "steer" || DATA.mode === "endings" || DATA.mode === "turns" || DATA.mode === "stops") ? false : (!it.target || it.target === "none");
   $("side").textContent = `bows ${it.side} of the line`;
   $("kind").textContent = it.kind === "opposite" ? "other side of a two-route pair" : (it.has_alt ? "one side of a two-route pair" : "single-route frame");
-  $("altleg").hidden = DATA.mode === "steer" || DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "endings" || DATA.mode === "turns" || !it.has_alt;
+  $("altleg").hidden = DATA.mode === "steer" || DATA.mode === "events" || DATA.mode === "d1" || DATA.mode === "endings" || DATA.mode === "stops" || DATA.mode === "turns" || !it.has_alt;
   if (DATA.mode === "d1") $("kind").textContent = `description source: ${it.source}` + (it.source === "template" ? " (fallback sentence)" : "");
   if (DATA.mode === "steer") { $("side").textContent = `${it.slice} pair`; $("kind").textContent = it.pure ? "one route, two stops" : "one route, two stops \u2014 the texts also differ in a step"; }
   if (DATA.mode === "endings") {
@@ -262,6 +271,7 @@ function render() {
     $("kind").textContent = {behind: "goes out of sight (rewritten text)", turn_end: "turns out of sight",
       reanchored: "ends in view, stop re-anchored", visible: "ends in view, unchanged", drop: "dropped: nothing nameable hides the end"}[it.group] || it.group;
   }
+  if (DATA.mode === "stops") { $("side").textContent = ""; $("kind").textContent = it.caption || it.group; }
   if (DATA.mode === "turns") {
     $("side").textContent = "";
     $("kind").textContent = {turn_visible: "visible turn", turn_hidden: "hidden turn", bent: "rescued bent route", spur: "spur drop"}[it.group] || it.group;

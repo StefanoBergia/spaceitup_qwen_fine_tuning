@@ -156,3 +156,87 @@ def test_finalize_round_d3_rechecks_with_d3_rejects(tmp_path):
                                                desc_suffix="_mix", allow_missing=False))
     meta = json.loads((v5 / "meta_d3.json").read_text())
     assert meta["train"]["recheck_failed"] == 1 and meta["train"]["kept"] == 1 and meta["eval"]["kept"] == 2
+
+
+# --- Task 7: stop audit page (G1) and the d3 label-audit picker (G3) -------------------------------------------------
+from test_d2_stages import audit   # noqa: E402
+
+KINDS = ["object:behind", "object:in front of", "object:next to", "place:doorway", "place:corner",
+         "place:hallway_end", "place:wall", "place:room_middle"]
+
+
+def _kind_stop(kind):
+    t, v = kind.split(":")
+    return {**ROOM, "place": v} if t == "place" else \
+        {"type": "object", "relation": v, "amount": None, "distance_m": None, "object": "f:b1", "place": None}
+
+
+def test_select_d3_rows_takes_d2_rewrites_and_d6_composed_rows():
+    ev, ok = {}, []
+    for i in range(6):
+        ok.append({"id": f"rw{i}", "rewritten_from": "d2", "passed": True})
+        ev[f"rw{i}"] = _row(f"rw{i}", [PASS], ROOM)
+    for i in range(3):
+        ok.append({"id": f"ru{i}", "rewritten_from": "d1", "reused_from": "d2", "passed": True})
+        ev[f"ru{i}"] = _row(f"ru{i}", [PASS], BEHIND)
+    for kind, tag in (("object:next to", "o"), ("place:corner", "p")):
+        for i in range(10):
+            ok.append({"id": f"{tag}{i}", "prompt_version": "d6", "passed": True})
+            ev[f"{tag}{i}"] = _row(f"{tag}{i}", [PASS], _kind_stop(kind))
+    ok.append({"id": "old", "prompt_version": "d5", "passed": True})
+    ev["old"] = _row("old", [PASS], ROOM)
+    rows = audit.select_d3_rows(ok, ev, 10, seed=0)
+    ids = [r["id"] for r in rows]
+    assert len(rows) == 10 and not any(i.startswith("ru") or i == "old" for i in ids)
+    assert sum(i.startswith("rw") for i in ids) == 4
+    assert sum(i.startswith("o") for i in ids) == 3 and sum(i.startswith("p") for i in ids) == 3
+
+
+def _kind_rows():
+    rows = [_row(f"{k}-{i}", [PASS], _kind_stop(k)) for k in KINDS for i in range(15)]
+    rows += [_row(f"drop-{i}", [PASS], None, reason="no_stop_place") for i in range(20)]
+    rows += [_row(f"hid-{i}", [PASS], BEHIND) for i in range(5)]
+    return rows
+
+
+def test_sample_stops_covers_every_kind():
+    picked, pop = audit.sample_stops(_kind_rows(), seed=0, n=100, min_per_kind=10, n_drop=10)
+    groups = [g for g, _ in picked]
+    assert all(groups.count(k) >= 10 for k in KINDS) and groups.count("drop") == 10
+    assert len(picked) == 110 and "behind" not in groups
+    assert pop["drop"] == 20 and pop["place:corner"] == 15
+    again, _ = audit.sample_stops(_kind_rows(), seed=0, n=100, min_per_kind=10, n_drop=10)
+    assert [r["id"] for _, r in again] == [r["id"] for _, r in picked]
+
+
+def test_score_stops_reports_each_kind_and_the_gate():
+    items = [{"id": "a", "group": "place:corner"}, {"id": "b", "group": "place:corner"},
+             {"id": "c", "group": "object:next to"}, {"id": "d", "group": "object:next to"},
+             {"id": "e", "group": "drop"}]
+    marks = {"a": {"verdict": "ok"}, "b": {"verdict": "place"}, "c": {"verdict": "ok"}, "d": {"verdict": "unsure"},
+             "e": {"verdict": "ok"}}
+    s = audit.score_stops(items, marks)
+    assert s["kinds"]["place:corner"] == {"n": 2, "ok": 1, "rate": 0.5}
+    assert s["kinds"]["object:next to"] == {"n": 1, "ok": 1, "rate": 1.0}          # "can't tell" is not counted
+    assert s["all"] == {"n": 4, "ok": 3, "rate": 0.75} and s["gate"] == "FAIL"
+
+
+def test_stops_item_shows_the_place(tmp_path):
+    from PIL import Image
+    img = tmp_path / "f.png"
+    Image.new("RGB", (64, 64)).save(img)
+    rec = {"id": "r1", "image": [str(img)], "conversations": [{"from": "human", "value": ""},
+           {"from": "gpt", "value": json.dumps({"path": [[0.5, 1.0, 1], [0.5, 0.6, 1]]})}],
+           "habitat_meta": {"sample_id": "s", "scene_id": "x", "kind": "instructed"}}
+    row = _row("r1", [PASS], CORNER)
+    it = audit.stops_item(rec, row, {"f:b1": {"polygon": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2]], "kind_hint": "object"}},
+                          "place:corner")
+    assert it["group"] == "place:corner" and it["instruction"].endswith("stop in the corner.")
+    assert "corner" in it["caption"] and it["img"].startswith("data:image/jpeg;base64,")
+    drop = audit.stops_item(rec, _row("r1", [], None, reason="no_stop_place"), {}, "drop")
+    assert drop["instruction"].startswith("DROPPED")
+
+
+def test_audit_template_has_a_stops_mode():
+    html = audit.TEMPLATE.read_text()
+    assert 'DATA.mode === "stops"' in html and "Stop Phrases Audit" in html
