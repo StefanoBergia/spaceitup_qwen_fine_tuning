@@ -1662,7 +1662,8 @@ d2 fixed the "behind" endings but routes that end **in view** still said how far
 a quarter of the eval routes, met about one time in five by d1 and d2 alike. d3 says where the rover ends up instead:
 "stop **behind / in front of / next to** X" for a non-wall object within 1.5 m of the end
 (`route_events.object_relation`), otherwise a **place** read from the occupancy grid (`stop_places.place_at`):
-in a doorway, in a corner, at the end of the hallway, against a wall, in the middle of the room. The grid is the
+in a doorway, in a corner, at the end of the hallway, in the hallway, by the wall, in the middle of the room
+(Addendum A1), and when no place fits, "in front of" a visible wall ahead. The grid is the
 rover's explored map, so unknown cells are no evidence either way; an end no place fits is dropped
 (`no_stop_place`). Hidden "behind" endings, turn endings, route events and names stay as in d2. Distance words are
 rejected in every d3 stop (`descriptions._DISTANCE`, prompt d6); `desc_check` carries the stop kind and the eval

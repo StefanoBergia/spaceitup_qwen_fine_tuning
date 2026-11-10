@@ -2,11 +2,13 @@
 
 The d3 stop (spec docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md) names an object within 1.5 m of
 the end when there is one (route_events.object_relation); otherwise this module picks the place from a fixed list,
-first fit wins: in a doorway, in a corner, at the end of the hallway, against a wall, in the middle of the room.
+first fit wins: in a doorway, in a corner, at the end of the hallway, in the hallway, by the wall, in the middle of the
+room (Addendum A1 added the hallway and widened the wall to "by the wall" within 1.5 m).
 
 The grid (state.npz) is the rover's *explored* map: around a visible eval stop a median 39% of the 1.5 m disc is
-unknown (2026-11-10). Unknown cells are no evidence either way: a ray that meets one stops with outcome "unknown",
-never counted as free or as a wall, and "the middle of the room" needs most of its disc actually seen free.
+unknown (2026-11-10). Unknown cells are no evidence of free space: a ray goes on through them to find a wall beyond
+(Addendum A1: stopping there blinded a median 13 of 16 rays), but a ray that crossed one never reports "free", and
+"the middle of the room" needs most of its disc actually seen free.
 
 Rays fan out from the goal in N_DIRS directions; angle 0 is the route's final heading and +90 its right
 (right = (-h_z, h_x), as route_events.stop_phrase). A flat wall seen by several rays is one wall: walls are the
@@ -18,7 +20,7 @@ import numpy as np
 
 from .landmarks import FREE, OCC, UNKNOWN
 
-PLACES = ("doorway", "corner", "hallway_end", "wall", "room_middle")
+PLACES = ("doorway", "corner", "hallway_end", "hallway", "wall", "room_middle")
 N_DIRS = 16
 RAY_MAX_M = 3.0
 DOORWAY_HALF_M = 0.9          # each jamb this close to the cross-section's centre (an opening at most 1.8 m wide)
@@ -33,9 +35,11 @@ HALL_MAX_W = 2.2
 HALL_BACK_M = (0.0, 1.0, 2.0)
 HALL_END_M = 1.5
 HALL_OPEN_W = 3.2             # wider than this ahead = the hallway opens into a room
-WALL_M = 1.0
+HALL_MID_BACK_M = (0.0, 1.0)  # "in the hallway": the corridor is this narrow at the goal and 1 m back (Addendum A1)
+WALL_M = 1.5                  # "by the wall": the nearest wall within this (Addendum A1; was 1.0, "against the wall")
+WALL_DOMINANT_M = 0.5         # ... alone, or this much nearer than any other wall within WALL_M
 ROOM_CLEAR_M = 1.5
-ROOM_MIN_FREE = 0.6
+ROOM_MIN_FREE = 0.45          # Addendum A1 (was 0.6): a median 39% of the disc is unseen around a visible end
 HEADING_M = 0.5               # the final heading is read over the route's last this-many metres
 
 
@@ -50,15 +54,17 @@ def _state(grid, p):
 
 
 def _march(grid, xz, d, max_m):
-    """(outcome, dist) of one ray: the first OCC ("occ") or UNKNOWN ("unknown") cell, else ("free", max_m)."""
+    """(outcome, dist) of one ray: the first OCC cell ("occ"), seen through unknown cells; else ("unknown", where the
+    first unknown cell was) when it crossed any; else ("free", max_m)."""
     step = grid.mpp / 2
+    first_unknown = None
     for t in np.arange(step, max_m + 1e-9, step):
         s = _state(grid, xz + t * d)
         if s == OCC:
             return "occ", float(t)
-        if s == UNKNOWN:
-            return "unknown", float(t)
-    return "free", float(max_m)
+        if s == UNKNOWN and first_unknown is None:
+            first_unknown = float(t)
+    return ("unknown", first_unknown) if first_unknown is not None else ("free", float(max_m))
 
 
 def ray_hits(grid, xz, head_xz, n_dirs=N_DIRS, max_m=RAY_MAX_M):
@@ -191,9 +197,28 @@ def _hallway_end(grid, route, goal, h):
     return None
 
 
+def _hallway(grid, route, goal, h, walls):
+    """In the hallway (Addendum A1): two facing walls at the rover's left and right, the corridor <= HALL_MAX_W wide at
+    the goal and HALL_MID_BACK_M back (the end of the hallway is tried before this)."""
+    sides = [(a, d) for a, d in walls if _gap(a, 90.0) <= 30.0 or _gap(a, -90.0) <= 30.0]
+    if not any(_gap(a, b) >= 150.0 and da + db <= HALL_MAX_W for i, (a, da) in enumerate(sides) for b, db in sides[i + 1:]):
+        return None
+    widths = []
+    for back in HALL_MID_BACK_M:
+        p = _point_back(route, back)
+        w = None if p is None else width_across(grid, p, h)
+        if w is None or w > HALL_MAX_W:
+            return None
+        widths.append(w)
+    return {"width_m": round(max(widths), 2)}
+
+
 def _wall(walls):
-    near = [d for _, d in walls if d <= WALL_M]
-    return {"wall_m": round(near[0], 2)} if len(near) == 1 else None
+    """By the wall: the nearest wall within WALL_M, alone or >= WALL_DOMINANT_M nearer than any other within reach."""
+    near = sorted(d for _, d in walls if d <= WALL_M)
+    if not near or (len(near) > 1 and near[1] < near[0] + WALL_DOMINANT_M):
+        return None
+    return {"wall_m": round(near[0], 2)}
 
 
 def _room_middle(grid, goal):
@@ -219,6 +244,7 @@ def place_at(grid, route_xz):
     for place, found in (("doorway", lambda: _doorway(grid, goal, h)),
                          ("corner", lambda: _corner(grid, goal, h, walls)),
                          ("hallway_end", lambda: _hallway_end(grid, route, goal, h)),
+                         ("hallway", lambda: _hallway(grid, route, goal, h, walls)),
                          ("wall", lambda: _wall(walls)),
                          ("room_middle", lambda: _room_middle(grid, goal))):
         m = found()

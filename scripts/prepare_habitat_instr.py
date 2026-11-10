@@ -95,7 +95,7 @@ Naming chooser (Addendum C, 2026-10-19): a model picks one of the four candidate
 
 Stop phrases and d3 (2026-11-10, docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md): a route that ends in
 view stops behind / in front of / next to an object within 1.5 m, else at a place (doorway, corner, end of the
-hallway, against a wall, middle of the room); events into v5, seed d3 from the d2 files (stop clauses rewritten on
+hallway, in the hallway, by the wall, middle of the room); events into v5, seed d3 from the d2 files (stop clauses rewritten on
 CPU), label (GPU), finalize; steering with --stops d3. Full run book: README "Stop phrases and d3".
 
     uv run scripts/prepare_habitat_instr.py events --stops d3 --labelset-dir data/prepared_habitat_instr_v2 \

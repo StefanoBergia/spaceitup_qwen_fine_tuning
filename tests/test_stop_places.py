@@ -6,7 +6,7 @@ Scenes: a 100 x 100 grid at 0.05 m (5 m x 5 m; row <- z, col <- x), route straig
 import numpy as np
 
 from rover_vlm.landmarks import FREE, OCC, UNKNOWN, Grid
-from rover_vlm.stop_places import PLACES, _walls, place_at, ray_hits
+from rover_vlm.stop_places import PLACES, _wall, _walls, place_at, ray_hits
 
 
 def _free():
@@ -141,3 +141,50 @@ def test_opening_in_the_wall_ahead_is_not_a_corner():                 # final re
     s[68:71, 38:62] = FREE                                             # ... with a 1.2 m opening
     s[92:95, :] = OCC                                                  # the next room's wall, 2.1 m from the goal
     assert _place(s, 2.5) != "corner"
+
+
+
+# --- Addendum A1 (2026-11-10): see-through rays, in the hallway, by the wall within 1.5 m, room at 45% -----------
+def test_places_order_with_the_hallway():
+    assert PLACES == ("doorway", "corner", "hallway_end", "hallway", "wall", "room_middle")
+
+
+def test_rays_see_a_wall_through_unknown_cells():
+    s = _free()
+    s[:, 32:35] = OCC                                                  # wall 0.78 m right
+    s[:, 38:42] = UNKNOWN                                              # an unseen strip between the goal and the wall
+    hits = {round(a): (o, d) for a, o, d in ray_hits(Grid(s, 0.05, 0.0, 0.0), (2.5, 2.5), (0.0, 1.0))}
+    assert hits[90][0] == "occ" and 0.7 < hits[90][1] < 0.85
+
+
+def test_a_ray_that_crossed_unknown_never_reports_free():
+    s = _free()
+    s[60:64, :] = UNKNOWN                                              # unseen band ahead, nothing behind it
+    hits = {round(a): (o, d) for a, o, d in ray_hits(Grid(s, 0.05, 0.0, 0.0), (2.5, 2.5), (0.0, 1.0))}
+    assert hits[0][0] == "unknown"
+
+
+def test_hallway_middle():
+    s = _free()
+    s[:, 35] = OCC                                                     # corridor walls x 1.75 / 3.25, no end in sight
+    s[:, 65] = OCC
+    assert _place(s, 3.0) == "hallway"
+
+
+def test_wall_within_1_5_m():
+    s = _free()
+    s[:, 25:27] = OCC                                                  # wall x 1.25-1.35: 1.15 m right of the goal
+    assert _place(s, 2.5) == "wall"
+
+
+def test_wall_takes_the_clearly_nearest_wall():
+    assert _wall([(90.0, 0.6), (135.0, 1.3)]) == {"wall_m": 0.6}      # 0.7 m nearer: by that wall
+    assert _wall([(90.0, 0.4), (135.0, 0.95)]) == {"wall_m": 0.4}     # both within 1 m, one clearly nearer
+    assert _wall([(90.0, 0.6), (135.0, 0.9)]) is None                 # two walls at similar distances
+    assert _wall([(90.0, 1.6)]) is None                               # beyond 1.5 m
+
+
+def test_room_middle_at_45_percent_seen():
+    s = np.full((100, 100), UNKNOWN, np.uint8)
+    s[:, 50:] = FREE                                                   # half the space seen, no wall
+    assert _place(s, 2.5) == "room_middle"

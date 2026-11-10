@@ -15,7 +15,7 @@ d2 (2026-10-13): a route that ends >= 45 deg off its start->goal line gets a "tu
 
 d2 T2 (2026-10-14): a route whose end is out of sight is described up to where it disappears and ends "behind" the object hiding it (or with its hidden turn); events after the disappearance are dropped; a visible "well past" stop re-anchors within 1.5 m.
 
-d3 (2026-11-10, describe_xz(stops="d3")): an end in view no longer gets a distance amount; it stops "behind / in front of / next to" a non-wall object within CLOSE_M (object_relation), else at a place read from the occupancy grid (stop_places.place_at: doorway, corner, end of the hallway, against a wall, middle of the room); no fit -> "no_stop_place". Spec: docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md.
+d3 (2026-11-10, describe_xz(stops="d3")): an end in view no longer gets a distance amount; it stops "behind / in front of / next to" a non-wall object within CLOSE_M (object_relation), else at a place read from the occupancy grid (stop_places.place_at: doorway, corner, end of the hallway, in the hallway, by the wall, middle of the room), else (Addendum A1 backup) "in front of" a visible wall within CLOSE_M ahead (wall_ahead); no fit -> "no_stop_place". Spec: docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md.
 
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
@@ -674,30 +674,50 @@ def _place_grid(frame):
     return Grid(s, frame.grid.mpp, frame.grid.x0, frame.grid.z0)
 
 
+def wall_ahead(frame, goal, head, right, blobs):
+    """The d3 backup (Addendum A1, option 2): the nearest visible wall-like blob within CLOSE_M ahead of the goal
+    (along > |lateral|, as _near_stop) -> {"type": "wall", "relation": "in front of", "anchor"}, else None."""
+    for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
+        if d.min() > CLOSE_M:
+            break
+        if not _wall_like(xz):
+            continue
+        x = _anchor(frame, b, goal, cells, xz, d)
+        if x is None:
+            continue
+        dv = np.linalg.norm(x["vis_xz"] - goal, axis=1)
+        v = x["vis_xz"][dv.argmin()] - goal
+        if dv.min() <= CLOSE_M and float(v @ head) > abs(float(v @ right)):
+            return {"type": "wall", "relation": "in front of", "anchor": {**x, "kind": "wall"}}
+    return None
+
+
 def stop_d3(frame, route_xz):
-    """Where a visible route ends (d3): object_relation, else the place (stop_places.place_at on _place_grid), else
-    None (the route is dropped as "no_stop_place")."""
+    """Where a visible route ends (d3): object_relation, else the place (stop_places.place_at on _place_grid), else a
+    wall ahead (wall_ahead, Addendum A1 backup), else None (the route is dropped as "no_stop_place")."""
     rg = route_geometry(route_xz)
     goal = rg["pts"][-1]
     back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal, as stop_phrase
     head = goal - back
     head /= max(np.linalg.norm(head), 1e-9)
     right = np.array([-head[1], head[0]])
-    rel = object_relation(frame, goal, head, right, _blobs_near(frame, goal, CLOSE_M))
+    blobs = _blobs_near(frame, goal, CLOSE_M)
+    rel = object_relation(frame, goal, head, right, blobs)
     if rel is not None:
         return rel
     p = place_at(_place_grid(frame), route_xz)
     if p is None:
-        return None
+        return wall_ahead(frame, goal, head, right, blobs)
     return {"type": "place", "relation": None, "place": p["place"], "measures": p["measures"], "anchor": None}
 
 
 def stop_kind(stop):
-    """"object:<relation>" / "place:<place>" for a d3 visible stop, else None (d2 stops, behind and turn endings)."""
+    """"object:<relation>" / "wall:in front of" / "place:<place>" for a d3 visible stop, else None (d2 stops, behind
+    and turn endings)."""
     if not stop:
         return None
-    if stop.get("type") == "object":
-        return f"object:{stop['relation']}"
+    if stop.get("type") in ("object", "wall"):
+        return f"{stop['type']}:{stop['relation']}"
     if stop.get("type") == "place":
         return f"place:{stop['place']}"
     return None
@@ -1017,7 +1037,7 @@ def describe_xz(meta, frame, route, turn=None, hidden_tail=None, stops="d2"):
         st["disappear_arc_m"] = round(dis, 2)
     if stop.get("reanchored"):
         st["reanchored"] = True
-    if stop["type"] in ("object", "place"):              # d3: the place (None for an object stop) and its measures
+    if stop["type"] in ("object", "place", "wall"):      # d3: the place (None for an object stop) and its measures
         st["place"] = stop.get("place")
         if stop.get("measures"):
             st["measures"] = stop["measures"]

@@ -153,7 +153,7 @@ VERDICTS["endings"] = [
 VERDICTS["stops"] = [
     {"v": "ok", "label": "True", "help": "The stop says where the route ends (and every step is true); for a dropped route, dropping it is right"},
     {"v": "relation", "label": "Wrong relation", "help": "The route ends by the green object, but not behind / in front of / next to it as the text says"},
-    {"v": "place", "label": "Wrong place", "help": "The end is not in a doorway / corner / at the end of a hallway / against a wall / in the middle of the room as said"},
+    {"v": "place", "label": "Wrong place", "help": "The end is not in the doorway / corner / at the end of the hallway / in the hallway / by the wall / in the middle of the room as said"},
     {"v": "object", "label": "Wrong object", "help": "The green object is not what the end is by, or its outline is wrong"},
     {"v": "keep", "label": "Should not be dropped", "help": "A dropped route whose end could be described"},
     {"v": "unsure", "label": "Can't tell", "help": "Too ambiguous from this frame"},
@@ -235,7 +235,9 @@ def endings_item(rec, row, objects, group, text=None):
 STOP_KIND_LABELS = {"object:behind": "stops behind an object", "object:in front of": "stops in front of an object",
                     "object:next to": "stops next to an object", "place:doorway": "place: in a doorway",
                     "place:corner": "place: in a corner", "place:hallway_end": "place: at the end of the hallway",
-                    "place:wall": "place: against a wall", "place:room_middle": "place: in the middle of the room",
+                    "place:hallway": "place: in the hallway", "place:wall": "place: by the wall",
+                    "place:room_middle": "place: in the middle of the room",
+                    "wall:in front of": "in front of a wall (no place fitted)",
                     "drop": "dropped: no place fits"}
 
 

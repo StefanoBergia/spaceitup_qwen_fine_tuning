@@ -176,7 +176,7 @@ if (DATA.mode === "endings") {
 if (DATA.mode === "stops") {
   document.title = "Stop Phrases Audit";
   $("h1").textContent = "Stop phrases audit";
-  $("sub").textContent = "Each item is a route that ends in view with its d3 stop: 'behind / in front of / next to' the green object, or a place (in a doorway, in a corner, at the end of the hallway, against a wall, in the middle of the room), whose end is ringed. Does the stop say where the route ends, and is every step true? For a dropped route: is dropping it right?";
+  $("sub").textContent = "Each item is a route that ends in view with its d3 stop: 'behind / in front of / next to' the green object, or a place (in a doorway, in a corner, at the end of the hallway, in the hallway, by the wall, in the middle of the room), whose end is ringed. Does the stop say where the route ends, and is every step true? For a dropped route: is dropping it right?";
   $("tgtleg").hidden = false;
   $("tgtleg").innerHTML = '<i style="background:#ffaa00"></i>orange = steps, in route order &nbsp; <i style="background:#3cdc3c"></i>green = the stop\'s object &nbsp; <i style="background:#ff3c3c"></i>red ring = the end of a place stop';
   $("altleg").hidden = true;

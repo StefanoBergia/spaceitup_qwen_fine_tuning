@@ -248,3 +248,8 @@ def test_d3_seed_seeds_the_steer_names(tmp_path):                       # final 
                                                        {"id": "f:b8", "error": "timeout"}])
     prep.stage_d3_seed(args)
     assert [r["id"] for r in _read(args.labels / "names_steer_gemma_d3.jsonl")] == ["f:b9"]
+
+
+
+def test_stop_kind_labels_cover_the_addendum_kinds():
+    assert {"place:hallway", "wall:in front of"} <= set(audit.STOP_KIND_LABELS)

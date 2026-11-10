@@ -23,7 +23,8 @@ def _place(p):
             "measures": {}}
 
 
-D3_STOPS = [_obj(r) for r in ("behind", "in front of", "next to")] + [_place(p) for p in PLACE_TEXT]
+D3_STOPS = [_obj(r) for r in ("behind", "in front of", "next to")] + [_place(p) for p in PLACE_TEXT] + \
+    [{**_obj("in front of"), "type": "wall"}]
 
 
 @pytest.mark.parametrize("stop,text", [
@@ -32,14 +33,16 @@ D3_STOPS = [_obj(r) for r in ("behind", "in front of", "next to")] + [_place(p) 
     (_place("room_middle"), "stop in the middle of the room"),
     (_place("hallway_end"), "stop at the end of the hallway"),
     (_place("corner"), "stop in the corner"),
-    (_place("wall"), "stop against the wall"),
+    (_place("wall"), "stop by the wall"),
+    (_place("hallway"), "stop in the hallway"),
+    ({"type": "wall", "relation": "in front of", "object": "f:b2"}, "stop in front of the table"),
     (_place("doorway"), "stop in the doorway")])
 def test_stop_text_d3(stop, text):
     assert stop_text(stop, "table") == text
 
 
 def test_place_words_cover_every_place():
-    assert set(PLACE_TEXT) == set(PLACE_WORDS) == {"doorway", "corner", "hallway_end", "wall", "room_middle"}
+    assert set(PLACE_TEXT) == set(PLACE_WORDS) == {"doorway", "corner", "hallway_end", "hallway", "wall", "room_middle"}
 
 
 @pytest.mark.parametrize("stop", D3_STOPS, ids=lambda s: s["relation"] or s["place"])
@@ -108,3 +111,15 @@ def test_compose_prompt_has_the_new_stop_line():
 
 def test_prompt_version():
     assert PROMPT_VERSION == "d6"
+
+
+
+def test_hallway_words_are_not_the_end_of_the_hallway():
+    t = "Go left of the sofa, then stop at the end of the hallway."
+    assert "stop:place" in description_rejects(t, [PASS_SOFA], _place("hallway"), NAMES)
+
+
+def test_wall_stop_needs_in_front_of():
+    wall = {**_obj("in front of"), "type": "wall"}
+    assert visible_stop_rejects("Go left of the sofa, then stop beside the table.", wall) == ["stop:relation"]
+    assert _check_ending(wall, {}) == {"type": "stop", "stop": "wall:in front of"}

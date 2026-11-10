@@ -55,13 +55,15 @@ STOP_RELATION_WORDS = {
     ("object", "in front of"): ("in front of",),            # d3 (spec 2026-11-10): an object within 1.5 m
     ("object", "behind"): ("behind",),
     ("object", "next to"): ("next to", "beside"),
+    ("wall", "in front of"): ("in front of",),              # d3 Addendum A1: the wall ahead, when no place fits
 }
 # d3 places (rover_vlm.stop_places.PLACES): the canonical clause, and the words a text may use for it
 PLACE_TEXT = {"doorway": "in the doorway", "corner": "in the corner", "hallway_end": "at the end of the hallway",
-              "wall": "against the wall", "room_middle": "in the middle of the room"}
+              "hallway": "in the hallway", "wall": "by the wall", "room_middle": "in the middle of the room"}
 PLACE_WORDS = {"doorway": ("doorway", "door opening"), "corner": ("corner",),
                "hallway_end": ("end of the hallway", "end of the corridor", "end of the hall"),
-               "wall": ("against the wall", "beside the wall", "by the wall"),
+               "hallway": ("in the hallway", "in the corridor", "in the hall"),
+               "wall": ("by the wall", "beside the wall", "next to the wall", "against the wall", "along the wall"),
                "room_middle": ("middle of the room", "centre of the room", "center of the room")}
 # a d3 visible stop says where the rover ends up, never how far: these distance words are rejected after the stop word
 _DISTANCE = re.compile(r"\b(?:a little|a bit|slightly|well|far|a good way)\s+(?:past|before|beyond|after|short of)\b"
@@ -99,7 +101,7 @@ def stop_text(stop, name, wall=False):
     """The stop clause. A distance stop needs its coarse `amount` (rows from before Addendum A
     carry only distance_m: they raise instead of being mis-rendered). A "past" stop measured
     from a wall (`wall`) is past the END of the wall. d3: an object stop says its relation, a place stop its place."""
-    if stop["type"] == "object":
+    if stop["type"] in ("object", "wall"):
         return f"stop {stop['relation']} the {name}"
     if stop["type"] == "place":
         return "stop " + PLACE_TEXT[stop["place"]]
@@ -319,7 +321,8 @@ def visible_stop_rejects(text, stop):
         return ["stop:missing"]
     clause = stops[-1].end()
     out = _d3_clause_rejects(text, stop, clause)
-    if stop["type"] == "object" and not _words_re(STOP_RELATION_WORDS[("object", stop["relation"])]).search(text, clause):
+    if stop["type"] in ("object", "wall") and \
+            not _words_re(STOP_RELATION_WORDS[(stop["type"], stop["relation"])]).search(text, clause):
         out.append("stop:relation")
     return out
 
@@ -389,7 +392,7 @@ def description_rejects(text, events, stop, names):
             words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
             if not words or not stops or not _words_re(words).search(text, clause):
                 out.append("stop:amount")
-        if stop["type"] in ("object", "place") and stops:
+        if stop["type"] in ("object", "place", "wall") and stops:
             out += _d3_clause_rejects(text, stop, clause)
     # the turn phrase's side word is the turn's: blank it (same length, spans stay valid) before side ownership
     side_text = _TURN.sub(lambda m: " " * len(m.group(0)), text)

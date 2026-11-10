@@ -115,6 +115,7 @@ def test_d2_stays_the_default(tmp_path):
 
 
 def test_stop_kind():
+    assert stop_kind({"type": "wall", "relation": "in front of"}) == "wall:in front of"
     assert stop_kind({"type": "object", "relation": "next to"}) == "object:next to"
     assert stop_kind({"type": "place", "place": "corner"}) == "place:corner"
     assert stop_kind({"type": "distance", "relation": "past"}) is None
@@ -132,3 +133,37 @@ def test_schema_check_refuses_others(tmp_path):
     (tmp_path / "events_meta.json").write_text(json.dumps({"schema": "x"}))
     with pytest.raises(SystemExit):
         check_events_schema(Path(tmp_path) / "events_train.jsonl")
+
+
+
+# --- Addendum A1: the wall as a backup when no place fits ----------------------------------------------------------
+WIDE_AHEAD = (slice(78, 82), slice(30, 70))                               # 2 m wide box, face 0.9 m ahead (wall-like)
+
+
+def test_wall_ahead_backs_up_when_no_place_fits(tmp_path, monkeypatch):
+    import rover_vlm.route_events as RE
+    monkeypatch.setattr(RE, "place_at", lambda grid, route: None)
+    frame, st = _stop(tmp_path, _with(*WIDE_AHEAD))
+    assert (st["type"], st["relation"]) == ("wall", "in front of")
+    assert st["anchor"]["blob"] == int(frame.lab[80, 50]) and st["anchor"]["kind"] == "wall"
+
+
+def test_a_place_wins_over_the_wall_backup(tmp_path):
+    _, st = _stop(tmp_path, _with(*WIDE_AHEAD))
+    assert st["type"] == "place"
+
+
+def test_the_backup_needs_the_wall_ahead(tmp_path, monkeypatch):
+    import rover_vlm.route_events as RE
+    monkeypatch.setattr(RE, "place_at", lambda grid, route: None)
+    _, st = _stop(tmp_path, _with(slice(20, 90), slice(30, 33)))         # a long wall beside the route, not ahead
+    assert st is None
+
+
+def test_wall_backup_record(tmp_path, monkeypatch):
+    import rover_vlm.route_events as RE
+    monkeypatch.setattr(RE, "place_at", lambda grid, route: None)
+    row = describe_route(write_sample(tmp_path / "s", _with(*WIDE_AHEAD), [END]), 0, stops="d3")
+    st = row["stop"]
+    assert (st["type"], st["relation"], st["place"]) == ("wall", "in front of", None)
+    assert row["objects"][st["object"]]["kind_hint"] == "wall"
