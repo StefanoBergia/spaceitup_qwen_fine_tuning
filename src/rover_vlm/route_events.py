@@ -356,8 +356,7 @@ STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": i
 REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_behind_anchor", "no_events_bent", "no_stop_place",
            "error")
 CLOSE_M = 1.5              # d3: an object this close to a visible end is the stop's anchor (~1 m of gap)
-BEHIND_RAY_M = 0.6         # d3 "behind X": a visible cell of X this close to the camera->goal line ...
-BEHIND_GAP_M = 0.3         # ... and at least this much nearer the camera than the goal along that line
+BEHIND_GAP_M = 0.3         # d3 "behind X": X spans the goal's image column and is this much nearer the camera
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 
 
@@ -628,13 +627,15 @@ def stop_phrase(frame, route_xz, events, cands=None):
 def object_relation(frame, goal, head, right, blobs):
     """The d3 object stop: the nearest visible, non-wall blob within CLOSE_M of the goal and the first relation that
     fits, in the order behind -> in front of -> next to; a blob that fits none (diagonal to the goal) is skipped.
-    behind = a visible cell within BEHIND_RAY_M of the camera->goal line and >= BEHIND_GAP_M nearer the camera than
-    the goal; in front of = ahead of the goal along the final heading (as _near_stop); next to = beside it, the goal
-    within the blob's visible extent along the heading. None when no blob qualifies."""
+    behind = the blob's image outline spans the goal's image column and a visible cell is >= BEHIND_GAP_M nearer the
+    camera than the goal along the camera->goal line (final review I1: a metric distance to that line also caught
+    objects beside the route's last metre); in front of = ahead of the goal along the final heading (as _near_stop);
+    next to = beside it, the goal within the blob's visible extent along the heading. None when no blob qualifies."""
     cam = frame.cam.pos
     ray = goal - cam
     length = float(np.linalg.norm(ray))
     ray = ray / max(length, 1e-9)
+    u_goal = float(frame.cam.uv(goal)[0][0, 0])
     for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
         if d.min() > CLOSE_M:
             break
@@ -648,15 +649,15 @@ def object_relation(frame, goal, head, right, blobs):
         if dv.min() > CLOSE_M:
             continue
         t = (vis - cam) @ ray
-        perp = np.linalg.norm((vis - cam) - t[:, None] * ray, axis=1)
+        bbox = x["outline"].get("bbox")
         v = vis[dv.argmin()] - goal
         along, lat = float(v @ head), float(v @ right)
         ext = (vis - goal) @ head
-        if np.any((perp <= BEHIND_RAY_M) & (t > 0) & (t <= length - BEHIND_GAP_M)):
+        if bbox is not None and bbox[0] <= u_goal <= bbox[2] and np.any((t > 0) & (t <= length - BEHIND_GAP_M)):
             rel = "behind"
         elif along > abs(lat):
             rel = "in front of"
-        elif abs(lat) >= along and ext.min() <= 0.0 <= ext.max():
+        elif ext.min() <= 0.0 <= ext.max():                 # |lateral| >= along here: beside the goal
             rel = "next to"
         else:
             continue

@@ -21,12 +21,14 @@ from .landmarks import FREE, OCC, UNKNOWN
 PLACES = ("doorway", "corner", "hallway_end", "wall", "room_middle")
 N_DIRS = 16
 RAY_MAX_M = 3.0
-DOORWAY_HALF_M = 0.9          # each jamb this close to the goal (an opening at most 1.8 m wide)
-DOORWAY_DEPTH_M = 0.6         # the jambs must end within this along the heading (a gap, not a corridor)
+DOORWAY_HALF_M = 0.9          # each jamb this close to the cross-section's centre (an opening at most 1.8 m wide)
+DOORWAY_DEPTH_M = 0.6         # the jambs run at most this far along the heading (a gap, not a corridor)
+DOORWAY_REACH_M = 0.75        # the opening lies within this of the goal, before or after it (spec "within ~0.75 m")
 CORNER_M = 1.5
 CORNER_DEG = (60.0, 120.0)    # the two walls' directions differ by this much
 CORNER_OPEN_DEG = 30.0        # no wall within CORNER_M this close to either wall's opposite direction
-CORNER_WEDGE = 1.5            # the ray between the two walls hits within CORNER_WEDGE * CORNER_M (closed wedge)
+CORNER_WEDGE = 1.5            # the ray between the two walls hits within CORNER_WEDGE * CORNER_M (closed wedge) ...
+CORNER_SLACK_M = 0.15         # ... and no farther than where the two walls would meet, plus this
 HALL_MAX_W = 2.2
 HALL_BACK_M = (0.0, 1.0, 2.0)
 HALL_END_M = 1.5
@@ -76,14 +78,10 @@ def ray_hits(grid, xz, head_xz, n_dirs=N_DIRS, max_m=RAY_MAX_M):
 def _walls(hits, max_m):
     """[(angle, dist)] of the local minima of the OCC hit distance within max_m (cyclic; non-hits count as far)."""
     d = [dist if o == "occ" and dist <= max_m else np.inf for _, o, dist in hits]
-    n, out, i = len(d), [], 0
-    while i < n:
-        if np.isfinite(d[i]) and d[i] <= d[i - 1] and d[i] <= d[(i + 1) % n]:
-            out.append((hits[i][0], d[i]))
-            while d[(i + 1) % n] == d[i] and i + 1 < n:      # a plateau is one wall
-                i += 1
-        i += 1
-    return out
+    n = len(d)
+    # a plateau (equal neighbours) is one wall: only its first ray counts, also across the fan's wrap (final review M1)
+    return [(hits[i][0], d[i]) for i in range(n)
+            if np.isfinite(d[i]) and d[i] < d[i - 1] and d[i] <= d[(i + 1) % n]]
 
 
 def _gap(a, b):
@@ -123,18 +121,39 @@ def _heading(route):
     return _unit(pts[-1] - (back if back is not None else pts[0]))
 
 
-def _doorway(grid, goal, h, walls):
-    sides = [(a, d) for a, d in walls if _gap(a, 90.0) <= 30.0 or _gap(a, -90.0) <= 30.0]
-    for i, (a, da) in enumerate(sides):
-        for b, db in sides[i + 1:]:
-            if da <= DOORWAY_HALF_M and db <= DOORWAY_HALF_M and _gap(a, b) >= 150.0:
-                for along in (DOORWAY_DEPTH_M, -DOORWAY_DEPTH_M):
-                    p = goal + along * h
-                    r, l = _side(grid, p, h, 1), _side(grid, p, h, -1)
-                    if r is not None and l is not None and r <= DOORWAY_HALF_M and l <= DOORWAY_HALF_M:
-                        return None                             # the jambs go on: a corridor, not a doorway
-                return {"jamb_a_m": round(da, 2), "jamb_b_m": round(db, 2)}
-    return None
+def _cross_section(grid, p, h):
+    """("jamb", r, l) when both side rays hit OCC within DOORWAY_HALF_M of p; ("open",) when a side is seen free that
+    far (known: no jamb there); ("unknown",) otherwise -- an unseen side is no evidence either way."""
+    right = np.array([-h[1], h[0]])
+    (ro, rd), (lo, ld) = (_march(grid, p, s * right, DOORWAY_HALF_M) for s in (1, -1))
+    if ro == "occ" and lo == "occ":
+        return "jamb", rd, ld
+    return ("open",) if "free" in (ro, lo) else ("unknown",)
+
+
+def _doorway(grid, goal, h):
+    """A short run of cross-sections with a jamb on both sides, within DOORWAY_REACH_M of the goal along the heading,
+    no longer than DOORWAY_DEPTH_M and seen open on both ends (final review I2: the goal may stand in front of or just
+    past the opening, and an unseen end does not prove the jambs stop)."""
+    ss = np.arange(-DOORWAY_REACH_M, DOORWAY_REACH_M + 1e-9, grid.mpp)
+    cs = [_cross_section(grid, goal + s * h, h) for s in ss]
+    best, i = None, 0
+    while i < len(cs):
+        if cs[i][0] != "jamb":
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(cs) and cs[j + 1][0] == "jamb":
+            j += 1
+        ok = (0 < i and j < len(cs) - 1 and (ss[j] - ss[i]) <= DOORWAY_DEPTH_M
+              and cs[i - 1][0] == "open" and cs[j + 1][0] == "open")
+        mid = (i + j) // 2
+        if ok and (best is None or abs(ss[mid]) < abs(best[0])):
+            best = (float(ss[mid]), cs[mid][1], cs[mid][2])
+        i = j + 1
+    if best is None:
+        return None
+    return {"jamb_a_m": round(best[1], 2), "jamb_b_m": round(best[2], 2), "offset_m": round(best[0], 2)}
 
 
 def _corner(grid, goal, h, walls):
@@ -148,7 +167,7 @@ def _corner(grid, goal, h, walls):
             mid = np.radians(a + ((b - a + 180.0) % 360.0 - 180.0) / 2)
             right = np.array([-h[1], h[0]])
             o, dm = _march(grid, goal, np.cos(mid) * h + np.sin(mid) * right, CORNER_WEDGE * CORNER_M)
-            if o != "occ":
+            if o != "occ" or dm > max(da, db) / np.cos(np.radians(_gap(a, b) / 2)) + CORNER_SLACK_M:
                 continue                                        # the wedge is open (a gap between two stretches)
             return {"wall_a_m": round(da, 2), "wall_b_m": round(db, 2), "angle_deg": round(_gap(a, b), 1),
                     "vertex_m": round(dm, 2)}
@@ -197,7 +216,7 @@ def place_at(grid, route_xz):
     route = np.asarray(route_xz, float)
     goal, h = route[-1], _heading(route)
     walls = _walls(ray_hits(grid, goal, h), RAY_MAX_M)
-    for place, found in (("doorway", lambda: _doorway(grid, goal, h, walls)),
+    for place, found in (("doorway", lambda: _doorway(grid, goal, h)),
                          ("corner", lambda: _corner(grid, goal, h, walls)),
                          ("hallway_end", lambda: _hallway_end(grid, route, goal, h)),
                          ("wall", lambda: _wall(walls)),

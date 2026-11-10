@@ -240,3 +240,11 @@ def test_stops_item_shows_the_place(tmp_path):
 def test_audit_template_has_a_stops_mode():
     html = audit.TEMPLATE.read_text()
     assert 'DATA.mode === "stops"' in html and "Stop Phrases Audit" in html
+
+
+def test_d3_seed_seeds_the_steer_names(tmp_path):                       # final review I3
+    args = _d3_seed_args(tmp_path)
+    _write(args.labels / "names_steer_gemma_d2.jsonl", [{"id": "f:b9", "name": "lamp", "passed": True},
+                                                       {"id": "f:b8", "error": "timeout"}])
+    prep.stage_d3_seed(args)
+    assert [r["id"] for r in _read(args.labels / "names_steer_gemma_d3.jsonl")] == ["f:b9"]

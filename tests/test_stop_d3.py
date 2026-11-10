@@ -40,9 +40,18 @@ def test_in_front_of_an_object_ahead(tmp_path):
     assert st["anchor"]["blob"] == int(frame.lab[75, 50]) and st["anchor"]["kind"] == "object"
 
 
+DETOUR = [(2.5, 0.2), (1.8, 1.6), (1.8, 2.6), (2.5, 3.0)]               # round a post on the camera ray, end behind it
+
+
 def test_behind_an_object_between_camera_and_goal(tmp_path):
-    _, st = _stop(tmp_path, _with(slice(46, 50), slice(38, 42)))          # post x 1.9-2.1, z 2.3-2.5
+    _, st = _stop(tmp_path, _with(slice(42, 46), slice(48, 52)), DETOUR)   # post x 2.4-2.6, z 2.1-2.3, in the end's column
     assert (st["type"], st["relation"]) == ("object", "behind")
+
+
+def test_object_beside_the_route_end_is_not_behind(tmp_path):     # final review I1
+    """A post 0.4-0.6 m beside the last metre of the route is not between the camera and the end in the image."""
+    _, st = _stop(tmp_path, _with(slice(46, 50), slice(38, 42)))          # post x 1.9-2.1, z 2.3-2.5
+    assert st.get("relation") != "behind"
 
 
 def test_next_to_an_object_beside_the_goal(tmp_path):

@@ -6,7 +6,7 @@ Scenes: a 100 x 100 grid at 0.05 m (5 m x 5 m; row <- z, col <- x), route straig
 import numpy as np
 
 from rover_vlm.landmarks import FREE, OCC, UNKNOWN, Grid
-from rover_vlm.stop_places import PLACES, place_at, ray_hits
+from rover_vlm.stop_places import PLACES, _walls, place_at, ray_hits
 
 
 def _free():
@@ -115,3 +115,29 @@ def test_measures_are_small_and_rounded():
     for state, z in ((_free(), 2.5), (_corridor(35, 65), 3.0), (_door_wall(), 2.05)):
         m = place_at(Grid(state, 0.05, 0.0, 0.0), _route(z))["measures"]
         assert len(m) <= 6 and all(isinstance(v, float) for v in m.values())
+
+
+def test_doorway_within_reach_before_the_gap():                       # final review I2a: spec "within ~0.75 m"
+    assert _place(_door_wall(), 1.5) == "doorway"                     # 0.5 m before the wall
+
+
+def test_doorway_needs_known_walls_around_the_gap():                  # final review I2b: unknown is no evidence
+    s = np.full((100, 100), UNKNOWN, np.uint8)
+    s[:, 39:62] = FREE                                                 # a 1.2 m wide strip seen along the route
+    s[56:65, 38] = OCC                                                 # its side walls known only for z 2.8-3.25
+    s[56:65, 62] = OCC
+    assert _place(s, 3.0) != "doorway"
+
+
+def test_a_plateau_across_the_fan_wrap_is_one_wall():                 # final review M1
+    hits = [(22.5 * k - (360.0 if 22.5 * k > 180 else 0.0), "occ", 0.9) for k in range(16)]
+    hits[0], hits[15] = (0.0, "occ", 0.7), (-22.5, "occ", 0.7)          # ahead and 22.5 deg left: the same flat wall
+    assert len(_walls(hits, 3.0)) == 1
+
+
+def test_opening_in_the_wall_ahead_is_not_a_corner():                 # final review M2
+    s = _free()
+    s[68:71, :] = OCC                                                  # wall ahead z 3.4-3.55, 0.9 m from the goal ...
+    s[68:71, 38:62] = FREE                                             # ... with a 1.2 m opening
+    s[92:95, :] = OCC                                                  # the next room's wall, 2.1 m from the goal
+    assert _place(s, 2.5) != "corner"

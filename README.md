@@ -1690,7 +1690,8 @@ Steering on v5 (stop pairs whose cuts use the d3 stops; the turn slice is unchan
 
     uv run scripts/prepare_habitat_instr.py steer-objects --frames $V5/eval_desc_entry.json --out-dir $V5/steer
     uv run scripts/prepare_habitat_instr.py steer --stops d3 --frames $V5/eval_desc_entry.json --out-dir $V5/steer \
-        --names $L/names_eval_gemma_d3.jsonl --fallback-names $L/names_eval_d3.jsonl
+        --names $L/names_eval_gemma_d3.jsonl --fallback-names $L/names_eval_d3.jsonl \
+        --steer-names $L/names_steer_gemma_d3.jsonl          # seeded from the d2 steer names by d3-seed
     #   (+ ROUND=d3 STEER_DIR=$V5/steer STAGE=steer_names sbatch slurm/label_descriptions.sbatch if objects are unnamed, then steer again)
     uv run scripts/prepare_habitat_instr.py steer-select --out-dir $V5/steer               # Gate 0
     uv run scripts/audit_instruction_labels.py --mode steer --n 50 --n-turn 20 --events $V5/steer/events_steer_eval.jsonl \

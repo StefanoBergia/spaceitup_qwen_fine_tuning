@@ -569,13 +569,15 @@ def _write_jsonl(path, rows):
 COMPOSE_PER_MIN = 14     # Cosmos compose throughput on 3g.40gb (job 92229)
 
 
-def _seed_round(args, new, old, old_events_dir, seed_fn):
+def _seed_round(args, new, old, old_events_dir, seed_fn, extra_names=()):
     """Seed the `new` round's label files from the `old` round's (seed_fn: seed_d2_labels / seed_d3_labels), so the
     label job (--resume) names only new objects and composes only changed routes; write the changed eval routes for
-    the gate (spec "Seeding") and seed_meta.json."""
+    the gate (spec "Seeding") and seed_meta.json. extra_names: (old, new) name files copied without their error
+    rows (d3: the steer names, so the steering rebuild names only new objects)."""
     files = {s: {"gemma": args.labels / f"names_{s}_gemma_{new}.jsonl", "cosmos": args.labels / f"names_{s}_{new}.jsonl",
                  "desc": desc_path(args.labels, s, "_mix", new)} for s in SPLITS}
     existing = [str(p) for f in files.values() for p in f.values() if p.exists() and p.stat().st_size]
+    existing += [str(dst) for _, dst in extra_names if dst.exists() and dst.stat().st_size]
     if existing and not args.force:
         raise SystemExit(f"refusing to overwrite {new} label files (they may hold GPU work): {existing[:3]} — "
                          "pass --force only if they are seeds you mean to redo")
@@ -605,6 +607,10 @@ def _seed_round(args, new, old, old_events_dir, seed_fn):
                    "objects": len(new_obj), f"objects_named_{old}_gemma": len(named),
                    "objects_to_name": len(wanted - named),
                    "est_compose_hours": round(len(seed["changed"]) / COMPOSE_PER_MIN / 60, 1)}
+    for src, dst in extra_names:
+        if src.exists():
+            _write_jsonl(dst, [r for r in _jsonl(src) if not r.get("error")])
+            meta[dst.name] = sum(1 for _ in _jsonl(dst))
     (args.events_dir / "seed_meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
 
@@ -618,7 +624,8 @@ def stage_d2_seed(args):
 def stage_d3_seed(args):
     """d3 (spec 2026-11-10): seed the d3 label files from the d2 ones; a d3 visible stop of a route with unchanged
     events gets the d2 text with its final stop clause rewritten on CPU, everything else changed is composed."""
-    _seed_round(args, "d3", "d2", args.d2_events_dir, seed_d3_labels)
+    _seed_round(args, "d3", "d2", args.d2_events_dir, seed_d3_labels,
+                extra_names=[(args.labels / "names_steer_gemma_d2.jsonl", args.labels / "names_steer_gemma_d3.jsonl")])
 
 
 NAMING_AB = V4_OUT / "naming_ab"
