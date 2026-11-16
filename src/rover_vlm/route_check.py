@@ -152,3 +152,92 @@ def calibration_rows(slug: str, items: list[dict], marks: dict, image_dir) -> li
         rows.append({"id": f"{slug}/{it['id']}", "route_id": it["id"], "page": slug, "image": str(path.resolve()),
                      "text": it["instruction"], "wrong": wrong, "verdict": m["verdict"], "note": m.get("note", "")})
     return rows
+
+
+# --- the score: features, a small logistic fit, out-of-fold scores, AUC, the removal curve ----------------------
+import math
+
+import numpy as np
+
+FEATURES = ("name_no", "object_no", "missing_obstacle", "stop_no", "overall_no", "p_false")
+
+
+def features(row: dict):
+    """The checker's answers as a float vector (FEATURES order), or None for a row without a readable reply."""
+    if not row.get("passed"):
+        return None
+    names = row.get("names") or []
+    c = row.get("confidence", 50) / 100.0
+    return np.array([float(any(n["fits"] == "no" for n in names)), float(any(n["is_object"] == "no" for n in names)),
+                     float(row["missing_obstacle"]), float(not row["stop_ok"]), float(not row["overall_true"]),
+                     round(1.0 - c if row["overall_true"] else c, 6)])
+
+
+def fit_logistic(X, y, l2: float = 1.0, iters: int = 50):
+    """L2-regularised logistic regression by Newton steps (no sklearn); returns weights with the bias last."""
+    X1 = np.column_stack([np.asarray(X, float), np.ones(len(X))])
+    y = np.asarray(y, float)
+    w = np.zeros(X1.shape[1])
+    reg = l2 * np.eye(X1.shape[1])
+    reg[-1, -1] = 0.0                          # the bias is not shrunk
+    for _ in range(iters):
+        p = 1.0 / (1.0 + np.exp(-X1 @ w))
+        g = X1.T @ (p - y) + reg @ w
+        H = X1.T @ (X1 * (p * (1 - p))[:, None]) + reg
+        step = np.linalg.solve(H, g)
+        w -= step
+        if np.abs(step).max() < 1e-8:
+            break
+    return w
+
+
+def predict(w, X):
+    """P(wrong) under weights from fit_logistic."""
+    X1 = np.column_stack([np.asarray(X, float), np.ones(len(X))])
+    return 1.0 / (1.0 + np.exp(-X1 @ np.asarray(w)))
+
+
+def group_folds(groups, k: int, seed: int) -> list[int]:
+    """A fold per row such that rows of one group (a place, scene_cXXX) share a fold."""
+    uniq = sorted(set(groups))
+    order = np.random.default_rng(seed).permutation(len(uniq))
+    fold_of = {uniq[i]: n % k for n, i in enumerate(order)}
+    return [fold_of[g] for g in groups]
+
+
+def oof_scores(X, y, groups, k: int = 5, seed: int = 0):
+    """Out-of-fold P(wrong): each row scored by a fit that never saw its place."""
+    X, y = np.asarray(X, float), np.asarray(y, bool)
+    folds = np.array(group_folds(groups, k, seed))
+    out = np.zeros(len(y))
+    for f in range(k):
+        te = folds == f
+        if te.any():
+            out[te] = predict(fit_logistic(X[~te], y[~te]), X[te])
+    return out
+
+
+def auc(scores, wrong) -> float:
+    """Area under the ROC curve of `scores` for the `wrong` rows (ties averaged); nan without both classes."""
+    s, y = np.asarray(scores, float), np.asarray(wrong, bool)
+    if y.all() or not y.any():
+        return float("nan")
+    _, inv, cnt = np.unique(s, return_inverse=True, return_counts=True)
+    ranks = ((np.cumsum(cnt) - cnt) + (cnt + 1) / 2.0)[inv]
+    npos = y.sum()
+    return float((ranks[y].sum() - npos * (npos + 1) / 2) / (npos * (~y).sum()))
+
+
+def removal_curve(scores, wrong, shares=(0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40)) -> list[dict]:
+    """For each share: remove the ceil(share * n) highest-scored rows; accuracy of what is kept, share of the wrong
+    rows caught, and the score threshold (the lowest removed score)."""
+    s, y = np.asarray(scores, float), np.asarray(wrong, bool)
+    order = np.argsort(-s, kind="stable")
+    out = []
+    for share in shares:
+        k = math.ceil(share * len(s))
+        gone, kept = order[:k], order[k:]
+        out.append({"share": share, "removed": k, "threshold": float(s[order[k - 1]]) if k else float("inf"),
+                    "kept_accuracy": round(float(1 - y[kept].mean()) if len(kept) else 1.0, 4),
+                    "wrong_caught": round(float(y[gone].sum() / y.sum()) if y.any() else 0.0, 4)})
+    return out

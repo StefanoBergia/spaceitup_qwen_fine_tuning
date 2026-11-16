@@ -139,3 +139,57 @@ def test_summarize_check():
             {"id": "c", "error": "APIConnectionError: x"}]
     s = summarize_d1(rows, "check")
     assert s["errors"] == 1 and s["parse_failed"] == 1 and s["overall_true_share"] == 1.0
+
+
+# --- Task 4: score fit, AUC, removal curve ----------------------------------------------------------------------
+import math
+
+import numpy as np
+
+from rover_vlm.route_check import FEATURES, auc, features, fit_logistic, group_folds, oof_scores, predict, removal_curve
+
+
+def test_auc_known():
+    assert auc([0.1, 0.4, 0.35, 0.8], [False, False, True, True]) == 0.75
+    assert auc([0.5, 0.5, 0.5, 0.5], [False, True, False, True]) == 0.5
+
+
+def test_fit_separates():
+    rng = np.random.default_rng(0)
+    y = rng.random(200) < 0.3
+    X = np.column_stack([y.astype(float), rng.random(200)])
+    w = fit_logistic(X, y)
+    assert auc(predict(w, X), y) > 0.95
+
+
+def test_oof_groups_never_straddle():
+    groups = [f"00800-X_c{i % 7:03d}" for i in range(70)]
+    folds = group_folds(groups, 5, 0)
+    by = {}
+    for g, f in zip(groups, folds):
+        by.setdefault(g, set()).add(f)
+    assert all(len(s) == 1 for s in by.values()) and set(folds) <= set(range(5))
+    rng = np.random.default_rng(1)
+    y = rng.random(70) < 0.3
+    X = np.column_stack([y.astype(float) + rng.normal(0, 0.1, 70), rng.random(70)])
+    s = oof_scores(X, y, groups, k=5, seed=0)
+    assert s.shape == (70,) and auc(s, y) > 0.9
+
+
+def test_removal_curve_monotone():
+    wrong = np.array([True] * 10 + [False] * 30)
+    scores = np.linspace(1, 0, 40)            # perfectly ranked: the 10 wrong score highest
+    cur = removal_curve(scores, wrong)
+    acc = [c["kept_accuracy"] for c in cur]
+    assert all(b >= a for a, b in zip(acc, acc[1:]))
+    c10 = next(c for c in cur if c["share"] == 0.10)
+    assert c10["removed"] == math.ceil(0.10 * 40) and c10["wrong_caught"] == 0.4
+
+
+def test_features_none_on_parse_reject():
+    assert features({"id": "a", "passed": False, "rejects": ["parse"]}) is None
+    row = {"passed": True, "names": [{"name": "x", "fits": "no", "is_object": "yes"}], "missing_obstacle": True,
+           "stop_ok": False, "better_stop": "", "overall_true": True, "confidence": 70}
+    f = features(row)
+    assert list(FEATURES) == ["name_no", "object_no", "missing_obstacle", "stop_no", "overall_no", "p_false"]
+    assert f.tolist() == [1.0, 0.0, 1.0, 1.0, 0.0, 0.3]
