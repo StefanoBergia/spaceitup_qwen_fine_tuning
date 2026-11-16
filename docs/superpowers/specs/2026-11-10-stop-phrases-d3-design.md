@@ -223,3 +223,40 @@ helped. Under the best tuning (below, before the new types) 33.5% were still dro
 
 Expected on the probe sample: ~17% dropped without the backup, ~13% with it. The calibration gate of the plan (Task 9)
 still applies to the full events run.
+
+## Addendum A2 (2026-11-16): furniture is not "the wall"
+
+**Finding.** G3 (84 eval items) scored 63%; 7 of its 9 wrong-stop routes have one cause: `_wall_like` is size only
+(blob extent ≥ 1.5 m) on a 2D map, and `load_frame` merges blobs one empty cell apart, so a sofa set, a dining set or
+a kitchen island with stools is a "wall". Two effects: "by the wall" fires next to furniture in open floor, and
+`object_relation` skips the big sofa and names a farther object. A per-cell height test on the depth image tells them
+apart (below). Applied everywhere it lost a blind A/B judged by the user (67 changed items: old right 33, new right
+23): corridors formed by furniture and a wall are real hallways to the user (old 14, new 5). Only where the old stop
+was "by the wall" did it win: new 10, old 8, and 6 of those 8 were routes the new rule dropped. With "never drop":
+new 10, old 2, neither 2.
+
+**Decision (user, 2026-11-16): the targeted fix (option 1).**
+
+1. **Height class of an occupied cell** (`route_events.cell_heights`), from the depth profile in the cell's own image
+   column (relative, so the depth fit's 0.3–0.7 m bias at range does not matter): `d_obj` = the median planar depth
+   at 0.1–0.85 m above the floor (every 0.15 m) over the readings within [fwd − 1.0, fwd + 0.5] m of the cell's own
+   forward distance (legs seen through and nearer things are left out); at 1.5 / 1.7 / 1.9 m a reading farther than
+   `d_obj` + 0.5 m says low, one within ±0.3 m says tall. With ≥ 2 usable high readings: **low** if more than half say
+   low, **tall** if more than half say tall, else **unknown**. Unknown also without a depth image, without a fit, or
+   with a fit residual above `DEPTH_FIT_MAX_RESID_M`.
+2. **Only a "by the wall" stop is looked at again**, with furniture seen as furniture:
+   - a wall-sized blob is **low furniture** when ≥ 8 of its visible cells within 2.0 m of the goal have a class and
+     ≥ 60% of those are low; it is then an object for `object_relation`, cleared from the place grid, and not a wall
+     for `wall_ahead`;
+   - occupied cells classed low within 3.5 m of the goal are cleared from the place grid;
+   - then `stop_d3`'s order runs again (object relation → place → wall ahead). Its stop replaces "by the wall";
+     when it finds none, **"by the wall" stays** (the fix never drops a route).
+3. Every other stop is unchanged: hallways, doorways, corners and object relations keep furniture as walls.
+
+**Expected.** About 26–30% of "by the wall" stops change (G3 11 of 43, G1 3 of 10), about 1 stop in 8; the drop share
+does not change; stop accuracy up a few points (~81% → mid-to-high 80s). The rule was chosen after seeing the A/B
+marks, so fresh G1 and G3 samples (a new seed, not the A/B routes) confirm it. G3 will still miss 90%: name and wording
+errors alone cap it at ~82%.
+
+**Run order.** Rebuild the v5 events (CPU), `d3-seed --force`, the G2 gate job (ask first), fresh G1 stop and G3
+pages, then the user's decision on STAGE=full.
