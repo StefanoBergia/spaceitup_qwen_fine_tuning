@@ -167,3 +167,112 @@ def test_wall_backup_record(tmp_path, monkeypatch):
     st = row["stop"]
     assert (st["type"], st["relation"], st["place"]) == ("wall", "in front of", None)
     assert row["objects"][st["object"]]["kind_hint"] == "wall"
+
+
+# --- Addendum A2: furniture is not "the wall" ----------------------------------------------------------------------
+# Boxes are (x0, x1, z0, z1, top) in metres; the depth image is ray-cast from them (planar metres, fit = identity).
+BACK_WALL = (0.0, 5.0, 4.85, 5.0, 4.0)
+SOFA = (2.0, 3.0, 2.0, 2.8, 0.8)                     # low, 1.8-2.6 m ahead of the camera
+LONG_SOFA = (1.5, 3.5, 3.6, 4.4, 0.8)                # 2 m x 0.8 m: wall-sized on the map, 0.6 m ahead of END's end
+
+
+def _render(cam, boxes, H=128, W=128):
+    """Planar depth of a level camera over a flat floor among upright boxes, marched every 0.01 m; 0 = no hit."""
+    from rover_vlm.landmarks import CAM_HEIGHT_M
+    a = np.broadcast_to(2 * (np.arange(W) + 0.5) / W - 1, (H, W))
+    b = np.broadcast_to((2 * (np.arange(H) + 0.5) / H - 1)[:, None], (H, W))
+    out = np.zeros((H, W))
+    for f in np.arange(0.3, 8.0, 0.01):
+        hgt = CAM_HEIGHT_M - b * f
+        x = cam.pos[0] + f * cam.h[0] + a * f * cam.right[0]
+        z = cam.pos[1] + f * cam.h[1] + a * f * cam.right[1]
+        hit = hgt <= 0
+        for x0, x1, z0, z1, top in boxes:
+            hit = hit | ((x >= x0) & (x <= x1) & (z >= z0) & (z <= z1) & (hgt <= top))
+        out[(out == 0) & hit] = f
+    return out
+
+
+def _cells_in(box):
+    """(rows, cols) slices of the grid cells whose centres lie in a box's footprint."""
+    x0, x1, z0, z1, _ = box
+    return slice(int(np.ceil(z0 / 0.05 - 0.5)), int(np.floor(z1 / 0.05 - 0.5)) + 1), \
+        slice(int(np.ceil(x0 / 0.05 - 0.5)), int(np.floor(x1 / 0.05 - 0.5)) + 1)
+
+
+def _scene(tmp_path, mapped, rendered=(), base=None, route=END):
+    """A frame whose map holds the `mapped` boxes and whose depth image shows them plus `rendered`."""
+    s = _free() if base is None else base.copy()
+    for box in mapped:
+        s[_cells_in(box)] = OCC
+    _, frame = load_frame(write_sample(tmp_path / "s", s, [route]))
+    frame.depth = _render(frame.cam, list(mapped) + list(rendered))
+    frame.depth_fit = (1.0, 0.0, 0.0)
+    return frame
+
+
+def _xz(frame, box):
+    m = np.zeros(frame.grid.s.shape, bool)
+    m[_cells_in(box)] = True
+    return frame.grid.xz(np.argwhere(m))
+
+
+def test_cell_heights_tell_low_furniture_from_a_wall(tmp_path):
+    from rover_vlm.route_events import HEIGHT_LOW, HEIGHT_TALL, cell_heights
+    frame = _scene(tmp_path, [SOFA, BACK_WALL])
+    sofa = cell_heights(frame, _xz(frame, SOFA))
+    wall = cell_heights(frame, _xz(frame, (0.5, 1.5, 4.85, 5.0, 4.0)))      # the back wall's stretch the sofa does not hide
+    assert (sofa == HEIGHT_LOW).mean() >= 0.8
+    assert (wall == HEIGHT_TALL).mean() >= 0.8
+
+
+def test_cell_heights_unknown_without_a_usable_depth(tmp_path):
+    from rover_vlm.route_events import DEPTH_FIT_MAX_RESID_M, HEIGHT_UNKNOWN, cell_heights
+    frame = _scene(tmp_path, [SOFA, BACK_WALL])
+    xz = _xz(frame, SOFA)
+    frame.depth_fit = (1.0, 0.0, DEPTH_FIT_MAX_RESID_M + 0.1)
+    assert (cell_heights(frame, xz) == HEIGHT_UNKNOWN).all()
+    frame.depth_fit = None
+    assert (cell_heights(frame, xz) == HEIGHT_UNKNOWN).all()
+    frame.depth = None
+    assert (cell_heights(frame, xz) == HEIGHT_UNKNOWN).all()
+
+
+def test_low_furniture_ahead_is_an_object_not_the_wall(tmp_path):
+    """A wall-sized sofa 0.6 m ahead: without heights it is "by the wall"; the depth shows it low -> in front of it."""
+    frame = _scene(tmp_path, [LONG_SOFA], rendered=[BACK_WALL])
+    st = stop_d3(frame, np.asarray(END, float))
+    assert (st["type"], st["relation"]) == ("object", "in front of")
+    assert st["anchor"]["blob"] == int(frame.lab[80, 50]) and st["anchor"]["kind"] == "object"
+
+
+def test_without_depth_the_wall_sized_sofa_stays_by_the_wall(tmp_path):
+    frame = _scene(tmp_path, [LONG_SOFA], rendered=[BACK_WALL])
+    frame.depth = None
+    st = stop_d3(frame, np.asarray(END, float))
+    assert (st["type"], st["place"]) == ("place", "wall")
+
+
+def test_a_tall_wall_ahead_stays_by_the_wall(tmp_path):
+    frame = _scene(tmp_path, [(1.5, 3.5, 3.6, 3.8, 2.5)], rendered=[BACK_WALL])
+    st = stop_d3(frame, np.asarray(END, float))
+    assert (st["type"], st["place"]) == ("place", "wall")
+
+
+def test_by_the_wall_stays_when_the_recheck_finds_no_stop(tmp_path):
+    """Low furniture diagonal from the end in unexplored space: once it is not a wall, no relation, place or wall ahead
+    fits -> the stop stays "by the wall" (the fix never drops a route)."""
+    base = np.full((100, 100), UNKNOWN, np.uint8)
+    base[:65, 40:60] = FREE                                                 # a strip along the route seen
+    frame = _scene(tmp_path, [(0.1, 1.6, 3.6, 4.5, 0.8)], rendered=[BACK_WALL], base=base)   # 1.1 m off, diagonal
+    st = stop_d3(frame, np.asarray(END, float))
+    assert (st["type"], st["place"]) == ("place", "wall")
+
+
+def test_a_hallway_between_a_wall_and_low_furniture_stays_a_hallway(tmp_path):
+    """Only "by the wall" is looked at again: the user's A/B kept corridors formed by furniture and a wall."""
+    from rover_vlm.route_events import low_furniture
+    frame = _scene(tmp_path, [(1.6, 1.75, 0.5, 4.5, 2.5), (3.25, 3.5, 1.5, 4.5, 0.8)], rendered=[BACK_WALL])
+    assert low_furniture(frame, np.array(END[-1])) == {int(frame.lab[60, 67])}       # the sofa side is low
+    st = stop_d3(frame, np.asarray(END, float))
+    assert (st["type"], st["place"]) == ("place", "hallway")

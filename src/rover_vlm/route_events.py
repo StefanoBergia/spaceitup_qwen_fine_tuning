@@ -17,6 +17,8 @@ d2 T2 (2026-10-14): a route whose end is out of sight is described up to where i
 
 d3 (2026-11-10, describe_xz(stops="d3")): an end in view no longer gets a distance amount; it stops "behind / in front of / next to" a non-wall object within CLOSE_M (object_relation), else at a place read from the occupancy grid (stop_places.place_at: doorway, corner, end of the hallway, in the hallway, by the wall, middle of the room), else (Addendum A1 backup) "in front of" a visible wall within CLOSE_M ahead (wall_ahead); no fit -> "no_stop_place". Spec: docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md.
 
+d3 Addendum A2 (2026-11-16): a wall-sized blob on the 2D map can be low furniture (a sofa set, a dining set); each map cell gets a height class from the depth image (cell_heights) and only a "by the wall" stop is looked at again with low furniture as furniture; when that finds no stop, "by the wall" stays.
+
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
@@ -624,9 +626,10 @@ def stop_phrase(frame, route_xz, events, cands=None):
 
 
 # --- d3 visible stops (docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md) ----------------------------
-def object_relation(frame, goal, head, right, blobs):
+def object_relation(frame, goal, head, right, blobs, low=frozenset()):
     """The d3 object stop: the nearest visible, non-wall blob within CLOSE_M of the goal and the first relation that
     fits, in the order behind -> in front of -> next to; a blob that fits none (diagonal to the goal) is skipped.
+    A wall-sized blob in `low` (low furniture, Addendum A2) is an object here, not a wall.
     behind = the blob's image outline spans the goal's image column and a visible cell is >= BEHIND_GAP_M nearer the
     camera than the goal along the camera->goal line (final review I1: a metric distance to that line also caught
     objects beside the route's last metre); in front of = ahead of the goal along the final heading (as _near_stop);
@@ -639,7 +642,7 @@ def object_relation(frame, goal, head, right, blobs):
     for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
         if d.min() > CLOSE_M:
             break
-        if _wall_like(xz):
+        if _wall_like(xz) and b not in low:
             continue
         x = _anchor(frame, b, goal, cells, xz, d)
         if x is None:
@@ -665,22 +668,24 @@ def object_relation(frame, goal, head, right, blobs):
     return None
 
 
-def _place_grid(frame):
-    """The frame's grid with every non-wall blob cleared to FREE: furniture is not the wall of a d3 place."""
+def _place_grid(frame, low=frozenset()):
+    """The frame's grid with every non-wall blob (and every blob in `low`, Addendum A2) cleared to FREE: furniture is
+    not the wall of a d3 place."""
     s = frame.grid.s.copy()
-    for cells, xz in _blob_cells(frame).values():
-        if not _wall_like(xz):
+    for b, (cells, xz) in _blob_cells(frame).items():
+        if not _wall_like(xz) or b in low:
             s[cells[:, 0], cells[:, 1]] = FREE
     return Grid(s, frame.grid.mpp, frame.grid.x0, frame.grid.z0)
 
 
-def wall_ahead(frame, goal, head, right, blobs):
+def wall_ahead(frame, goal, head, right, blobs, low=frozenset()):
     """The d3 backup (Addendum A1, option 2): the nearest visible wall-like blob within CLOSE_M ahead of the goal
-    (along > |lateral|, as _near_stop) -> {"type": "wall", "relation": "in front of", "anchor"}, else None."""
+    (along > |lateral|, as _near_stop) -> {"type": "wall", "relation": "in front of", "anchor"}, else None.
+    A blob in `low` (low furniture, Addendum A2) is not a wall."""
     for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
         if d.min() > CLOSE_M:
             break
-        if not _wall_like(xz):
+        if not _wall_like(xz) or b in low:
             continue
         x = _anchor(frame, b, goal, cells, xz, d)
         if x is None:
@@ -692,9 +697,26 @@ def wall_ahead(frame, goal, head, right, blobs):
     return None
 
 
+def _stop_d3_on(frame, route_xz, goal, head, right, blobs, low=frozenset(), clear_low_cells=False):
+    """stop_d3's order (object relation -> place -> wall ahead) with the blobs in `low` as furniture and, with
+    clear_low_cells, the cells classed low within LOW_CLEAR_M of the goal cleared from the place grid (Addendum A2)."""
+    rel = object_relation(frame, goal, head, right, blobs, low)
+    if rel is not None:
+        return rel
+    grid = _place_grid(frame, low)
+    if clear_low_cells:
+        grid = _clear_low_cells(frame, grid, goal)
+    p = place_at(grid, route_xz)
+    if p is None:
+        return wall_ahead(frame, goal, head, right, blobs, low)
+    return {"type": "place", "relation": None, "place": p["place"], "measures": p["measures"], "anchor": None}
+
+
 def stop_d3(frame, route_xz):
     """Where a visible route ends (d3): object_relation, else the place (stop_places.place_at on _place_grid), else a
-    wall ahead (wall_ahead, Addendum A1 backup), else None (the route is dropped as "no_stop_place")."""
+    wall ahead (wall_ahead, Addendum A1 backup), else None (the route is dropped as "no_stop_place").
+    Addendum A2: a "by the wall" stop is looked at again with low furniture as furniture (low_furniture, and the low
+    cells near the goal cleared); that stop replaces it, and when there is none "by the wall" stays."""
     rg = route_geometry(route_xz)
     goal = rg["pts"][-1]
     back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal, as stop_phrase
@@ -702,13 +724,94 @@ def stop_d3(frame, route_xz):
     head /= max(np.linalg.norm(head), 1e-9)
     right = np.array([-head[1], head[0]])
     blobs = _blobs_near(frame, goal, CLOSE_M)
-    rel = object_relation(frame, goal, head, right, blobs)
-    if rel is not None:
-        return rel
-    p = place_at(_place_grid(frame), route_xz)
-    if p is None:
-        return wall_ahead(frame, goal, head, right, blobs)
-    return {"type": "place", "relation": None, "place": p["place"], "measures": p["measures"], "anchor": None}
+    stop = _stop_d3_on(frame, route_xz, goal, head, right, blobs)
+    if stop is None or stop.get("place") != "wall":
+        return stop
+    again = _stop_d3_on(frame, route_xz, goal, head, right, blobs, low_furniture(frame, goal), clear_low_cells=True)
+    return again if again is not None else stop
+
+
+# --- d3 Addendum A2: furniture is not "the wall" (a height class per map cell from the depth image) ----------------
+HEIGHT_LOW_M = (0.1, 0.25, 0.4, 0.55, 0.7, 0.85)   # a cell's own depth is read at these heights above the floor
+HEIGHT_HIGH_M = (1.5, 1.7, 1.9)                    # ... and compared with what the image shows at these
+OWN_NEARER_M, OWN_FARTHER_M = 1.0, 0.5    # a low reading is the cell's own within [fwd - 1.0, fwd + 0.5] m
+SEEN_OVER_M = 0.5                         # a high reading this much farther than the cell's own depth: seen over it
+SAME_SURFACE_M = 0.3                      # a high reading this close to it: the same upright surface (a wall)
+HEIGHT_UNKNOWN, HEIGHT_LOW, HEIGHT_TALL = 0, 1, 2
+LOW_NEAR_M = 2.0          # a wall-sized blob's visible cells this close to the goal decide whether it is low furniture
+LOW_MIN_CELLS = 8         # ... at least this many of them with a height class
+LOW_SHARE = 0.6           # ... and at least this share of those low
+LOW_CLEAR_M = 3.5         # cells classed low this close to the goal are cleared from the place grid
+
+
+def _image_depth(frame, xz, height):
+    """(metres, fwd): planar metres the depth image shows at the pixel of each xz at `height` (inf where the image has
+    no surface; NaN outside the image or within NEAR_CAMERA_M) and each point's forward distance."""
+    uv, fwd = frame.cam.uv(xz, height)
+    ok = (fwd > NEAR_CAMERA_M) & (uv[:, 0] >= 0) & (uv[:, 0] < 1) & (uv[:, 1] >= 0) & (uv[:, 1] < 1)
+    uv = np.where(ok[:, None], uv, 0.0)
+    H, W = frame.depth.shape
+    px = frame.depth[np.clip((uv[:, 1] * H).astype(int), 0, H - 1), np.clip((uv[:, 0] * W).astype(int), 0, W - 1)]
+    metres = np.where(px > 0, frame.depth_fit[0] * px + frame.depth_fit[1], np.inf)
+    return np.where(ok, metres, np.nan), fwd
+
+
+def cell_heights(frame, xz):
+    """HEIGHT_LOW / HEIGHT_TALL / HEIGHT_UNKNOWN for each map cell (world xz), from the depth profile in the cell's own
+    image column (relative, so the depth fit's bias at range does not matter). The cell's own depth is the median of
+    the readings at HEIGHT_LOW_M that fall within [fwd - OWN_NEARER_M, fwd + OWN_FARTHER_M] (legs seen through and
+    nearer things are left out); at HEIGHT_HIGH_M a wall shows that depth again (within SAME_SURFACE_M) and low
+    furniture shows something farther (by more than SEEN_OVER_M). With >= 2 usable high readings: low or tall when
+    more than half say so, else unknown. All unknown without a depth image, a fit, or with a fit residual above
+    DEPTH_FIT_MAX_RESID_M."""
+    xz = np.asarray(xz, float).reshape(-1, 2)
+    out = np.full(len(xz), HEIGHT_UNKNOWN)
+    fit = frame.depth_fit
+    if frame.depth is None or fit is None or fit[2] > DEPTH_FIT_MAX_RESID_M or not len(xz):
+        return out
+    own = []
+    for h in HEIGHT_LOW_M:
+        d, fwd = _image_depth(frame, xz, h)
+        own.append(np.where((d >= fwd - OWN_NEARER_M) & (d <= fwd + OWN_FARTHER_M), d, np.nan))
+    own = np.array(own)
+    has = np.isfinite(own).any(0)
+    d_own = np.full(len(xz), np.nan)
+    d_own[has] = np.nanmedian(own[:, has], axis=0)
+    n, over, same = (np.zeros(len(xz), int) for _ in range(3))
+    for h in HEIGHT_HIGH_M:
+        d, _ = _image_depth(frame, xz, h)
+        k = has & ~np.isnan(d)
+        n += k
+        over += k & (d > d_own + SEEN_OVER_M)
+        same += k & (np.abs(d - d_own) <= SAME_SURFACE_M)
+    out[(n >= 2) & (over * 2 > n)] = HEIGHT_LOW
+    out[(n >= 2) & (same * 2 > n)] = HEIGHT_TALL
+    return out
+
+
+def low_furniture(frame, goal):
+    """The wall-sized blobs that are low furniture: >= LOW_MIN_CELLS of their visible cells within LOW_NEAR_M of the
+    goal have a height class (cell_heights) and >= LOW_SHARE of those are low."""
+    out = set()
+    for b, cells, xz, d in _blobs_near(frame, goal, LOW_NEAR_M):
+        if not _wall_like(xz):
+            continue
+        c = cell_heights(frame, visible_cells(frame, cells[d <= LOW_NEAR_M], b))
+        known = int((c != HEIGHT_UNKNOWN).sum())
+        if known >= LOW_MIN_CELLS and (c == HEIGHT_LOW).sum() >= LOW_SHARE * known:
+            out.add(b)
+    return frozenset(out)
+
+
+def _clear_low_cells(frame, grid, goal):
+    """`grid` with its occupied cells within LOW_CLEAR_M of the goal that are classed low set to FREE."""
+    rc = np.argwhere(grid.s == OCC)
+    xz = frame.grid.xz(rc)
+    rc = rc[np.linalg.norm(xz - goal, axis=1) <= LOW_CLEAR_M]
+    low = rc[cell_heights(frame, frame.grid.xz(rc)) == HEIGHT_LOW]
+    s = grid.s.copy()
+    s[low[:, 0], low[:, 1]] = FREE
+    return Grid(s, grid.mpp, grid.x0, grid.z0)
 
 
 def stop_kind(stop):
