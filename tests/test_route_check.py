@@ -20,8 +20,23 @@ def test_prompt_states_legend_and_never_sides():
 
 def test_parse_plain_json():
     r = parse_check_reply(json.dumps(GOOD))
-    assert r == {"names": [{"name": "grey sofa", "fits": "yes", "is_object": "yes"}], "missing_obstacle": False,
-                 "stop_ok": True, "better_stop": "", "overall_true": True, "confidence": 80}
+    assert r == {"names": [{"number": None, "name": "grey sofa", "fits": "yes", "is_object": "yes"}],
+                 "missing_obstacle": False, "stop_ok": True, "better_stop": "", "overall_true": True, "confidence": 80}
+
+
+def test_prompt_asks_only_about_outlined_objects():
+    """Review fix: places (walls, corners, doorways, hallways, rooms) must not be listed as named things, or
+    object_no fires for every place stop and the score turns into a stop-kind proxy."""
+    p = check_prompt("Turn right, then stop by the wall.")
+    assert "outlined" in p and '"number"' in p
+    assert "do not list" in p and all(w in p for w in ("wall", "floor", "doorway", "corner", "hallway", "room"))
+    assert "calls it an object or furniture" in p
+
+
+def test_parse_keeps_object_number():
+    r = parse_check_reply(json.dumps({**GOOD, "names": [{"number": 2, "name": "lamp", "fits": "no",
+                                                         "is_object": "yes"}]}))
+    assert r["names"] == [{"number": 2, "name": "lamp", "fits": "no", "is_object": "yes"}]
 
 
 def test_parse_after_think_and_code_fence():
@@ -202,3 +217,87 @@ from rover_vlm.route_check import drop_records
 def test_drop_records_train_only():
     kept, matched = drop_records([{"id": "a"}, {"id": "b"}, {"id": "c"}], {"b", "zz"})
     assert [r["id"] for r in kept] == ["a", "c"] and matched == 1
+
+
+def test_removal_curve_matches_apply_with_tied_scores():
+    """Review fix: each curve row must describe exactly what `score >= threshold` (what --apply does) removes."""
+    scores = np.array([0.9, 0.5, 0.5, 0.5, 0.5, 0.1, 0.1, 0.1, 0.1, 0.1])
+    wrong = np.array([True, True, False, False, True, False, False, False, True, False])
+    for c in removal_curve(scores, wrong, shares=(0.1, 0.2, 0.3)):
+        gone = scores >= c["threshold"]
+        assert c["removed"] == int(gone.sum())
+        assert c["share_actual"] == round(gone.mean(), 4)
+        assert c["kept_accuracy"] == round(float(1 - wrong[~gone].mean()), 4)
+        assert c["wrong_caught"] == round(float(wrong[gone].sum() / wrong.sum()), 4)
+    c20 = removal_curve(scores, wrong, shares=(0.2,))[0]
+    assert c20["threshold"] == 0.5 and c20["removed"] == 5
+
+
+from rover_vlm.route_check import kind_matches_text
+
+
+def test_kind_matches_the_judged_text():
+    """Review fix: d3_g3 was judged before Addendum A2; a row whose current stop kind is not what its judged text
+    says must not be binned under that kind."""
+    assert kind_matches_text("object:next to", "Go left of the sofa, then stop by the wall.") is False
+    assert kind_matches_text("object:next to", "Go between the chair and the table, then stop next to the lamp.")
+    assert kind_matches_text("place:wall", "Turn right, then stop by the wall.")
+    assert kind_matches_text("object:behind", "Turn left behind the sofa, then stop in the corner.") is False
+    assert kind_matches_text("place:corner", "Turn left behind the sofa, then stop in the corner.")
+    assert kind_matches_text("place:room_middle", "Keep the sofa on your left and stop in the middle of the room.")
+    assert kind_matches_text("wall:in front of", "Go ahead and stop in front of the white wall.")
+    assert kind_matches_text("place:hallway_end", "Go ahead, then stop at the end of the hallway.")
+    assert kind_matches_text("place:doorway", "Go to the doorway.")
+
+
+# --- review fix: the calibration report's breakdowns -------------------------------------------------------------
+import importlib.util
+from argparse import Namespace
+from pathlib import Path
+
+_RSPEC = importlib.util.spec_from_file_location(
+    "route_check_report", Path(__file__).resolve().parent.parent / "scripts" / "route_check_report.py")
+report = importlib.util.module_from_spec(_RSPEC)
+_RSPEC.loader.exec_module(report)
+
+
+def test_calibrate_report_breakdowns(tmp_path, capsys):
+    """Spec Validation: each answer against its own mark type, the p_false baseline next to every breakdown, the
+    top / bottom lists, and d3 rows binned under a stop kind only when the judged text says it."""
+    rng = np.random.default_rng(0)
+    man, chk, ev = [], [], []
+    for i in range(60):
+        page = "d3_g3" if i % 2 else "d2_g3"
+        rid = f"{800 + i % 30:05d}-AAAAAAAAAAA_c{i:03d}_L"
+        verdict = "ok" if i % 3 else ("name" if i % 2 else "stop")
+        wrong = verdict != "ok"
+        text = "Go left of the sofa, then stop by the wall." if i % 5 == 0 else "Go left, then stop next to the lamp."
+        man.append({"id": f"{page}/{rid}", "route_id": rid, "page": page, "image": "/x.jpg", "text": text,
+                    "wrong": wrong, "verdict": verdict, "note": ""})
+        chk.append({"id": f"{page}/{rid}", "passed": True, "rejects": [],
+                    "names": [{"number": 1, "name": "lamp", "fits": "no" if verdict == "name" else "yes",
+                               "is_object": "yes"}],
+                    "missing_obstacle": bool(rng.random() < 0.1), "stop_ok": verdict != "stop", "better_stop": "",
+                    "overall_true": not wrong, "confidence": int(rng.integers(50, 95))})
+        ev.append({"id": rid, "reason": None, "stop": {"type": "object", "relation": "next to", "object": "f:b1",
+                                                      "place": None, "amount": None, "distance_m": None}})
+    for name, rows in (("manifest.jsonl", man), ("check.jsonl", chk)):
+        (tmp_path / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    evd = tmp_path / "v5"
+    evd.mkdir()
+    (evd / "events_train.jsonl").write_text("")
+    (evd / "events_eval.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ev))
+    report.calibrate(Namespace(manifest=tmp_path / "manifest.jsonl", check=tmp_path / "check.jsonl", events_dir=evd,
+                               out=tmp_path / "out"))
+    rep = json.loads((tmp_path / "out" / "report.json").read_text())
+    assert rep["feature_by_verdict"]["name"]["name_no"] == 1.0
+    assert rep["feature_by_verdict"]["stop"]["stop_no"] == 1.0
+    assert all("auc_baseline" in v for v in rep["per_page"].values())
+    assert all("auc_baseline" in v for v in rep["per_verdict"].values())
+    assert all("auc_baseline" in v for v in rep["per_stop_kind_d3"].values())
+    d3_by_wall = sum(1 for r in man if r["page"] == "d3_g3" and "by the wall" in r["text"])
+    assert rep["kinds_excluded_text_mismatch"] == d3_by_wall > 0
+    assert rep["per_stop_kind_d3"]["object:next to"]["n"] == 30 - d3_by_wall
+    assert all("share_actual" in c for c in rep["curve"])
+    out = capsys.readouterr().out
+    assert "highest-scored" in out and "lowest-scored wrong" in out

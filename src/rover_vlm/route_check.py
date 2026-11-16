@@ -32,8 +32,12 @@ The instruction:
 
 Which side the rover passes things on (left or right) is already correct, taken from the map: do not judge left or \
 right. Judge only these:
-1. For every thing the instruction names: does the name fit what is in the picture ("fits"), and is it a real \
-separate thing rather than part of a wall, floor or ceiling ("is_object")?
+1. For every OUTLINED object (it has a number in the picture) that the instruction names: give its "number", the \
+"name" the instruction uses for it, whether that name fits what is outlined ("fits"), and "is_object": answer "no" \
+only when the instruction calls it an object or furniture but the outline is really part of a wall, floor or \
+ceiling. Places are not objects: do not list walls, floors, doorways, corners, hallways or rooms that have no \
+outline (e.g. "by the wall", "in the corner", "in the middle of the room"); a text that names no outlined object \
+has an empty list.
 2. Does the route pass close to a big obstacle (a pillar, a column, a large piece of furniture) that the instruction \
 does not mention ("missing_obstacle")?
 3. Is the way the instruction says where the rover stops a natural way to describe where the route ends \
@@ -43,7 +47,8 @@ that in "better_stop".
 you, 0 to 100 ("confidence")?
 
 Reply with only this JSON:
-{{"names": [{{"name": "<as written in the instruction>", "fits": "yes|no|unsure", "is_object": "yes|no|unsure"}}], \
+{{"names": [{{"number": <n>, "name": "<as written in the instruction>", "fits": "yes|no|unsure", \
+"is_object": "yes|no|unsure"}}], \
 "missing_obstacle": "yes|no", "stop_ok": "yes|no", "better_stop": "<short phrase or empty>", \
 "overall_true": "yes|no", "confidence": <0-100>}}"""
 
@@ -90,7 +95,9 @@ def parse_check_reply(raw: str) -> dict | None:
         if not isinstance(n, dict):
             continue
         fits, obj = (str(n.get(k, "unsure")).strip().lower() for k in ("fits", "is_object"))
-        names.append({"name": str(n.get("name", "")), "fits": fits if fits in _FIT else "unsure",
+        num = n.get("number")
+        names.append({"number": int(num) if isinstance(num, (int, float)) or (isinstance(num, str) and num.isdigit())
+                      else None, "name": str(n.get("name", "")), "fits": fits if fits in _FIT else "unsure",
                       "is_object": obj if obj in _FIT else "unsure"})
     better = payload.get("better_stop")
     return {"names": names, "missing_obstacle": out["missing_obstacle"], "stop_ok": out["stop_ok"],
@@ -229,16 +236,19 @@ def auc(scores, wrong) -> float:
 
 
 def removal_curve(scores, wrong, shares=(0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40)) -> list[dict]:
-    """For each share: remove the ceil(share * n) highest-scored rows; accuracy of what is kept, share of the wrong
-    rows caught, and the score threshold (the lowest removed score)."""
+    """For each target share: the threshold = the score of the ceil(share * n)-th highest row, and what
+    `score >= threshold` (exactly what --apply does) removes: the count and actual share (ties can push it past the
+    target), the accuracy of what is kept, and the share of the wrong rows caught."""
     s, y = np.asarray(scores, float), np.asarray(wrong, bool)
-    order = np.argsort(-s, kind="stable")
+    desc = np.sort(s)[::-1]
     out = []
     for share in shares:
         k = math.ceil(share * len(s))
-        gone, kept = order[:k], order[k:]
-        out.append({"share": share, "removed": k, "threshold": float(s[order[k - 1]]) if k else float("inf"),
-                    "kept_accuracy": round(float(1 - y[kept].mean()) if len(kept) else 1.0, 4),
+        thr = float(desc[k - 1]) if k else float("inf")
+        gone = s >= thr
+        out.append({"share": share, "threshold": thr, "removed": int(gone.sum()),
+                    "share_actual": round(float(gone.mean()), 4),
+                    "kept_accuracy": round(float(1 - y[~gone].mean()) if (~gone).any() else 1.0, 4),
                     "wrong_caught": round(float(y[gone].sum() / y.sum()) if y.any() else 0.0, 4)})
     return out
 
@@ -247,3 +257,20 @@ def drop_records(recs: list[dict], ids: set) -> tuple[list[dict], int]:
     """(records whose id is not in `ids`, how many were dropped). finalize-descriptions applies it to TRAIN only."""
     kept = [r for r in recs if r["id"] not in ids]
     return kept, len(recs) - len(kept)
+
+
+# the words a text uses for each d3 stop kind (route_events.stop_kind names), checked after its last "stop"
+_KIND_WORDS = {"object:next to": ("next to", "beside"), "object:in front of": ("in front of",),
+               "wall:in front of": ("in front of",), "object:behind": ("behind",), "place:wall": ("wall",),
+               "place:corner": ("corner",), "place:doorway": ("doorway", "door"), "place:hallway_end": ("end of",),
+               "place:hallway": ("hallway", "corridor"), "place:room_middle": ("middle",)}
+
+
+def kind_matches_text(kind: str, text: str) -> bool:
+    """Whether `text`'s stop clause (after its last "stop", else the whole text) uses the words of `kind`. The
+    calibration report bins a d3 row under its current stop kind only when it does: pages judged before an events
+    rebuild (d3_g3, before Addendum A2) can hold texts for a stop the rebuild changed."""
+    t = text.lower()
+    i = t.rfind("stop")
+    clause = t[i:] if i >= 0 else t
+    return any(w in clause for w in _KIND_WORDS.get(kind, ()))

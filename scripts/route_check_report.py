@@ -25,7 +25,8 @@ from pathlib import Path
 
 import numpy as np
 
-from rover_vlm.route_check import FEATURES, auc, features, fit_logistic, oof_scores, predict, removal_curve
+from rover_vlm.route_check import (FEATURES, auc, features, fit_logistic, kind_matches_text, oof_scores, predict,
+                                   removal_curve)
 from rover_vlm.route_events import stop_kind
 
 V5 = Path("data/prepared_habitat_instr_v5")
@@ -77,20 +78,30 @@ def calibrate(args):
     rep = {"n_primary": len(prim), "wrong_primary": int(y.sum()), "unreadable": len(unread), "missing": len(missing),
            "auc": {"fitted_oof": auc(fitted, y), "baseline_p_false": auc(base, y)},
            "per_feature_auc": {f: auc(X[:, j], y) for j, f in enumerate(FEATURES)}}
-    rep["per_page"] = {p: {"n": int(sum(m["page"] == p for m, _ in prim)),
-                           "auc": auc(fitted[[m["page"] == p for m, _ in prim]], y[[m["page"] == p for m, _ in prim]])}
-                       for p in TEXT_PAGES}
+    def both(sel):
+        return {"auc": auc(fitted[sel], y[sel]), "auc_baseline": auc(base[sel], y[sel])}
+    rep["per_page"] = {}
+    for p in TEXT_PAGES:
+        sel = np.array([m["page"] == p for m, _ in prim])
+        rep["per_page"][p] = {"n": int(sel.sum()), **both(sel)}
+    # a d3 row counts under its current stop kind only when its judged text says that kind (d3_g3 predates A2)
     kinds = stop_kinds(args.events_dir)
-    kind_of = [kinds.get(m["route_id"]) if m["page"].startswith("d3") else None for m, _ in prim]
+    kind_of = []
+    for m, _ in prim:
+        k = kinds.get(m["route_id"]) if m["page"].startswith("d3") else None
+        kind_of.append(k if k and kind_matches_text(k, m["text"]) else None)
+    rep["kinds_excluded_text_mismatch"] = sum(1 for (m, _), k in zip(prim, kind_of)
+                                              if m["page"].startswith("d3") and kinds.get(m["route_id"]) and k is None)
     rep["per_stop_kind_d3"] = {}
     for k, n in Counter(k for k in kind_of if k).most_common():
         sel = np.array([kk == k for kk in kind_of])
-        rep["per_stop_kind_d3"][k] = {"n": n, "wrong": int(y[sel].sum()), "auc": auc(fitted[sel], y[sel])}
+        rep["per_stop_kind_d3"][k] = {"n": n, "wrong": int(y[sel].sum()), **both(sel)}
     ok = y == 0
-    rep["per_verdict"] = {}
+    rep["per_verdict"], rep["feature_by_verdict"] = {}, {}
     for v, n in Counter(m["verdict"] for m, _ in prim if m["wrong"]).most_common():
         sel = np.array([m["verdict"] == v for m, _ in prim]) | ok
-        rep["per_verdict"][v] = {"n": n, "auc": auc(fitted[sel], y[sel])}
+        rep["per_verdict"][v] = {"n": n, **both(sel)}
+        rep["feature_by_verdict"][v] = {f: auc(X[sel, j], y[sel]) for j, f in enumerate(FEATURES)}
     rep["curve"] = removal_curve(fitted, y)
     big = {k: v for k, v in rep["per_stop_kind_d3"].items() if v["n"] >= BAR_KIND_MIN and 0 < v["wrong"] < v["n"]}
     rep["bar"] = {"auc": BAR_AUC, "kind_auc": BAR_KIND_AUC, "kinds_checked": sorted(big),
@@ -116,17 +127,28 @@ def calibrate(args):
     print(f"\nprimary (text pages): n={rep['n_primary']} wrong={rep['wrong_primary']}")
     print(f"AUC fitted (out-of-fold) {rep['auc']['fitted_oof']:.3f}   baseline p_false {rep['auc']['baseline_p_false']:.3f}")
     print("per feature: " + "  ".join(f"{k} {v:.3f}" for k, v in rep["per_feature_auc"].items()))
-    print("per page:    " + "  ".join(f"{k} {v['auc']:.3f} (n={v['n']})" for k, v in rep["per_page"].items()))
-    print("per d3 stop kind: " + "  ".join(f"{k} {v['auc']:.3f} ({v['wrong']}/{v['n']})"
-                                          for k, v in rep["per_stop_kind_d3"].items()))
-    print("per verdict: " + "  ".join(f"{k} {v['auc']:.3f} (n={v['n']})" for k, v in rep["per_verdict"].items()))
+    print("per page (fitted / baseline):    " + "  ".join(f"{k} {v['auc']:.3f}/{v['auc_baseline']:.3f} (n={v['n']})"
+                                                             for k, v in rep["per_page"].items()))
+    print("per d3 stop kind (fitted / baseline): " + "  ".join(
+        f"{k} {v['auc']:.3f}/{v['auc_baseline']:.3f} ({v['wrong']}/{v['n']})" for k, v in rep["per_stop_kind_d3"].items())
+          + f"   [{rep['kinds_excluded_text_mismatch']} d3 rows left out: judged text names another stop kind]")
+    print("per verdict (fitted / baseline): " + "  ".join(f"{k} {v['auc']:.3f}/{v['auc_baseline']:.3f} (n={v['n']})"
+                                                         for k, v in rep["per_verdict"].items()))
+    for v, fa in rep["feature_by_verdict"].items():
+        print(f"  answers vs '{v}' marks: " + "  ".join(f"{f} {a:.3f}" for f, a in fa.items()))
     if sec:
         g = rep["g1_secondary"]
         print(f"G1 (secondary): n={g['n']} wrong={g['wrong']} AUC stop_no {g['auc_stop_no']:.3f} p_false {g['auc_p_false']:.3f}")
     print("\nremove share -> kept accuracy, wrong caught:")
     for c in rep["curve"]:
-        print(f"  {c['share']:.0%} ({c['removed']}) -> {c['kept_accuracy']:.1%} kept right, {c['wrong_caught']:.0%} of wrong caught"
-              f"  (threshold {c['threshold']:.3f})")
+        print(f"  target {c['share']:.0%}: removes {c['removed']} ({c['share_actual']:.0%}) -> {c['kept_accuracy']:.1%} kept "
+              f"right, {c['wrong_caught']:.0%} of wrong caught  (threshold {c['threshold']:.3f})")
+    print("\n20 highest-scored (score, wrong?, verdict, text | note):")
+    for s_, (m, _) in scored[:20]:
+        print(f"  {s_:.3f} {'W' if m['wrong'] else '.'} {m['verdict']:9s} {m['text'][:90]} | {m.get('note', '')[:50]}")
+    print("\n20 lowest-scored wrong (the checker's misses):")
+    for s_, (m, _) in [t for t in scored if t[1][0]["wrong"]][-20:]:
+        print(f"  {s_:.3f} {m['verdict']:9s} {m['text'][:90]} | {m.get('note', '')[:50]}")
     print(f"\nBAR (AUC >= {BAR_AUC} and > {BAR_KIND_AUC} within {rep['bar']['kinds_checked']}): "
           f"{'PASS' if rep['bar']['pass'] else 'FAIL'}")
     print(f"-> {args.out / 'report.json'}, {args.out / 'scored.jsonl'}")
