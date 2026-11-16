@@ -193,3 +193,12 @@ def test_features_none_on_parse_reject():
     f = features(row)
     assert list(FEATURES) == ["name_no", "object_no", "missing_obstacle", "stop_no", "overall_no", "p_false"]
     assert f.tolist() == [1.0, 0.0, 1.0, 1.0, 0.0, 0.3]
+
+
+# --- Task 5: train drop list ------------------------------------------------------------------------------------
+from rover_vlm.route_check import drop_records
+
+
+def test_drop_records_train_only():
+    kept, matched = drop_records([{"id": "a"}, {"id": "b"}, {"id": "c"}], {"b", "zz"})
+    assert [r["id"] for r in kept] == ["a", "c"] and matched == 1

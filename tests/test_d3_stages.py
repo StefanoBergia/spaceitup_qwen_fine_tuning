@@ -158,6 +158,30 @@ def test_finalize_round_d3_rechecks_with_d3_rejects(tmp_path):
     assert meta["train"]["recheck_failed"] == 1 and meta["train"]["kept"] == 1 and meta["eval"]["kept"] == 2
 
 
+def test_finalize_drop_train_ids_touches_train_only(tmp_path, capsys):
+    """Route checker (spec 2026-11-16): --drop-train-ids leaves listed TRAIN routes out; eval ids in the list and
+    unknown ids are ignored and counted."""
+    lab, v5, labels = tmp_path / "v2", tmp_path / "v5", tmp_path / "labels"
+    lab.mkdir()
+    good = "Go left of the sofa, then stop in the corner."
+    splits = {"train": [("t1", "00001-a_c000", "00001-a"), ("t3", "00003-b_c000", "00003-b")],
+              "eval": [("e1", "00800-c_c000", "00800-c"), ("e2", "00801-d_c000", "00801-d")]}
+    for s, rows in splits.items():
+        (lab / f"labelset_{s}.json").write_text(json.dumps([_rec(i, sid, sc) for i, sid, sc in rows]))
+        _write(v5 / f"events_{s}.jsonl", [_row(i, [PASS], CORNER) for i, *_ in rows])
+        _write(v5 / f"objects_{s}.jsonl", [{"object_id": "f:b1", "cells_xz": [[2.0, 1.0]]}])
+        _write(labels / f"desc_{s}_mix_d3.jsonl", [{"id": i, "description": good, "passed": True,
+                                                    "instruction_source": "cosmos"} for i, *_ in rows])
+    drop = tmp_path / "drop_ids.txt"
+    drop.write_text("t1\ne1\nzz\n")
+    prep.stage_finalize_descriptions(Namespace(round="d3", events_dir=v5, labelset_dir=lab, out_dir=v5, labels=labels,
+                                               desc_suffix="_mix", allow_missing=False, drop_train_ids=drop))
+    meta = json.loads((v5 / "meta_d3.json").read_text())
+    assert meta["train"]["kept"] == 1 and meta["train"]["dropped_checker"] == 1 and meta["eval"]["kept"] == 2
+    assert [r["id"] for r in json.loads((v5 / "train_desc.json").read_text())] == ["t3"]
+    assert "drop list: 1 of 3 ids matched train; 2 ids are eval/unknown and were ignored" in capsys.readouterr().out
+
+
 # --- Task 7: stop audit page (G1) and the d3 label-audit picker (G3) -------------------------------------------------
 from test_d2_stages import audit   # noqa: E402
 

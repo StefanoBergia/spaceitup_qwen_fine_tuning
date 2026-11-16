@@ -103,6 +103,7 @@ CPU), label (GPU), finalize; steering with --stops d3. Full run book: README "St
     uv run scripts/prepare_habitat_instr.py d3-seed
     ROUND=d3 DATA=data/prepared_habitat_instr_v5 NAMER=mix sbatch slurm/label_descriptions.sbatch   # gate
     uv run scripts/prepare_habitat_instr.py finalize-descriptions --round d3 --desc-suffix _mix
+    #   --drop-train-ids outputs/route_check/train/drop_ids.txt: leave the route checker's flagged TRAIN routes out
 """
 
 import argparse
@@ -912,6 +913,15 @@ def stage_finalize_descriptions(args):
         splits[name] = out
         meta[name] = out["stats"]
         print(f"{name}: {json.dumps(out['stats'])}", flush=True)
+    drop_file = getattr(args, "drop_train_ids", None)
+    if drop_file:     # route checker (spec 2026-11-16): leave the flagged TRAIN routes out; eval is never touched
+        from rover_vlm.route_check import drop_records
+        ids = {ln.strip() for ln in Path(drop_file).read_text().splitlines() if ln.strip()}
+        splits["train"]["kept"], n = drop_records(splits["train"]["kept"], ids)
+        meta["train"]["dropped_checker"] = n
+        meta["train"]["kept"] = len(splits["train"]["kept"])
+        print(f"drop list: {n} of {len(ids)} ids matched train; {len(ids) - n} ids are eval/unknown and were ignored",
+              flush=True)
     assert_scene_disjoint(splits["train"]["kept"], splits["eval"]["kept"])
     d = out_dir
     train = splits["train"]["kept"]
@@ -1040,6 +1050,8 @@ def main() -> None:
     k.add_argument("--desc-suffix", default="",
                    help="desc file tag: \"_mix\" reads desc_<split>_mix_d1.jsonl (NAMER=mix); default desc_<split>_d1.jsonl")
     k.add_argument("--allow-missing", action="store_true")
+    k.add_argument("--drop-train-ids", type=Path, default=None,
+                   help="route checker (spec 2026-11-16): train route ids to leave out, one per line; eval untouched")
     sd3 = sub.add_parser("d3-seed", help="d3: seed the d3 label files from d2 + the changed eval routes (CPU)")
     sd3.add_argument("--d2-events-dir", type=Path, default=V4_OUT)
     sd3.add_argument("--events-dir", type=Path, default=V5_OUT)

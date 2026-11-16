@@ -241,3 +241,9 @@ def removal_curve(scores, wrong, shares=(0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.4
                     "kept_accuracy": round(float(1 - y[kept].mean()) if len(kept) else 1.0, 4),
                     "wrong_caught": round(float(y[gone].sum() / y.sum()) if y.any() else 0.0, 4)})
     return out
+
+
+def drop_records(recs: list[dict], ids: set) -> tuple[list[dict], int]:
+    """(records whose id is not in `ids`, how many were dropped). finalize-descriptions applies it to TRAIN only."""
+    kept = [r for r in recs if r["id"] not in ids]
+    return kept, len(recs) - len(kept)
