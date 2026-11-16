@@ -808,6 +808,11 @@ def summarize_d1(rows, stage):
                           "single": sum(bool(r.get("single")) for r in ok),
                           "no_candidates": sum(not r.get("candidates") for r in ok)}
         out["from"] = dict(Counter(v for r in ok for v in r.get("name_source") or []))
+    if stage == "check":      # route checker (spec 2026-11-16): unreadable replies and the plain yes share
+        parsed = [r for r in ok if r.get("passed")]
+        out["parse_failed"] = sum("parse" in r.get("rejects", []) for r in ok)
+        out["overall_true_share"] = round(sum(bool(r.get("overall_true")) for r in parsed) / len(parsed), 4) \
+            if parsed else 0.0
     return out
 
 

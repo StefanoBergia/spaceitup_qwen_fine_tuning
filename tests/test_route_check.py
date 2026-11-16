@@ -127,3 +127,15 @@ def test_same_route_two_pages_two_rows(tmp_path):
     marks = {"00800-X_c000_L": {"verdict": "ok"}}
     ids = [r["id"] for s in ("a", "b") for r in calibration_rows(s, [item], marks, tmp_path)]
     assert ids == ["a/00800-X_c000_L", "b/00800-X_c000_L"]
+
+
+# --- Task 3: --stage check summary ------------------------------------------------------------------------------
+from rover_vlm.descriptions import summarize_d1
+
+
+def test_summarize_check():
+    rows = [{"id": "a", "passed": True, "overall_true": True, "rejects": []},
+            {"id": "b", "passed": False, "rejects": ["parse"]},
+            {"id": "c", "error": "APIConnectionError: x"}]
+    s = summarize_d1(rows, "check")
+    assert s["errors"] == 1 and s["parse_failed"] == 1 and s["overall_true_share"] == 1.0
