@@ -112,3 +112,43 @@ def check_route(ask, item: dict, seed: int) -> dict:
         if parsed is not None:
             return {**row, "attempts": attempt, "finish": fin, "passed": True, **parsed}
     return {**row, "attempts": 2, "finish": fin, "passed": False, "rejects": ["parse"], "raw": raws}
+
+
+# --- calibration items from the saved audit pages ---------------------------------------------------------------
+_PAGE_DATA = re.compile(r"const DATA = (\{.*?\});\n", re.S)
+
+
+def audit_page_items(html: str) -> list[dict]:
+    """The items of a saved audit page (the payload scripts/audit_instruction_labels.py writes as `const DATA = {...};`)."""
+    m = _PAGE_DATA.search(html)
+    if not m:
+        raise ValueError("no `const DATA = {...};` payload in this page")
+    return json.loads(m.group(1))["items"]
+
+
+def mark_wrong(verdict) -> bool | None:
+    """A user mark as wrong (True) / right (False) / not counted (None: unsure or missing)."""
+    if verdict in (None, "unsure", "?"):
+        return None
+    return verdict != "ok"
+
+
+def calibration_rows(slug: str, items: list[dict], marks: dict, image_dir) -> list[dict]:
+    """Manifest rows for one audit page: every item with a counted mark, except drop items ("DROPPED ..." texts have
+    no route text to check). The page's own JPEG (exactly what the user judged) goes to image_dir/<slug>/<id>.jpg.
+    Ids are "<slug>/<route_id>", so a route judged on two pages is two rows."""
+    from base64 import b64decode
+    from pathlib import Path
+    out_dir = Path(image_dir) / slug
+    rows = []
+    for it in items:
+        m = marks.get(it["id"])
+        wrong = mark_wrong(m.get("verdict")) if m else None
+        if wrong is None or it["instruction"].startswith("DROPPED"):
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{it['id']}.jpg"
+        path.write_bytes(b64decode(it["img"].split(",", 1)[1]))
+        rows.append({"id": f"{slug}/{it['id']}", "route_id": it["id"], "page": slug, "image": str(path.resolve()),
+                     "text": it["instruction"], "wrong": wrong, "verdict": m["verdict"], "note": m.get("note", "")})
+    return rows

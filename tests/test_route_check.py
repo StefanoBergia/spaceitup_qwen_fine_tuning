@@ -76,3 +76,54 @@ def test_check_route_retries_then_parse_reject():
     row = check_route(second, item, 7)
     assert row["passed"] is True and row["attempts"] == 2 and seeds == [7, 8]
     assert row["overall_true"] is True and row["prompt_version"] == "k1" and row["rejects"] == []
+
+
+# --- Task 2: manifests -------------------------------------------------------------------------------------------
+import base64
+import io
+
+from PIL import Image
+
+from rover_vlm.route_check import audit_page_items, calibration_rows, mark_wrong
+
+
+def _jpeg_uri(colour=(200, 10, 10)):
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), colour).save(buf, "JPEG")
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_audit_page_items_reads_payload():
+    items = [{"id": "00800-TEEsavR23oF_c000_L", "instruction": "Stop by the wall.", "img": "data:x"}]
+    html = "<html><script>\nconst DATA = " + json.dumps({"items": items, "mode": "d1"}) + ";\nrender();\n</script>"
+    assert audit_page_items(html) == items
+
+
+def test_mark_wrong_mapping():
+    assert mark_wrong("ok") is False
+    assert mark_wrong("unsure") is None and mark_wrong("?") is None and mark_wrong(None) is None
+    for v in ("stop", "name", "keep", "neither", "unnatural", "object", "place"):
+        assert mark_wrong(v) is True
+
+
+def test_calibration_rows_skip_and_ids(tmp_path):
+    items = [{"id": "00800-X_c000_L", "instruction": "Go left of the sofa, then stop by the wall.", "img": _jpeg_uri()},
+             {"id": "00800-X_c001_R", "instruction": "Stop in the corner.", "img": _jpeg_uri()},
+             {"id": "00800-X_c002_R", "instruction": "DROPPED: no place fits the end of this route. Is dropping it right?",
+              "img": _jpeg_uri()},
+             {"id": "00800-X_c003_R", "instruction": "Stop in the doorway.", "img": _jpeg_uri()}]
+    marks = {"00800-X_c000_L": {"verdict": "stop", "note": "middle of the room"},
+             "00800-X_c001_R": {"verdict": "unsure"}, "00800-X_c002_R": {"verdict": "keep"}}
+    rows = calibration_rows("g3", items, marks, tmp_path)
+    assert [r["id"] for r in rows] == ["g3/00800-X_c000_L"]
+    r = rows[0]
+    assert r["route_id"] == "00800-X_c000_L" and r["page"] == "g3" and r["wrong"] is True
+    assert r["verdict"] == "stop" and r["note"] == "middle of the room" and r["text"].startswith("Go left")
+    assert Image.open(r["image"]).size == (8, 8)
+
+
+def test_same_route_two_pages_two_rows(tmp_path):
+    item = {"id": "00800-X_c000_L", "instruction": "Stop by the wall.", "img": _jpeg_uri()}
+    marks = {"00800-X_c000_L": {"verdict": "ok"}}
+    ids = [r["id"] for s in ("a", "b") for r in calibration_rows(s, [item], marks, tmp_path)]
+    assert ids == ["a/00800-X_c000_L", "b/00800-X_c000_L"]

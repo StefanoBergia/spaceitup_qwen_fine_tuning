@@ -51,6 +51,15 @@ texts. Is each text true of its own route (steps and stop), and are the two stop
 Gate >= 90% of pairs true.
     uv run scripts/audit_instruction_labels.py --mode steer --n 50     # -> outputs/steer_audit.html
 
+Route checker manifests (spec docs/superpowers/specs/2026-11-16-route-checker-design.md), no page:
+--mode check-calibration: the saved audit pages + the user's marks -> manifest.jsonl + the pages' own JPEGs (what the
+user judged); --mode check-manifest: every passed d3 text of a split, its image drawn like the d3 label audit.
+    uv run scripts/audit_instruction_labels.py --mode check-calibration --out outputs/route_check/calibration \
+        --pages d3_g3=outputs/instr_d3_audit.html=outputs/audit_marks/d3_g3 ...
+    uv run scripts/audit_instruction_labels.py --mode check-manifest --out outputs/route_check/train \
+        --events data/prepared_habitat_instr_v5/events_train.jsonl \
+        --objects data/prepared_habitat_instr_v5/objects_train.jsonl --desc outputs/instr_labels_v3/desc_train_mix_d3.jsonl
+
 Run (CPU, login node is fine):
     uv run scripts/audit_instruction_labels.py            # -> outputs/instr_label_audit.html
     uv run scripts/audit_instruction_labels.py --n 150 --seed 1
@@ -762,6 +771,45 @@ def _read_marks(marks_dir):
     return out
 
 
+def check_manifest_main(args):
+    """Route checker manifests (spec 2026-11-16): calibration rows from saved pages + marks, or one row per passed d3
+    text with its d3-label-audit image. Images already on disk are kept (a re-run only draws what is missing)."""
+    from rover_vlm.route_check import audit_page_items, calibration_rows
+    if not args.out:
+        raise SystemExit("--mode check-* needs --out DIR")
+    out = args.out
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    if args.mode == "check-calibration":
+        if not args.pages:
+            raise SystemExit("--mode check-calibration needs --pages SLUG=HTML=MARKS_DIR ...")
+        for spec in args.pages:
+            slug, html, marks_dir = spec.split("=", 2)
+            got = calibration_rows(slug, audit_page_items(Path(html).read_text()), _read_marks(marks_dir), out / "images")
+            print(f"{slug}: {len(got)} rows, {sum(r['wrong'] for r in got)} wrong")
+            rows += got
+    else:
+        if not (args.events and args.objects and args.desc):
+            raise SystemExit("--mode check-manifest needs --events, --objects and --desc")
+        check_events_schema(args.events)
+        split = "eval" if "eval" in args.events.name else "train"
+        by_id = {r["id"]: r for r in json.loads((args.labelset_dir / f"labelset_{split}.json").read_text())}
+        ev = {r["id"]: r for r in jsonl(args.events) if r.get("reason") is None}
+        objects = {o["object_id"]: o for o in jsonl(args.objects)}
+        texts = {r["id"]: r["description"] for p in args.desc for r in jsonl(p) if r.get("passed") and r["id"] in ev}
+        (out / "images").mkdir(exist_ok=True)
+        for i, (rid, text) in enumerate(sorted(texts.items()), 1):
+            path = out / "images" / f"{rid}.jpg"
+            if not path.exists():
+                item = events_item(by_id[rid], ev[rid], objects, text=text, dashed=True)
+                path.write_bytes(base64.b64decode(item["img"].split(",", 1)[1]))
+            rows.append({"id": rid, "route_id": rid, "image": str(path.resolve()), "text": text})
+            if i % 1000 == 0:
+                print(f"  {i}/{len(texts)}", flush=True)
+    (out / "manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    print(f"{len(rows)} rows -> {out / 'manifest.jsonl'}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=100)
@@ -769,8 +817,10 @@ def main() -> None:
                     help="fraction drawn from the 'opposite' side of pairs (weighted back when scoring)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--mode", choices=["labels", "geometry", "semantic", "events", "d1", "steer", "turns", "endings", "names",
-                                       "stops"],
+                                       "stops", "check-calibration", "check-manifest"],
                     default="labels")
+    ap.add_argument("--pages", nargs="+", default=None, metavar="SLUG=HTML=MARKS_DIR",
+                    help="--mode check-calibration: saved audit pages with their marks dirs")
     ap.add_argument("--labels", type=Path, default=None,
                     help="i4 label rows (JSONL): labels mode shows them; semantic mode checks them")
     ap.add_argument("--split", type=Path, default=V2 / "labelset_eval.json",
@@ -803,6 +853,9 @@ def main() -> None:
                          "(per stop kind, with the same --events / --seed as the page)")
     args = ap.parse_args()
 
+    if args.mode in ("check-calibration", "check-manifest"):
+        check_manifest_main(args)
+        return
     if args.mode == "stops":
         if not (args.events and args.objects):
             raise SystemExit("--mode stops needs --events and --objects (the d3 events_<split>.jsonl / objects_<split>.jsonl)")
