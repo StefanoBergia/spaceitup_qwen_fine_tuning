@@ -1,0 +1,404 @@
+<title>What the Prompt Hands Over</title>
+<meta charset="utf-8">
+<style>
+:root{
+  --plane:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --legacy:#d55e00; --goal:#2a78d6; --endpoints:#008300; --floor:#898781;
+  --warn:#fab219; --good:#0ca30c;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --legacy:#d95926; --goal:#3987e5; --endpoints:#2fa52f; --floor:#898781;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --plane:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --legacy:#d95926; --goal:#3987e5; --endpoints:#2fa52f; --floor:#898781;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);
+  font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding-block:40px 80px;padding-inline:24px}
+h1{font-size:28px;line-height:1.2;margin:0 0 8px;letter-spacing:-.012em;text-wrap:balance}
+.sub{color:var(--ink2);margin:0 0 22px;font-size:15.5px;max-width:74ch}
+h2{font-size:18px;margin:46px 0 4px;letter-spacing:-.005em;text-wrap:balance}
+.note{color:var(--ink2);font-size:14px;margin:0 0 16px;max-width:74ch}
+.note b,.callout b{color:var(--ink)}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px}
+.callout{border-left:3px solid var(--warn);background:var(--surface);border-radius:0 10px 10px 0;
+  padding:14px 18px;margin:16px 0;font-size:14.5px;color:var(--ink2);max-width:80ch}
+.callout.ok{border-left-color:var(--good)}
+/* arm identity: a swatch + name, reused everywhere so colour is never the only cue */
+.arm{display:inline-flex;align-items:center;gap:7px;font-weight:600;white-space:nowrap}
+.arm i{width:11px;height:11px;border-radius:3px;display:inline-block;flex:none}
+.arm.legacy i{background:var(--legacy)} .arm.goal i{background:var(--goal)} .arm.endpoints i{background:var(--endpoints)}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:var(--ink2);margin:6px 0 10px}
+.legend .arm{font-weight:500}
+.legend .floorkey{display:inline-flex;align-items:center;gap:7px}
+.legend .floorkey i{width:16px;border-top:2px dashed var(--floor);display:inline-block}
+/* the three arms side by side */
+.arms{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:18px 0 6px}
+.armcard{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:18px 20px;
+  display:flex;flex-direction:column;gap:10px;border-top:3px solid var(--c)}
+.armcard.legacy{--c:var(--legacy)} .armcard.goal{--c:var(--goal)} .armcard.endpoints{--c:var(--endpoints)}
+.armcard .round{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.armcard .name{font-size:18px;font-weight:650;letter-spacing:-.01em;line-height:1.25}
+.armcard .given{font-size:13.5px;color:var(--ink2)}
+.armcard .big{font-size:34px;font-weight:650;letter-spacing:-.02em;line-height:1;margin-top:4px;
+  font-variant-numeric:tabular-nums}
+.armcard .big small{font-size:13px;font-weight:500;color:var(--muted);letter-spacing:0;margin-left:6px}
+.armcard .kv{display:grid;grid-template-columns:1fr auto;gap:3px 12px;font-size:13px;color:var(--ink2);
+  font-variant-numeric:tabular-nums;border-top:1px solid var(--grid);padding-top:10px}
+.armcard .kv b{color:var(--ink);font-weight:600;text-align:right}
+.prompt{font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink2);
+  background:var(--plane);border:1px solid var(--grid);border-radius:8px;padding:10px 12px;
+  white-space:pre-wrap;overflow-wrap:anywhere}
+.prompt em{font-style:normal;color:var(--ink);background:color-mix(in srgb,var(--c) 18%,transparent);
+  border-radius:3px;padding:0 2px}
+/* tables */
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
+th:first-child,td:first-child{text-align:left;font-variant-numeric:normal}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:none}
+tr.base td{color:var(--ink2)}
+td.best{font-weight:650}
+tr.sep td{border-top:2px solid var(--axis)}
+/* charts */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:18px}
+figure{margin:0}
+figcaption{color:var(--ink2);font-size:13px;margin-top:8px;max-width:70ch}
+h3.ct{font-size:14px;margin:0 0 2px;color:var(--ink)}
+.cs{font-size:12.5px;color:var(--muted);margin:0 0 8px}
+svg{display:block;width:100%;height:auto}
+svg text{font:11.5px system-ui,-apple-system,"Segoe UI",sans-serif;fill:var(--ink2)}
+svg .grid line{stroke:var(--grid)} svg .axis line,svg .axis path{stroke:var(--axis)}
+svg .lbl{fill:var(--ink);font-weight:600}
+svg .mut{fill:var(--muted)}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--plane);font-size:12.5px;
+  padding:7px 10px;border-radius:7px;opacity:0;transition:opacity .08s;z-index:9;max-width:280px;
+  font-variant-numeric:tabular-nums;line-height:1.45}
+/* slice bars */
+.bars{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.bar{display:grid;grid-template-columns:110px 1fr 120px;align-items:center;gap:10px;font-size:12.5px}
+.bar .k{color:var(--ink2)} .bar .k b{color:var(--ink);font-weight:600}
+.bar .track{height:12px;background:var(--grid);border-radius:6px;overflow:hidden;position:relative}
+.bar .fill{height:100%;border-radius:6px}
+.bar .tg{position:absolute;top:-3px;bottom:-3px;width:0;border-left:2px dashed var(--floor)}
+.bar .n{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+/* galleries */
+.gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-top:12px}
+.gal figure{background:var(--surface);border:1px solid var(--ring);border-radius:12px;overflow:hidden}
+.gal img{width:100%;display:block;aspect-ratio:2/1;object-fit:cover}
+.gal figcaption{padding:10px 14px 12px;margin:0;font-size:12.5px}
+.gal .bucket{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+.gal .m{display:flex;gap:12px;flex-wrap:wrap;font-variant-numeric:tabular-nums;color:var(--ink2)}
+.gal .m b{color:var(--ink);font-weight:600}
+.foot{color:var(--muted);font-size:13px;margin-top:56px;max-width:80ch}
+.foot code{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink2)}
+@media (prefers-reduced-motion:reduce){.tip{transition:none}}
+@media (max-width:520px){.bar{grid-template-columns:80px 1fr 90px}}
+</style>
+
+<div class="wrap">
+<h1>What the Prompt Hands Over</h1>
+<p class="sub" id="sub"></p>
+
+<div class="arms" id="arms"></div>
+
+<div class="callout" id="caveat"></div>
+
+<h2>The three prompts</h2>
+<p class="note">Same task, same answer format. What changes is which coordinates the model is told before it draws. The highlighted spans are what the prompt fills in from the ground truth.</p>
+<div class="arms" id="prompts"></div>
+
+<h2>Base model and fine-tuned model, arm by arm</h2>
+<p class="note">Waypoint error is the mean distance between the predicted and true route after resampling both to 10 points, in normalized image units (1.0 = the frame width). Errors are over parsed frames; the parse rate sits beside them. <b>Beats to_goal</b> is the share of frames where the model does better than a straight line from that frame's own start to its own goal, the strongest image-blind answer once the goal is known.</p>
+<div class="card scroll"><table id="main"></table></div>
+
+<h2>Where the error lives</h2>
+<p class="note">A cumulative view of every frame's error. A curve further left is better everywhere, not just on average; the dashed line is the straight line to the given goal, the bar a blind predictor clears once it is handed the goal.</p>
+<div class="grid2">
+  <figure class="card"><h3 class="ct">Per-frame waypoint error, fine-tuned models</h3><p class="cs">Cumulative share of eval frames at or below each error</p>
+    <div class="legend" id="cdfLegend"></div>
+    <div id="cdf"></div>
+    <figcaption id="cdfCap"></figcaption></figure>
+  <figure class="card"><h3 class="ct">The tail</h3><p class="cs">Median, 90th and 99th percentile, and the worst frame</p>
+    <div class="legend" id="tailLegend"></div>
+    <div id="tail"></div>
+    <figcaption id="tailCap"></figcaption></figure>
+</div>
+
+<h2>Routes that enter from the side</h2>
+<p class="note" id="edgeNote"></p>
+<div class="grid2" id="edges"></div>
+
+<h2>Routes that bend</h2>
+<p class="note" id="detourNote"></p>
+<div class="card scroll"><table id="detour"></table></div>
+
+<h2>Same frame, goal prompt vs endpoints prompt</h2>
+<p class="note">Rounds 3 and 4 share every eval frame, so these are literally paired: the grey line is ground truth, <span class="arm goal"><i></i>blue</span> is the model told only the goal, <span class="arm endpoints"><i></i>green</span> the model told both ends. Waypoint fill encodes the predicted visibility flag.</p>
+<div class="gal" id="pairedGal"></div>
+
+<h2>The legacy arm on its own frames</h2>
+<p class="note">Round 2 frames, not shared with the other arms. <span class="arm" style="--c:var(--floor)"><i style="background:var(--floor)"></i>grey</span> is the zero-shot base model, <span class="arm legacy"><i></i>orange</span> the model fine-tuned under the legacy prompt. Every ground-truth route here ends at the frame centre, which is what the fine-tuned model learned to draw.</p>
+<div class="gal" id="legacyGal"></div>
+
+<p class="foot" id="foot"></p>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const NS='http://www.w3.org/2000/svg';
+const el=(t,a={},txt)=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);if(txt!=null)n.textContent=txt;return n;};
+const h=(t,cls,html)=>{const n=document.createElement(t);if(cls)n.className=cls;if(html!=null)n.innerHTML=html;return n;};
+const pct=(v,d=1)=>v==null||Number.isNaN(v)?'—':(v*100).toFixed(d)+'%';
+const num=(v,d=3)=>v==null||Number.isNaN(v)?'—':v.toFixed(d);
+const fmtN=n=>n.toLocaleString('en-US');
+const armTag=a=>`<span class="arm ${a.key}"><i></i>${a.title}</span>`;
+const armCol=k=>`var(--${k})`;
+const ROUND={legacy:'Round 2',goal:'Round 3',endpoints:'Round 4'};
+const A=D.arms, byKey=Object.fromEntries(A.map(a=>[a.key,a]));
+const tip=$('tip');
+function bindTip(node,html){
+  node.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.opacity=1;
+    const r=tip.getBoundingClientRect();
+    tip.style.left=Math.min(e.clientX+14,innerWidth-r.width-10)+'px';
+    tip.style.top=Math.max(e.clientY-r.height-12,8)+'px';});
+  node.addEventListener('mouseleave',()=>tip.style.opacity=0);
+}
+
+$('sub').textContent=`Qwen3.5-2B + LoRA on Habitat rover frames, three times over: told nothing about the goal, told the goal, told both the entry point and the goal. Each arm is one full-data fine-tune scored against its own zero-shot base model and its own image-blind floors.`;
+
+/* ---- headline: one card per arm ---- */
+(function(){
+  const box=$('arms');
+  for(const a of A){
+    const c=h('div',`armcard ${a.key}`);
+    c.append(h('div','round',`${ROUND[a.key]} · ${fmtN(a.trainFull)} train / ${fmtN(a.nEval)} eval`));
+    c.append(h('div','name',a.title));
+    c.append(h('div','given',`Prompt hands over: ${a.given}`));
+    c.append(h('div','big',`${pct(a.lora.winVsToGoal,1)}<small>beats the straight line</small>`));
+    const kv=h('div','kv');
+    kv.innerHTML=`<span>median waypoint error</span><b>${num(a.lora.median)}</b>
+      <span>to_goal floor, median</span><b>${num(a.floors.to_goal.median)}</b>
+      <span>worst 10% of frames hold</span><b>${pct(a.lora.worst10Share,0)} of error</b>
+      <span>eval split</span><b>${a.sceneDisjoint?'scene-disjoint':'scene-leaked'}</b>`;
+    c.append(kv); box.append(c);
+  }
+})();
+
+$('caveat').innerHTML=`<b>Read the legacy column on its own terms.</b> Rounds 3 and 4 were scored on one shared, scene-disjoint eval split of ${fmtN(D.sharedFrames)} yaw-augmented frames, so every difference between them is paired and only the prompt changed. Round 2 was scored on its own ${fmtN(byKey.legacy.nEval)}-frame split from the older renders: no yaw augmentation, every goal pinned at x = 0.5, and scenes shared with training. That is an easier task on a leakier split, and its numbers are not comparable frame-for-frame with the other two. Legacy was also trained on ${fmtN(byKey.legacy.trainFull)} samples against ${fmtN(byKey.goal.trainFull)}. The no-goal framing was never rerun on the new frames because its prompt asserts the goal is straight ahead, which is false on 61% of them.`;
+
+/* ---- prompts ---- */
+(function(){
+  const box=$('prompts');
+  for(const a of A){
+    const c=h('div',`armcard ${a.key}`);
+    c.append(h('div','round',ROUND[a.key]));
+    c.append(h('div','name',a.title));
+    const p=h('div','prompt');
+    let t=a.prompt.replace(/[&<>]/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]));
+    t=t.replace(/\{\{/g,'{').replace(/\}\}/g,'}');
+    t=t.replace(/\{(gx|gy|sx|sy|vis|svis|gvis)\}/g,'<em>{$1}</em>');
+    t=t.replace(/(The goal is located straight ahead\.)/,'<em>$1</em>');
+    p.innerHTML=t; c.append(p); box.append(c);
+  }
+})();
+
+/* ---- main table ---- */
+(function(){
+  const cols=[
+    ['parse','Parse rate',r=>pct(r.parseRate,1)],
+    ['mean','Mean err',r=>num(r.mean)],
+    ['median','Median err',r=>num(r.median)],
+    ['p90','p90',r=>num(r.p90)],
+    ['p99','p99',r=>num(r.p99)],
+    ['fre','Fréchet (median)',r=>num(r.frechetMedian)],
+    ['vis','Waypoint vis. acc',r=>pct(r.visAcc,1)],
+    ['win','Beats to_goal',r=>pct(r.winVsToGoal,1)],
+    ['shape','Shape corr.',r=>num(r.shapeCorr,2)],
+    ['end','Endpoint x sd (pred / gt)',r=>`${num(r.endpoint.pred_end_x_sd,3)} / ${num(r.endpoint.gt_end_x_sd,3)}`],
+  ];
+  const t=$('main');
+  const thead=h('thead');const tr=h('tr');tr.append(h('th',null,'Arm · model'));
+  for(const [,n] of cols)tr.append(h('th',null,n));thead.append(tr);t.append(thead);
+  const tb=h('tbody');
+  const best={median:Math.min(...A.map(a=>a.lora.median)),win:Math.max(...A.map(a=>a.lora.winVsToGoal)),p99:Math.min(...A.map(a=>a.lora.p99))};
+  A.forEach((a,i)=>{
+    for(const [kind,r] of [['base',a.base],['lora',a.lora]]){
+      const row=h('tr',(kind==='base'?'base':'')+(kind==='base'&&i>0?' sep':''));
+      row.append(h('td',null,`${armTag(a)} <span style="color:var(--muted)">· ${kind==='base'?'zero-shot base':'LoRA, '+fmtN(a.trainFull)}</span>`));
+      for(const [k,,f] of cols){
+        const td=h('td',null,f(r));
+        if(kind==='lora'&&((k==='median'&&r.median===best.median)||(k==='win'&&r.winVsToGoal===best.win)||(k==='p99'&&r.p99===best.p99)))td.className='best';
+        row.append(td);
+      }
+      tb.append(row);
+    }
+    const fl=h('tr','base');
+    fl.append(h('td',null,`<span style="color:var(--muted)">image-blind floors on this arm's eval set</span>`));
+    fl.append(h('td',null,''));
+    fl.append(h('td',null,`<span title="to_goal mean">${num(a.floors.to_goal.mean)}</span>`));
+    fl.append(h('td',null,`<span title="to_goal median">${num(a.floors.to_goal.median)}</span>`));
+    const rest=h('td',null,`to_goal · constant path ${num(a.floors.constant.median)} · centre line ${num(a.floors.straight.median)}`);
+    rest.colSpan=cols.length-3;rest.style.textAlign='left';rest.style.color='var(--muted)';
+    fl.append(rest);tb.append(fl);
+  });
+  t.append(tb);
+})();
+
+/* ---- CDF ---- */
+(function(){
+  const W=520,H=300,L=46,R=16,T=14,B=38;
+  const xmax=0.45;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Cumulative distribution of per-frame waypoint error for the three fine-tuned models'});
+  const sx=v=>L+Math.min(v,xmax)/xmax*(W-L-R), sy=v=>T+(1-v)*(H-T-B);
+  const g=el('g',{class:'grid'});
+  for(const q of [0,0.25,0.5,0.75,1]){g.append(el('line',{x1:L,x2:W-R,y1:sy(q),y2:sy(q)}));svg.append(el('text',{x:L-6,y:sy(q)+4,'text-anchor':'end'},pct(q,0)));}
+  svg.append(g);
+  for(const x of [0,0.1,0.2,0.3,0.4]){svg.append(el('text',{x:sx(x),y:H-B+16,'text-anchor':'middle'},x.toFixed(1)));}
+  svg.append(el('text',{x:(L+W-R)/2,y:H-6,'text-anchor':'middle',class:'mut'},'per-frame waypoint error (normalized image units)'));
+  const ax=el('g',{class:'axis'});ax.append(el('line',{x1:L,x2:W-R,y1:sy(0),y2:sy(0)}));ax.append(el('line',{x1:L,x2:L,y1:T,y2:sy(0)}));svg.append(ax);
+  // floor: to_goal median of the shared split (goal + endpoints); legacy's own is noted in the caption
+  const fl=byKey.goal.floors.to_goal.median;
+  svg.append(el('line',{x1:sx(fl),x2:sx(fl),y1:T,y2:sy(0),stroke:'var(--floor)','stroke-dasharray':'4 4','stroke-width':1.5}));
+  svg.append(el('text',{x:sx(fl)+5,y:sy(0.07),class:'mut'},`to_goal median ${num(fl)}`));
+  const Q=D.quantileGrid;
+  for(const a of A){
+    const pts=a.lora.quantiles.map((v,i)=>`${sx(v).toFixed(1)},${sy(Q[i]).toFixed(1)}`);
+    // extend to the right edge if the curve reaches 100% before xmax
+    svg.append(el('path',{d:'M'+pts.join('L'),fill:'none',stroke:armCol(a.key),'stroke-width':2.2,'stroke-linejoin':'round'}));
+    // direct label, each arm on its own curve at a different height so they never stack
+    const qa={endpoints:0.9,goal:0.72,legacy:0.4}[a.key];
+    const ia=Math.round(qa*(Q.length-1));
+    svg.append(el('text',{x:sx(a.lora.quantiles[ia])+7,y:sy(qa)+4,class:'lbl',fill:armCol(a.key)},a.title));
+  }
+  // hover crosshair: nearest error on x, read each arm's share at/below it
+  const hit=el('rect',{x:L,y:T,width:W-L-R,height:H-T-B,fill:'transparent'});
+  const cross=el('line',{y1:T,y2:sy(0),stroke:'var(--axis)','stroke-width':1,visibility:'hidden'});
+  svg.append(cross);svg.append(hit);
+  hit.addEventListener('mousemove',e=>{
+    const r=svg.getBoundingClientRect();const x=(e.clientX-r.left)/r.width*W;const v=Math.max(0,Math.min(xmax,(x-L)/(W-L-R)*xmax));
+    cross.setAttribute('x1',sx(v));cross.setAttribute('x2',sx(v));cross.setAttribute('visibility','visible');
+    const rows=A.map(a=>{const q=a.lora.quantiles;let k=0;while(k<q.length&&q[k]<=v)k++;return `${a.title}: <b>${pct(Q[Math.max(0,k-1)],0)}</b> of frames ≤ ${num(v)}`;});
+    tip.innerHTML=rows.join('<br>');tip.style.opacity=1;
+    const tr=tip.getBoundingClientRect();tip.style.left=Math.min(e.clientX+14,innerWidth-tr.width-10)+'px';tip.style.top=Math.max(e.clientY-tr.height-12,8)+'px';
+  });
+  hit.addEventListener('mouseleave',()=>{tip.style.opacity=0;cross.setAttribute('visibility','hidden');});
+  $('cdf').append(svg);
+  $('cdfLegend').innerHTML=A.map(armTag).join('')+`<span class="floorkey"><i></i>straight line to the given goal</span>`;
+  $('cdfCap').textContent=`Fine-tuned models only; the zero-shot bases sit far to the right (medians ${A.map(a=>num(a.base.median)).join(' / ')}). The legacy arm's own to_goal median is ${num(byKey.legacy.floors.to_goal.median)}. Axis clipped at ${xmax}; the goal arm's worst frame is ${num(byKey.goal.lora.max)}.`;
+})();
+
+/* ---- tail: grouped bars ---- */
+(function(){
+  const stats=[['median','median'],['p90','p90'],['p99','p99'],['max','worst frame']];
+  const W=520,H=300,L=46,R=16,T=14,B=38;
+  const ymax=Math.ceil(Math.max(...A.map(a=>a.lora.max))*10)/10;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Median, p90, p99 and worst-frame waypoint error per arm'});
+  const sy=v=>T+(1-v/ymax)*(H-T-B);
+  const g=el('g',{class:'grid'});
+  const step=ymax>0.4?0.2:0.1;
+  for(let y=0;y<=ymax+1e-9;y+=step){g.append(el('line',{x1:L,x2:W-R,y1:sy(y),y2:sy(y)}));svg.append(el('text',{x:L-6,y:sy(y)+4,'text-anchor':'end'},y.toFixed(1)));}
+  svg.append(g);
+  const ax=el('g',{class:'axis'});ax.append(el('line',{x1:L,x2:W-R,y1:sy(0),y2:sy(0)}));svg.append(ax);
+  const gw=(W-L-R)/stats.length, bw=Math.min(26,(gw-24)/A.length);
+  stats.forEach(([k,name],gi)=>{
+    const x0=L+gi*gw+(gw-bw*A.length-2*(A.length-1))/2;
+    svg.append(el('text',{x:L+gi*gw+gw/2,y:H-B+16,'text-anchor':'middle'},name));
+    A.forEach((a,ai)=>{
+      const v=a.lora[k], x=x0+ai*(bw+2), y=sy(v), hh=Math.max(1,sy(0)-y);
+      const r=el('rect',{x,y,width:bw,height:hh,rx:3,fill:armCol(a.key)});
+      svg.append(r);
+      if(k==='median'||k==='max')svg.append(el('text',{x:x+bw/2,y:y-4,'text-anchor':'middle',class:'mut'},num(v,k==='median'?3:2)));
+      bindTip(r,`${a.title}<br>${name}: <b>${num(v)}</b><br>zero-shot base: ${num(a.base[k])}`);
+    });
+  });
+  svg.append(el('text',{x:L-38,y:T+4,class:'mut'},'err'));
+  $('tail').append(svg);
+  $('tailLegend').innerHTML=A.map(armTag).join('');
+  $('tailCap').textContent=`Every quantile drops arm over arm. Handing over the goal mostly pulled in the body of the distribution; handing over the start pulled in the tail: the worst frame fell from ${num(byKey.goal.lora.max,2)} to ${num(byKey.endpoints.lora.max,2)} and p99 from ${num(byKey.goal.lora.p99)} to ${num(byKey.endpoints.lora.p99)}.`;
+})();
+
+/* ---- entry-edge slice ---- */
+(function(){
+  const g=byKey.goal.edges, e=byKey.endpoints.edges;
+  const side=g.filter(x=>x.edge!=='bottom');
+  const sideShare=side.reduce((s,x)=>s+x.share,0);
+  $('edgeNote').innerHTML=`About ${pct(sideShare,0)} of routes are clipped to enter from a side edge: the rover's own position is off-frame, so the image alone cannot say which edge the route comes in from. Under the goal prompt the model guessed, and guessed wrong on ${pct(side.find(x=>x.edge==='left').wrongEdge,0)} of left entries and ${pct(side.find(x=>x.edge==='right').wrongEdge,0)} of right entries, at roughly 0.5 per miss. Naming the entry point removes the guess: the dashed marker on each bar is that slice's own to_goal floor.`;
+  const box=$('edges');
+  const maxv=Math.max(...A.flatMap(a=>(a.edges||[]).map(x=>Math.max(x.mean,x.toGoal))));
+  for(const a of A){
+    if(!a.edges||!a.edges.length)continue;
+    const c=h('figure','card');
+    c.append(h('h3','ct',`${armTag(a)} · mean waypoint error by entry edge`));
+    c.append(h('p','cs',a.key==='legacy'?'own eval split, older renders':'shared eval split'));
+    const bars=h('div','bars');
+    for(const x of a.edges){
+      const b=h('div','bar');
+      b.append(h('span','k',`<b>${x.edge}</b> · ${fmtN(x.n)}`));
+      const tr=h('div','track');
+      const f=h('div','fill');f.style.width=(x.mean/maxv*100).toFixed(1)+'%';f.style.background=armCol(a.key);
+      const tg=h('div','tg');tg.style.left=(x.toGoal/maxv*100).toFixed(1)+'%';
+      tr.append(f,tg);b.append(tr);
+      b.append(h('span','n',`${num(x.mean)} · wins ${pct(x.winRate,0)}`));
+      bindTip(b,`${a.title} · ${x.edge} entry (${fmtN(x.n)} frames, ${pct(x.share,0)})<br>mean <b>${num(x.mean)}</b> · median ${num(x.median)}<br>to_goal floor ${num(x.toGoal)} · model wins ${pct(x.winRate,1)}<br>started from the wrong edge: <b>${pct(x.wrongEdge,1)}</b>`);
+      bars.append(b);
+    }
+    c.append(bars);box.append(c);
+  }
+})();
+
+/* ---- detour ---- */
+(function(){
+  const arms=A.filter(a=>a.detour);
+  $('detourNote').innerHTML=`Detour ratio is the true route's length over the straight-line distance between its ends, in the same buckets as <code>compare_evals.py</code>. Only the two arms on the shared split carry it; the legacy split predates the sidecar. Each bucket has its own to_goal floor, and the win rate is against that.`;
+  const t=$('detour');const th=h('thead');const tr=h('tr');tr.append(h('th',null,'Detour'));tr.append(h('th',null,'Frames'));tr.append(h('th',null,'to_goal floor (mean)'));
+  for(const a of arms){tr.append(h('th',null,`${a.title} · mean`));tr.append(h('th',null,'median'));tr.append(h('th',null,'beats to_goal'));}
+  th.append(tr);t.append(th);const tb=h('tbody');
+  const names={'near-straight':'near-straight (< 1.05×)',slight:'slight (1.05–1.15×)',moderate:'moderate (1.15–1.35×)','strong detour':'strong (≥ 1.35×)'};
+  for(const row of arms[0].detour){
+    const r=h('tr');r.append(h('td',null,names[row.detour]||row.detour));r.append(h('td',null,fmtN(row.n)));r.append(h('td',null,num(row.toGoal)));
+    for(const a of arms){const x=a.detour.find(d=>d.detour===row.detour);
+      r.append(h('td',null,x?num(x.mean):'—'));r.append(h('td',null,x?num(x.median):'—'));
+      const best=Math.max(...arms.map(b=>((b.detour.find(d=>d.detour===row.detour)||{}).winRate)||0));
+      const w=h('td',null,x?pct(x.winRate,0):'—');if(x&&x.winRate===best)w.className='best';r.append(w);}
+    tb.append(r);
+  }
+  t.append(tb);
+})();
+
+/* ---- galleries ---- */
+(function(){
+  const pg=$('pairedGal');
+  for(const f of D.pairedGallery){
+    const fig=h('figure');
+    const img=document.createElement('img');img.src=f.img;img.alt=`Frame ${f.id}: goal-prompt prediction (left) and endpoints-prompt prediction (right) over ground truth`;img.loading='lazy';
+    const cap=h('figcaption');
+    cap.append(h('div','bucket',f.bucketTitle));
+    cap.append(h('div','m',`<span>goal prompt <b>${num(f.errGoal)}</b></span><span>endpoints prompt <b>${num(f.errEnd)}</b></span><span>to_goal ${num(f.toGoal)}</span><span>enters from <b>${f.gtEdge}</b>${f.goalEdge!==f.gtEdge?`, goal prompt started at <b>${f.goalEdge}</b>`:''}</span>`));
+    fig.append(img,cap);pg.append(fig);
+  }
+  const lg=$('legacyGal');
+  for(const f of D.legacyGallery){
+    const fig=h('figure');
+    const img=document.createElement('img');img.src=f.img;img.alt=`Frame ${f.id}: zero-shot base (left) and legacy-prompt LoRA (right) over ground truth`;img.loading='lazy';
+    const cap=h('figcaption');
+    cap.append(h('div','bucket',`${f.bucketTitle} for the fine-tuned model`));
+    cap.append(h('div','m',`<span>LoRA error <b>${num(f.err)}</b></span>${f.baseParsed?'':'<span>base: no parseable answer</span>'}`));
+    fig.append(img,cap);lg.append(fig);
+  }
+})();
+
+$('foot').innerHTML=`Generated by <code>scripts/visualize_framing_comparison.py</code> from <code>outputs/eval_habitat_v2</code>, <code>_v3</code> and <code>_v4</code>. A controlled no-goal arm on the shared split would need a prompt that neither names the goal nor claims it is straight ahead, and has not been run.`;
+</script>

@@ -1727,6 +1727,7 @@ outputs on the login node. All are CPU-only; none need a GPU.
 | Real-image eval: Habitat vs real per model | `uv run scripts/visualize_real_eval.py` | `outputs/eval_real/real_eval.html` |
 | Instruction-conditioned paths | `uv run scripts/visualize_instruction_results.py` | `outputs/instruction_results.html` |
 | General instruction model (v2) | `uv run scripts/visualize_instruction_general.py` | `outputs/instruction_general.html` |
+| Prompt framings: no goal / goal / start+goal | `uv run scripts/visualize_framing_comparison.py` | `outputs/framing_comparison.html` |
 
 Published artifacts (private to the owner; republish the same file path to update in
 place, or pass the URL as `url=` from another session):
