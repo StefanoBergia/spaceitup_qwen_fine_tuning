@@ -21,6 +21,9 @@ publishes. Inputs come from `prepare_habitat_instr.py events`.
     # naming chooser (spec 2026-10-15 Addendum C): pick one of the candidate names per object, or "none" (-> V0)
     uv run scripts/label_descriptions.py --stage choose --objects OBJ --candidates V0=... V1=... V2=... V3=... \
         --out OUT --resume
+    # route checker (spec 2026-11-16): Qwen3.6 judges each manifest row's image + text (slurm/check_routes.sbatch)
+    uv run scripts/label_descriptions.py --stage check --manifest outputs/route_check/calibration/manifest.jsonl \
+        --out outputs/route_check/calibration/check_k1.jsonl --resume
     #   --fallback-names OTHER_names.jsonl: used per route when --names leaves an object unnamed or two
     #   objects share a head noun ("name:clash"); rows carry "namer": primary|fallback
     # gate: --limit 300 on both stages, --gate on compose (exit 2 when a threshold fails;
@@ -44,6 +47,7 @@ from rover_vlm.descriptions import (
     summarize_d1,
 )
 from rover_vlm.labelling_io import chat_text, chat_with_image, connect, prepare_output, resolve_endpoint
+from rover_vlm.route_check import check_route
 from rover_vlm.route_events import check_events_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,7 +63,8 @@ def jsonl(path):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage", choices=["name", "compose", "choose"], required=True)
+    p.add_argument("--stage", choices=["name", "compose", "choose", "check"], required=True)
+    p.add_argument("--manifest", type=Path, help="stage check: manifest.jsonl rows {id, image, text} (route checker)")
     p.add_argument("--events", type=Path, help="events_*.jsonl (not with --all-objects)")
     p.add_argument("--all-objects", action="store_true",
                    help="stage name: name every row of --objects; no --events (steering, Addendum A1)")
@@ -92,7 +97,13 @@ def main() -> None:
     if args.all_objects and args.stage != "name":
         raise SystemExit("--all-objects is for --stage name")
     variant_names = None
-    if args.stage == "choose":      # every row of --objects, no routes (Addendum C)
+    if args.stage == "check":       # route checker: every manifest row, no events (spec 2026-11-16)
+        if not (args.manifest and args.manifest.exists()):
+            raise SystemExit("--stage check needs --manifest manifest.jsonl (audit_instruction_labels.py --mode check-*)")
+        items = jsonl(args.manifest)
+        items = items[: args.limit] if args.limit is not None else items
+        key = "id"
+    elif args.stage == "choose":      # every row of --objects, no routes (Addendum C)
         if not (args.objects and args.candidates):
             raise SystemExit("--stage choose needs --objects and --candidates V0=PATH V1=PATH ...")
         files = dict(c.split("=", 1) for c in args.candidates)
@@ -119,8 +130,8 @@ def main() -> None:
         if not args.events:
             raise SystemExit("--events is required (unless --stage name --all-objects)")
         check_events_schema(args.events)
-    routes = [] if args.all_objects or args.stage == "choose" else select_routes(jsonl(args.events), args.limit)
-    if args.stage == "choose":
+    routes = [] if args.all_objects or args.stage in ("choose", "check") else select_routes(jsonl(args.events), args.limit)
+    if args.stage in ("choose", "check"):
         pass
     elif args.stage == "name":
         if not args.objects:
@@ -179,7 +190,10 @@ def main() -> None:
                 if gap:
                     return {"id": it[key], "error": f"name_missing: {gap}"}
             try:
-                if args.stage == "choose":
+                if args.stage == "check":
+                    row = check_route(ask_image, it, args.seed)
+                    row["checker"] = model
+                elif args.stage == "choose":
                     oid = it["object_id"]
                     row = choose_object(ask_image, it, candidate_names(oid, variant_names), variant_names["V0"].get(oid),
                                         args.seed, choose_prompt=args.choose_prompt)
@@ -202,11 +216,13 @@ def main() -> None:
                 rate = i / max(1e-9, time.time() - started)
                 status = (f"ERROR {row['error']}" if row.get("error") else "ok" if row["passed"]
                           else f"FAIL {row['rejects']}")
-                shown = row.get("name") if args.stage in ("name", "choose") else row.get("description")
+                shown = (row.get("name") if args.stage in ("name", "choose")
+                         else (row.get("overall_true"), row.get("confidence")) if args.stage == "check"
+                         else row.get("description"))
                 print(f"[{i}/{len(todo)}] {row['id']}  {rate * 60:.0f}/min  eta {(len(todo) - i) / rate / 60:.0f}m  "
                       f"{shown!r}  {status}", flush=True)
 
-    rows = [r for r in jsonl(args.out) if r["id"] in {it[key] for it in items}]
+    rows = [r for r in jsonl(args.out) if r["id"] in {it[key] for it in items}] if args.out.exists() else []
     summary = summarize_d1(rows, args.stage)
     print("\nsummary:\n" + json.dumps(summary, indent=2))
     if summary["errors"]:

@@ -22,6 +22,7 @@ from .instructions import (
     _DRAWING, _EGOCENTRIC, _TRAILING, STYLES, TARGET_OUTLINE_COLOR, _answer_block, _answer_path, _stable_index,
     head_noun, normalize_name,
 )
+from .route_events import stop_kind
 from .traces import SCENE_INTRO, answer_payload, parse_trace
 
 DESC_WORDS = (5, 45)
@@ -51,7 +52,22 @@ STOP_RELATION_WORDS = {
     ("near", "just past"): ("just past", "right past", "just beyond", "just after"),
     ("distance", "before"): ("before", "short of"),
     ("distance", "past"): ("past", "after", "beyond"),
+    ("object", "in front of"): ("in front of",),            # d3 (spec 2026-11-10): an object within 1.5 m
+    ("object", "behind"): ("behind",),
+    ("object", "next to"): ("next to", "beside"),
+    ("wall", "in front of"): ("in front of",),              # d3 Addendum A1: the wall ahead, when no place fits
 }
+# d3 places (rover_vlm.stop_places.PLACES): the canonical clause, and the words a text may use for it
+PLACE_TEXT = {"doorway": "in the doorway", "corner": "in the corner", "hallway_end": "at the end of the hallway",
+              "hallway": "in the hallway", "wall": "by the wall", "room_middle": "in the middle of the room"}
+PLACE_WORDS = {"doorway": ("doorway", "door opening"), "corner": ("corner",),
+               "hallway_end": ("end of the hallway", "end of the corridor", "end of the hall"),
+               "hallway": ("in the hallway", "in the corridor", "in the hall"),
+               "wall": ("by the wall", "beside the wall", "next to the wall", "against the wall", "along the wall"),
+               "room_middle": ("middle of the room", "centre of the room", "center of the room")}
+# a d3 visible stop says where the rover ends up, never how far: these distance words are rejected after the stop word
+_DISTANCE = re.compile(r"\b(?:a little|a bit|slightly|well|far|a good way)\s+(?:past|before|beyond|after|short of)\b"
+                       r"|\bjust\s+(?:past|after|beyond)\b|\bshort of\b|\b(?:metres?|meters?|steps?)\b", re.I)
 # The words that say each coarse distance-stop amount (route_events.AMOUNT_STEPS); the stop
 # clause must hold one of its own amount's words (Addendum A 1).
 STOP_AMOUNT_WORDS = {
@@ -84,7 +100,11 @@ def event_phrase(ev, names):
 def stop_text(stop, name, wall=False):
     """The stop clause. A distance stop needs its coarse `amount` (rows from before Addendum A
     carry only distance_m: they raise instead of being mis-rendered). A "past" stop measured
-    from a wall (`wall`) is past the END of the wall."""
+    from a wall (`wall`) is past the END of the wall. d3: an object stop says its relation, a place stop its place."""
+    if stop["type"] in ("object", "wall"):
+        return f"stop {stop['relation']} the {name}"
+    if stop["type"] == "place":
+        return "stop " + PLACE_TEXT[stop["place"]]
     if stop["type"] == "near":
         return f"stop {stop['relation']} the {name}"
     if stop["type"] == "after_last":
@@ -125,6 +145,16 @@ def rewrite_ending(text, events, stop, names, route_id):
     from REWRITE_VERBS by a stable hash of the route id), keeping the text's own end punctuation. Reasons:
     "no_stop_clause" (no stop word), "no_connector" (nothing before the stop clause, or no connector), "rejects"
     (the new text fails description_rejects)."""
+    verb = REWRITE_VERBS[_stable_index("verb:" + route_id, len(REWRITE_VERBS))]
+    new, why = _replace_final_clause(text, behind_clause(events, stop, names, verb))
+    if new is None:
+        return None, why
+    return (new, None) if not description_rejects(new, events, stop, names) else (None, "rejects")
+
+
+def _replace_final_clause(text, clause):
+    """(text with its final stop clause -- the last stop word to the end plus the connector before it -- replaced by
+    ", then <clause>", keeping the text's own end punctuation, None) or (None, "no_stop_clause" / "no_connector")."""
     stops = list(_STOP.finditer(text or ""))
     if not stops:
         return None, "no_stop_clause"
@@ -133,8 +163,15 @@ def rewrite_ending(text, events, stop, names, route_id):
     if not head:
         return None, "no_connector"
     end = text.rstrip()[-1:]
-    verb = REWRITE_VERBS[_stable_index("verb:" + route_id, len(REWRITE_VERBS))]
-    new = f"{head}, then {behind_clause(events, stop, names, verb)}{end if end in '.?!' else '.'}"
+    return f"{head}, then {clause}{end if end in '.?!' else '.'}", None
+
+
+def rewrite_stop(text, events, stop, names):
+    """(new text, None) or (None, reason): a d2 text whose final stop clause becomes the d3 stop line (stop_text), d3
+    seeding. Reasons as rewrite_ending: "no_stop_clause", "no_connector", "rejects"."""
+    new, why = _replace_final_clause(text, _stop_line(events, stop, names))
+    if new is None:
+        return None, why
     return (new, None) if not description_rejects(new, events, stop, names) else (None, "rejects")
 
 
@@ -265,6 +302,36 @@ def d2_rejects(text, ev):
     return turn_rejects(text, ev["events"]) + ending_rejects(text, ev.get("stop"))
 
 
+def _d3_clause_rejects(text, stop, clause):
+    """A d3 stop clause (the text after the last stop word, from `clause`): no distance words, and a place stop says
+    one of its place's words."""
+    out = ["stop:distance"] if _DISTANCE.search(text, clause) else []
+    if stop["type"] == "place" and not _words_re(PLACE_WORDS[stop["place"]]).search(text, clause):
+        out.append("stop:place")
+    return out
+
+
+def visible_stop_rejects(text, stop):
+    """The names-free checks of a d3 visible stop (finalize re-checks reused texts with them): a stop word, then no
+    distance words, the place's words (place) or the relation's words (object). [] for every other stop."""
+    if stop_kind(stop) is None:
+        return []
+    stops = list(_STOP.finditer(text or ""))
+    if not stops:
+        return ["stop:missing"]
+    clause = stops[-1].end()
+    out = _d3_clause_rejects(text, stop, clause)
+    if stop["type"] in ("object", "wall") and \
+            not _words_re(STOP_RELATION_WORDS[(stop["type"], stop["relation"])]).search(text, clause):
+        out.append("stop:relation")
+    return out
+
+
+def d3_rejects(text, ev):
+    """finalize's re-check of a d3 text against its events row: d2_rejects plus the visible-stop checks."""
+    return d2_rejects(text, ev) + visible_stop_rejects(text, ev.get("stop"))
+
+
 def description_rejects(text, events, stop, names):
     """Why a description is unusable for these events; [] when it is fine."""
     if not text:
@@ -325,6 +392,8 @@ def description_rejects(text, events, stop, names):
             words = STOP_AMOUNT_WORDS.get(stop.get("amount"))
             if not words or not stops or not _words_re(words).search(text, clause):
                 out.append("stop:amount")
+        if stop["type"] in ("object", "place", "wall") and stops:
+            out += _d3_clause_rejects(text, stop, clause)
     # the turn phrase's side word is the turn's: blank it (same length, spans stay valid) before side ownership
     side_text = _TURN.sub(lambda m: " " * len(m.group(0)), text)
     return out + turn_rejects(text, events) + _side_rejects(side_text, events, spans)
@@ -364,7 +433,7 @@ def name_rejects(name, kind, need):
     return out
 
 
-PROMPT_VERSION = "d5"
+PROMPT_VERSION = "d6"
 
 # d1 speaking styles: the shared STYLES minus the "why or where it leads" one (audit of gate r2: both
 # unnatural labels came from it), plus a step-by-step one. The shared STYLES (i4) is unchanged.
@@ -739,6 +808,11 @@ def summarize_d1(rows, stage):
                           "single": sum(bool(r.get("single")) for r in ok),
                           "no_candidates": sum(not r.get("candidates") for r in ok)}
         out["from"] = dict(Counter(v for r in ok for v in r.get("name_source") or []))
+    if stage == "check":      # route checker (spec 2026-11-16): unreadable replies and the plain yes share
+        parsed = [r for r in ok if r.get("passed")]
+        out["parse_failed"] = sum("parse" in r.get("rejects", []) for r in ok)
+        out["overall_true_share"] = round(sum(bool(r.get("overall_true")) for r in parsed) / len(parsed), 4) \
+            if parsed else 0.0
     return out
 
 
@@ -796,9 +870,11 @@ def desc_check(ev, objects):
 
 
 def _check_ending(stop, objects):
-    """The ending the eval checks (d2 T2): a stop in view, out of sight behind X (X's image outline), or a turn."""
+    """The ending the eval checks (d2 T2): a stop in view, out of sight behind X (X's image outline), or a turn.
+    A d3 stop in view also carries its kind ("object:next to", "place:corner") for the eval's by_stop split."""
     if stop is None or stop["type"] not in ("behind", "turn"):
-        return {"type": "stop"}
+        kind = stop_kind(stop)
+        return {"type": "stop", "stop": kind} if kind else {"type": "stop"}
     if stop["type"] == "turn":
         return {"type": "turn"}
     return {"type": "behind", "outline": objects[stop["object"]]["polygon"]}
@@ -866,31 +942,35 @@ def same_description_geometry(old, new):
     return _geometry_key(old) == _geometry_key(new)
 
 
-def _rewritten(old, new, d1row, named):
-    """(rewritten desc row, None) or (None, reason) for a route whose stop became "behind" (d2 T2): same events as
-    d1, every route object named by the namer the d1 text used, and a rewrite that passes the rules."""
+def _rewritten(old, new, d1row, named, tag="d1"):
+    """(rewritten desc row, None) or (None, reason) for a route whose stop became "behind" (d2 T2) or a d3 visible
+    stop (tag "d2"): same events as before, every route object named by the namer the old text used, and a rewrite
+    that passes the rules."""
     if old is None or old.get("reason") is not None or d1row is None:
-        return None, "no_d1_text"
+        return None, f"no_{tag}_text"
     if _geometry_key(old)[0] != _geometry_key(new)[0]:
         return None, "events_changed"
     names = named["cosmos"] if d1row.get("namer") == "fallback" else named["gemma"]
     if not _usable(new, names):
         return None, "unnamed"
-    text, why = rewrite_ending(d1row["description"], new["events"], new["stop"], names, new["id"])
+    if tag == "d1":
+        text, why = rewrite_ending(d1row["description"], new["events"], new["stop"], names, new["id"])
+    else:
+        text, why = rewrite_stop(d1row["description"], new["events"], new["stop"], names)
     if text is None:
         return None, why
-    return {**d1row, "description": text, "rewritten_from": "d1", "passed": True, "rejects": []}, None
+    return {**d1row, "description": text, "rewritten_from": tag, "passed": True, "rejects": []}, None
 
 
-def seed_d2_labels(old_events, new_events, new_objects, old_names, old_desc):
-    """What the d2 label job can start from (spec "Seeding", Addendum T2): the d1 name rows of objects that still exist
-    ({"gemma": rows, "cosmos": rows}, error rows left out so they are retried); the d1 desc row of every unchanged
-    described route (tagged "reused_from": "d1"); a rewritten d1 row for every route whose events are unchanged and
-    whose stop became "behind" (tagged "rewritten_from": "d1"); and the described routes that need composing.
-    rewrite_failed counts, by reason, the behind routes that could not be rewritten."""
+def _seed_labels(old_events, new_events, new_objects, old_names, old_desc, tag, rewrite_stop_of):
+    """Shared by seed_d2_labels / seed_d3_labels: the old name rows of objects that still exist ({"gemma": rows,
+    "cosmos": rows}, error rows left out so they are retried); the old desc row of every unchanged described route
+    (tagged "reused_from": tag); a rewritten old row for every route with unchanged events whose stop
+    `rewrite_stop_of(stop)` selects (tagged "rewritten_from": tag); and the described routes that need composing.
+    rewrite_failed counts, by reason, the selected routes that could not be rewritten."""
     ids = {o["object_id"] for o in new_objects}
-    names = {tag: [r for r in rows if r["id"] in ids and not r.get("error")] for tag, rows in old_names.items()}
-    named = {tag: name_rows_split(rows)[0] for tag, rows in names.items()}
+    names = {k: [r for r in rows if r["id"] in ids and not r.get("error")] for k, rows in old_names.items()}
+    named = {k: name_rows_split(rows)[0] for k, rows in names.items()}
     named.setdefault("gemma", {})
     named.setdefault("cosmos", {})
     old = {r["id"]: r for r in old_events}
@@ -901,16 +981,31 @@ def seed_d2_labels(old_events, new_events, new_objects, old_names, old_desc):
             continue
         o, d = old.get(r["id"]), desc.get(r["id"])
         if o is not None and d is not None and same_description_geometry(o, r):
-            reused.append({**d, "reused_from": "d1"})
+            reused.append({**d, "reused_from": tag})
             continue
-        if r["stop"]["type"] == "behind":
-            row, why = _rewritten(o, r, d, named)
+        if rewrite_stop_of(r["stop"]):
+            row, why = _rewritten(o, r, d, named, tag=tag)
             if row is not None:
                 rewritten.append(row)
                 continue
             failed[why] += 1
         changed.append(r)
     return {"names": names, "desc": reused + rewritten, "changed": changed, "rewrite_failed": dict(failed)}
+
+
+def seed_d2_labels(old_events, new_events, new_objects, old_names, old_desc):
+    """What the d2 label job can start from (spec "Seeding", Addendum T2), from the d1 files (_seed_labels): routes
+    whose stop became "behind" get the d1 text with its ending rewritten (rewrite_ending)."""
+    return _seed_labels(old_events, new_events, new_objects, old_names, old_desc, "d1",
+                        lambda stop: stop["type"] == "behind")
+
+
+def seed_d3_labels(old_events, new_events, new_objects, old_names, old_desc):
+    """What the d3 label job can start from (spec 2026-11-10 "Seeding"), from the d2 files (_seed_labels): hidden
+    behind and turn endings are reused; a route with a d3 visible stop gets the d2 text with its final stop clause
+    rewritten to the d3 stop (rewrite_stop)."""
+    return _seed_labels(old_events, new_events, new_objects, old_names, old_desc, "d2",
+                        lambda stop: stop_kind(stop) is not None)
 
 
 def as_form(rec, form):

@@ -113,7 +113,11 @@ def build_messages(prompt: str, image: Image.Image) -> list[dict]:
 def main() -> None:
     args = parse_args()
     use_cuda = torch.cuda.is_available()
-    dtype = torch.bfloat16 if use_cuda else torch.float32
+    # bf16 on Ampere+ (A100); Turing cards (RTX 2080 Ti) have no bf16 kernels -> fp16.
+    if use_cuda:
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        dtype = torch.float32
     device = "cuda" if use_cuda else "cpu"
     gen_kwargs = generation_kwargs(args.seed, args.temperature, args.top_p, args.top_k)
     print(f"tag={args.tag} model={args.model_id} adapter={args.adapter} device={device} "

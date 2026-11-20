@@ -888,13 +888,19 @@ def aggregate_description_metrics(records):
 
     mean_goal = goals.mean(0) if len(goals) else None
 
-    def _ending_group(kind):
-        rs = [x for x in rows if endings[x["id"]][0] == kind]
+    def _ending_stats(rs):
         g = [np.asarray(x["gt"]["goal"][:2], float) for x in rs if x.get("gt") and x.get("metrics")]
         gte = [gt_endings[x["id"]] for x in rs if x["id"] in gt_endings]
-        return {**_group(rs), "ending_rate": _rate(kind), "gt_ending_rate": float(np.mean(gte)) if gte else None,
+        return {**_group(rs), "ending_rate": float(np.mean([endings[x["id"]][1] for x in rs])) if rs else None,
+                "gt_ending_rate": float(np.mean(gte)) if gte else None,
                 "constant_goal_endpoint_error_median": (float(np.median(np.linalg.norm(np.array(g) - mean_goal, axis=1)))
                                                         if g and mean_goal is not None else None)}
+
+    def _ending_group(kind):
+        return _ending_stats([x for x in rows if endings[x["id"]][0] == kind])
+
+    def _stop_kind(x):            # d3: a stop in view carries its kind ("place:corner", "object:next to")
+        return (x["habitat_meta"]["desc_check"].get("ending") or {}).get("stop")
 
     ep = [r["metrics"]["goal_point_error"] for r in rows if r.get("metrics")]
     return {
@@ -905,6 +911,8 @@ def aggregate_description_metrics(records):
         "behind_rate": _rate("behind"),
         "ending_rate": _rate(),
         "by_ending": {k: _ending_group(k) for k in sorted({k for k, _ in endings.values()})},
+        "by_stop": {k: _ending_stats([x for x in rows if _stop_kind(x) == k])
+                    for k in sorted({_stop_kind(x) for x in rows} - {None})},
         "event_rate_by_type": {k: float(np.mean(v)) for k, v in sorted(by_type.items())},
         "by_turn": {k: _group(v) for k, v in split.items() if v},
         "n_pairs": len(full),

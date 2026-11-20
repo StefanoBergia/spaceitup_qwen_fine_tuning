@@ -9,7 +9,8 @@ SLURM = Path(__file__).resolve().parent.parent / "slurm"
 @pytest.mark.parametrize("name", ["train_habitat.sbatch", "label_instructions.sbatch",
                                   "eval_instruction_v2.sbatch", "eval_instruction.sbatch",
                                   "render_semantic_frames.sbatch", "label_descriptions.sbatch",
-                                  "eval_descriptions.sbatch", "naming_variants.sbatch"])
+                                  "eval_descriptions.sbatch", "naming_variants.sbatch",
+                                  "check_routes.sbatch"])
 def test_thread_caps(name):
     text = (SLURM / name).read_text()
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
@@ -35,7 +36,7 @@ def test_label_descriptions_round_and_changed_gate():
     assert 'ROUND="${ROUND:-d1}"' in text and "_d1.jsonl" not in text.split("set -euo pipefail", 1)[1]
     assert 'GATE_SPLIT=eval_changed' in text and 'name_stage "$GATE_SPLIT" gate --limit 300' in text
     assert 'SD="${STEER_DIR:-data/prepared_habitat_instr_v3/steer}"' in text
-    assert 'case "$ROUND" in d1|d2) ;; *) echo "ROUND must be d1 or d2' in text
+    assert 'case "$ROUND" in d1|d2|d3) ;; *) echo "ROUND must be d1, d2 or d3' in text
     # the changed-eval existence check sits inside the gate condition, not before every stage
     gate_if = text.index('if [ "$STAGE" = gate ]; then')
     check = text.index('_eval_changed.jsonl" ] ||')

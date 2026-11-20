@@ -15,6 +15,10 @@ d2 (2026-10-13): a route that ends >= 45 deg off its start->goal line gets a "tu
 
 d2 T2 (2026-10-14): a route whose end is out of sight is described up to where it disappears and ends "behind" the object hiding it (or with its hidden turn); events after the disappearance are dropped; a visible "well past" stop re-anchors within 1.5 m.
 
+d3 (2026-11-10, describe_xz(stops="d3")): an end in view no longer gets a distance amount; it stops "behind / in front of / next to" a non-wall object within CLOSE_M (object_relation), else at a place read from the occupancy grid (stop_places.place_at: doorway, corner, end of the hallway, in the hallway, by the wall, middle of the room), else (Addendum A1 backup) "in front of" a visible wall within CLOSE_M ahead (wall_ahead); no fit -> "no_stop_place". Spec: docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md.
+
+d3 Addendum A2 (2026-11-16): a wall-sized blob on the 2D map can be low furniture (a sofa set, a dining set); each map cell gets a height class from the depth image (cell_heights) and only a "by the wall" stop is looked at again with low furniture as furniture; when that finds no stop, "by the wall" stays.
+
 Pure numpy, CPU only. Spec: docs/superpowers/specs/2026-09-30-route-descriptions-design.md
 """
 
@@ -29,6 +33,7 @@ from .landmarks import (
     CAM_HEIGHT_M, FREE, OBJECT_TOP_M, OCC, Camera, Grid, _dilate, _poly_area, column_in_frame, components,
     convex_hull, densify,
 )
+from .stop_places import place_at
 
 PASS_M = 0.7              # an obstacle this close to the route is something it passes
 # Gate 1 r2 (2026-10-02): a blob the route runs *through* (closest distance ~0.01 m, vs the planner's
@@ -350,7 +355,10 @@ AFTER_LAST_M = 1.5
 STOP_FAR_M = 4.0           # the line-of-approach rule looks this far from the goal (no limit past the last event)
 APPROACH_COS = 0.866       # within 30 degrees of the final heading, ahead or behind
 STRAIGHT_MAX_M = 0.3          # a zero-event route is described "go straight": its max offset from entry->goal must be within this
-REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_behind_anchor", "no_events_bent", "error")
+REASONS = ("no_state", "bad_candidate", "spur", "no_stop_anchor", "no_behind_anchor", "no_events_bent", "no_stop_place",
+           "error")
+CLOSE_M = 1.5              # d3: an object this close to a visible end is the stop's anchor (~1 m of gap)
+BEHIND_GAP_M = 0.3         # d3 "behind X": X spans the goal's image column and is this much nearer the camera
 CHECK_CELLS = 40           # cells per object kept for the eval's follow check
 
 
@@ -617,6 +625,207 @@ def stop_phrase(frame, route_xz, events, cands=None):
     return None
 
 
+# --- d3 visible stops (docs/superpowers/specs/2026-11-10-stop-phrases-d3-design.md) ----------------------------
+def object_relation(frame, goal, head, right, blobs, low=frozenset()):
+    """The d3 object stop: the nearest visible, non-wall blob within CLOSE_M of the goal and the first relation that
+    fits, in the order behind -> in front of -> next to; a blob that fits none (diagonal to the goal) is skipped.
+    A wall-sized blob in `low` (low furniture, Addendum A2) is an object here, not a wall.
+    behind = the blob's image outline spans the goal's image column and a visible cell is >= BEHIND_GAP_M nearer the
+    camera than the goal along the camera->goal line (final review I1: a metric distance to that line also caught
+    objects beside the route's last metre); in front of = ahead of the goal along the final heading (as _near_stop);
+    next to = beside it, the goal within the blob's visible extent along the heading. None when no blob qualifies."""
+    cam = frame.cam.pos
+    ray = goal - cam
+    length = float(np.linalg.norm(ray))
+    ray = ray / max(length, 1e-9)
+    u_goal = float(frame.cam.uv(goal)[0][0, 0])
+    for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
+        if d.min() > CLOSE_M:
+            break
+        if _wall_like(xz) and b not in low:
+            continue
+        x = _anchor(frame, b, goal, cells, xz, d)
+        if x is None:
+            continue
+        vis = x["vis_xz"]
+        dv = np.linalg.norm(vis - goal, axis=1)
+        if dv.min() > CLOSE_M:
+            continue
+        t = (vis - cam) @ ray
+        bbox = x["outline"].get("bbox")
+        v = vis[dv.argmin()] - goal
+        along, lat = float(v @ head), float(v @ right)
+        ext = (vis - goal) @ head
+        if bbox is not None and bbox[0] <= u_goal <= bbox[2] and np.any((t > 0) & (t <= length - BEHIND_GAP_M)):
+            rel = "behind"
+        elif along > abs(lat):
+            rel = "in front of"
+        elif ext.min() <= 0.0 <= ext.max():                 # |lateral| >= along here: beside the goal
+            rel = "next to"
+        else:
+            continue
+        return {"type": "object", "relation": rel, "anchor": {**x, "kind": "object"}}
+    return None
+
+
+def _place_grid(frame, low=frozenset()):
+    """The frame's grid with every non-wall blob (and every blob in `low`, Addendum A2) cleared to FREE: furniture is
+    not the wall of a d3 place."""
+    s = frame.grid.s.copy()
+    for b, (cells, xz) in _blob_cells(frame).items():
+        if not _wall_like(xz) or b in low:
+            s[cells[:, 0], cells[:, 1]] = FREE
+    return Grid(s, frame.grid.mpp, frame.grid.x0, frame.grid.z0)
+
+
+def wall_ahead(frame, goal, head, right, blobs, low=frozenset()):
+    """The d3 backup (Addendum A1, option 2): the nearest visible wall-like blob within CLOSE_M ahead of the goal
+    (along > |lateral|, as _near_stop) -> {"type": "wall", "relation": "in front of", "anchor"}, else None.
+    A blob in `low` (low furniture, Addendum A2) is not a wall."""
+    for b, cells, xz, d in sorted(blobs, key=lambda t: t[3].min()):
+        if d.min() > CLOSE_M:
+            break
+        if not _wall_like(xz) or b in low:
+            continue
+        x = _anchor(frame, b, goal, cells, xz, d)
+        if x is None:
+            continue
+        dv = np.linalg.norm(x["vis_xz"] - goal, axis=1)
+        v = x["vis_xz"][dv.argmin()] - goal
+        if dv.min() <= CLOSE_M and float(v @ head) > abs(float(v @ right)):
+            return {"type": "wall", "relation": "in front of", "anchor": {**x, "kind": "wall"}}
+    return None
+
+
+def _stop_d3_on(frame, route_xz, goal, head, right, blobs, low=frozenset(), clear_low_cells=False):
+    """stop_d3's order (object relation -> place -> wall ahead) with the blobs in `low` as furniture and, with
+    clear_low_cells, the cells classed low within LOW_CLEAR_M of the goal cleared from the place grid (Addendum A2)."""
+    rel = object_relation(frame, goal, head, right, blobs, low)
+    if rel is not None:
+        return rel
+    grid = _place_grid(frame, low)
+    if clear_low_cells:
+        grid = _clear_low_cells(frame, grid, goal)
+    p = place_at(grid, route_xz)
+    if p is None:
+        return wall_ahead(frame, goal, head, right, blobs, low)
+    return {"type": "place", "relation": None, "place": p["place"], "measures": p["measures"], "anchor": None}
+
+
+def stop_d3(frame, route_xz):
+    """Where a visible route ends (d3): object_relation, else the place (stop_places.place_at on _place_grid), else a
+    wall ahead (wall_ahead, Addendum A1 backup), else None (the route is dropped as "no_stop_place").
+    Addendum A2: a "by the wall" stop is looked at again with low furniture as furniture (low_furniture, and the low
+    cells near the goal cleared); that stop replaces it, and when there is none "by the wall" stays."""
+    rg = route_geometry(route_xz)
+    goal = rg["pts"][-1]
+    back = rg["pts"][max(0, len(rg["pts"]) - 11)]          # ~0.5 m before the goal, as stop_phrase
+    head = goal - back
+    head /= max(np.linalg.norm(head), 1e-9)
+    right = np.array([-head[1], head[0]])
+    blobs = _blobs_near(frame, goal, CLOSE_M)
+    stop = _stop_d3_on(frame, route_xz, goal, head, right, blobs)
+    if stop is None or stop.get("place") != "wall":
+        return stop
+    again = _stop_d3_on(frame, route_xz, goal, head, right, blobs, low_furniture(frame, goal), clear_low_cells=True)
+    return again if again is not None else stop
+
+
+# --- d3 Addendum A2: furniture is not "the wall" (a height class per map cell from the depth image) ----------------
+HEIGHT_LOW_M = (0.1, 0.25, 0.4, 0.55, 0.7, 0.85)   # a cell's own depth is read at these heights above the floor
+HEIGHT_HIGH_M = (1.5, 1.7, 1.9)                    # ... and compared with what the image shows at these
+OWN_NEARER_M, OWN_FARTHER_M = 1.0, 0.5    # a low reading is the cell's own within [fwd - 1.0, fwd + 0.5] m
+SEEN_OVER_M = 0.5                         # a high reading this much farther than the cell's own depth: seen over it
+SAME_SURFACE_M = 0.3                      # a high reading this close to it: the same upright surface (a wall)
+HEIGHT_UNKNOWN, HEIGHT_LOW, HEIGHT_TALL = 0, 1, 2
+LOW_NEAR_M = 2.0          # a wall-sized blob's visible cells this close to the goal decide whether it is low furniture
+LOW_MIN_CELLS = 8         # ... at least this many of them with a height class
+LOW_SHARE = 0.6           # ... and at least this share of those low
+LOW_CLEAR_M = 3.5         # cells classed low this close to the goal are cleared from the place grid
+
+
+def _image_depth(frame, xz, height):
+    """(metres, fwd): planar metres the depth image shows at the pixel of each xz at `height` (inf where the image has
+    no surface; NaN outside the image or within NEAR_CAMERA_M) and each point's forward distance."""
+    uv, fwd = frame.cam.uv(xz, height)
+    ok = (fwd > NEAR_CAMERA_M) & (uv[:, 0] >= 0) & (uv[:, 0] < 1) & (uv[:, 1] >= 0) & (uv[:, 1] < 1)
+    uv = np.where(ok[:, None], uv, 0.0)
+    H, W = frame.depth.shape
+    px = frame.depth[np.clip((uv[:, 1] * H).astype(int), 0, H - 1), np.clip((uv[:, 0] * W).astype(int), 0, W - 1)]
+    metres = np.where(px > 0, frame.depth_fit[0] * px + frame.depth_fit[1], np.inf)
+    return np.where(ok, metres, np.nan), fwd
+
+
+def cell_heights(frame, xz):
+    """HEIGHT_LOW / HEIGHT_TALL / HEIGHT_UNKNOWN for each map cell (world xz), from the depth profile in the cell's own
+    image column (relative, so the depth fit's bias at range does not matter). The cell's own depth is the median of
+    the readings at HEIGHT_LOW_M that fall within [fwd - OWN_NEARER_M, fwd + OWN_FARTHER_M] (legs seen through and
+    nearer things are left out); at HEIGHT_HIGH_M a wall shows that depth again (within SAME_SURFACE_M) and low
+    furniture shows something farther (by more than SEEN_OVER_M). With >= 2 usable high readings: low or tall when
+    more than half say so, else unknown. All unknown without a depth image, a fit, or with a fit residual above
+    DEPTH_FIT_MAX_RESID_M."""
+    xz = np.asarray(xz, float).reshape(-1, 2)
+    out = np.full(len(xz), HEIGHT_UNKNOWN)
+    fit = frame.depth_fit
+    if frame.depth is None or fit is None or fit[2] > DEPTH_FIT_MAX_RESID_M or not len(xz):
+        return out
+    own = []
+    for h in HEIGHT_LOW_M:
+        d, fwd = _image_depth(frame, xz, h)
+        own.append(np.where((d >= fwd - OWN_NEARER_M) & (d <= fwd + OWN_FARTHER_M), d, np.nan))
+    own = np.array(own)
+    has = np.isfinite(own).any(0)
+    d_own = np.full(len(xz), np.nan)
+    d_own[has] = np.nanmedian(own[:, has], axis=0)
+    n, over, same = (np.zeros(len(xz), int) for _ in range(3))
+    for h in HEIGHT_HIGH_M:
+        d, _ = _image_depth(frame, xz, h)
+        k = has & ~np.isnan(d)
+        n += k
+        over += k & (d > d_own + SEEN_OVER_M)
+        same += k & (np.abs(d - d_own) <= SAME_SURFACE_M)
+    out[(n >= 2) & (over * 2 > n)] = HEIGHT_LOW
+    out[(n >= 2) & (same * 2 > n)] = HEIGHT_TALL
+    return out
+
+
+def low_furniture(frame, goal):
+    """The wall-sized blobs that are low furniture: >= LOW_MIN_CELLS of their visible cells within LOW_NEAR_M of the
+    goal have a height class (cell_heights) and >= LOW_SHARE of those are low."""
+    out = set()
+    for b, cells, xz, d in _blobs_near(frame, goal, LOW_NEAR_M):
+        if not _wall_like(xz):
+            continue
+        c = cell_heights(frame, visible_cells(frame, cells[d <= LOW_NEAR_M], b))
+        known = int((c != HEIGHT_UNKNOWN).sum())
+        if known >= LOW_MIN_CELLS and (c == HEIGHT_LOW).sum() >= LOW_SHARE * known:
+            out.add(b)
+    return frozenset(out)
+
+
+def _clear_low_cells(frame, grid, goal):
+    """`grid` with its occupied cells within LOW_CLEAR_M of the goal that are classed low set to FREE."""
+    rc = np.argwhere(grid.s == OCC)
+    xz = frame.grid.xz(rc)
+    rc = rc[np.linalg.norm(xz - goal, axis=1) <= LOW_CLEAR_M]
+    low = rc[cell_heights(frame, frame.grid.xz(rc)) == HEIGHT_LOW]
+    s = grid.s.copy()
+    s[low[:, 0], low[:, 1]] = FREE
+    return Grid(s, grid.mpp, grid.x0, grid.z0)
+
+
+def stop_kind(stop):
+    """"object:<relation>" / "wall:in front of" / "place:<place>" for a d3 visible stop, else None (d2 stops, behind
+    and turn endings)."""
+    if not stop:
+        return None
+    if stop.get("type") in ("object", "wall"):
+        return f"{stop['type']}:{stop['relation']}"
+    if stop.get("type") == "place":
+        return f"place:{stop['place']}"
+    return None
+
+
 # --- turns and spur routes (d2, docs/superpowers/specs/2026-10-13-turn-events-d2-design.md) -----------------
 TURN_MIN_DEG = 45.0          # a route that ENDS this far off its start->goal line has turned
 HEADING_CHORD_M = 0.5        # heading at s = direction of the chord from s - 0.25 m to s + 0.25 m
@@ -825,8 +1034,8 @@ def _gap_key(blobs, gap_xz):
     return "gap" + "-".join(str(b) for b in sorted(blobs))
 
 
-def describe_route(sample_dir, candidate_index):
-    """The events + stop phrase for one candidate route of one frame (see module docstring)."""
+def describe_route(sample_dir, candidate_index, stops="d2"):
+    """The events + stop phrase for one candidate route of one frame (see module docstring); `stops` as describe_xz."""
     sd = Path(sample_dir)
     if not (sd / "state.npz").exists():
         return _none("no_state")
@@ -837,15 +1046,19 @@ def describe_route(sample_dir, candidate_index):
     route = cm[candidate_index]["polyline_xz"]
     flags = fpv_hidden_flags(sd, candidate_index)
     tail = hidden_tail_m(flags, FPV_STEP_M) if flags else None
-    return describe_xz(meta, frame, route, turn=detect_turn(route), hidden_tail=tail)
+    return describe_xz(meta, frame, route, turn=detect_turn(route), hidden_tail=tail, stops=stops)
 
 
-def describe_xz(meta, frame, route, turn=None, hidden_tail=None):
+def describe_xz(meta, frame, route, turn=None, hidden_tail=None, stops="d2"):
     """The events + stop phrase for any route polyline (world xz) on a loaded frame (steering pairs describe
     routes that are not candidates of the frame). `turn` is the FULL route's turn (detect_turn): a route
     shorter than its end_arc_m (a steering cut that stops before or inside the turn) gets no turn event, and
     without `turn` none is emitted. A route that doubles back on itself is dropped as "spur".
-    `hidden_tail` (d2 T2) is the length of the route's final hidden stretch (hidden_tail_m), None when its end is in view: a hidden end ends with its turn (when the turn comes after the disappearance) or "behind" the blob it disappears behind (behind_anchor; none -> "no_behind_anchor"), and obstacle events after the disappearance are dropped."""
+    `hidden_tail` (d2 T2) is the length of the route's final hidden stretch (hidden_tail_m), None when its end is in view: a hidden end ends with its turn (when the turn comes after the disappearance) or "behind" the blob it disappears behind (behind_anchor; none -> "no_behind_anchor"), and obstacle events after the disappearance are dropped.
+    `stops` picks the rule for an end in view: "d2" stop_phrase (distance amounts), "d3" stop_d3 (an object relation
+    or a place; none -> "no_stop_place"). Hidden ends are the same for both."""
+    if stops not in ("d2", "d3"):
+        raise ValueError(f"stops must be 'd2' or 'd3', got {stops!r}")
     route = np.asarray(route, float)
     if has_spur(route):
         return _none("spur")
@@ -876,6 +1089,10 @@ def describe_xz(meta, frame, route, turn=None, hidden_tail=None):
             return _none("no_behind_anchor", n_events=len(events) + (turn is not None))
         x["kind"] = "wall" if _wall_like(_blob_cells(frame)[x["blob"]][1]) else "object"
         stop = {"type": "behind", "relation": "behind", "anchor": x}
+    elif stops == "d3":
+        stop = stop_d3(frame, route)
+        if stop is None:
+            return _none("no_stop_place", n_events=len(events) + (turn is not None))
     else:
         stop = stop_phrase(frame, route, events, cands)      # obstacle events only: "just after" / "past" name objects
         if stop is None:
@@ -923,6 +1140,10 @@ def describe_xz(meta, frame, route, turn=None, hidden_tail=None):
         st["disappear_arc_m"] = round(dis, 2)
     if stop.get("reanchored"):
         st["reanchored"] = True
+    if stop["type"] in ("object", "place", "wall"):      # d3: the place (None for an object stop) and its measures
+        st["place"] = stop.get("place")
+        if stop.get("measures"):
+            st["measures"] = stop["measures"]
     if stop["anchor"] is not None:                       # after every event row (see above)
         a = stop["anchor"]
         st["object"] = add(a.get("key", f"b{a['blob']}"), a.get("kind", "object"), a["outline"], a["vis_xz"])
@@ -933,18 +1154,21 @@ def describe_xz(meta, frame, route, turn=None, hidden_tail=None):
 
 
 EVENTS_SCHEMA = "d2-endings"  # stamped into events_meta.json by prepare_habitat_instr.py events (d2 T2)
+EVENTS_SCHEMA_D3 = "d3-stops"  # events --stops d3 (visible stops are object relations or places)
+EVENTS_SCHEMAS = (EVENTS_SCHEMA, EVENTS_SCHEMA_D3)
 
 
 def check_events_schema(events_path):
-    """SystemExit unless the events_meta.json next to `events_path` carries EVENTS_SCHEMA: events
+    """SystemExit unless the events_meta.json next to `events_path` carries one of EVENTS_SCHEMAS: events
     rows from before Addendum A have distance stops without amounts and no wall / between events."""
     mp = Path(events_path).parent / "events_meta.json"
     try:
         schema = json.loads(mp.read_text()).get("schema")
     except (OSError, ValueError):
         schema = None
-    if schema != EVENTS_SCHEMA:
-        raise SystemExit(f"events files are not {EVENTS_SCHEMA!r} — rerun prepare_habitat_instr.py events ({mp}: schema {schema!r})")
+    if schema not in EVENTS_SCHEMAS:
+        raise SystemExit(f"events files are not one of {EVENTS_SCHEMAS!r} — rerun prepare_habitat_instr.py events "
+                         f"({mp}: schema {schema!r})")
 
 
 def collect_objects(rows):
